@@ -72,32 +72,6 @@ node_set_elog_name (vlib_main_t * vm, uword node_index)
   n->name_elog_string = elog_string (&vm->elog_main, "%v%c", n->name, 0);
 }
 
-static void
-vlib_worker_thread_node_rename (u32 node_index)
-{
-  int i;
-  vlib_main_t *vm;
-  vlib_node_t *n;
-
-  if (vec_len (vlib_mains) == 1)
-    return;
-
-  vm = vlib_mains[0];
-  n = vlib_get_node (vm, node_index);
-
-  ASSERT (vlib_get_thread_index () == 0);
-  ASSERT (*vlib_worker_threads->wait_at_barrier == 1);
-
-  for (i = 1; i < vec_len (vlib_mains); i++)
-    {
-      vlib_main_t *vm_worker = vlib_mains[i];
-      vlib_node_t *n_worker = vlib_get_node (vm_worker, node_index);
-
-      n_worker->name = n->name;
-      n_worker->name_elog_string = n->name_elog_string;
-    }
-}
-
 void
 vlib_node_rename (vlib_main_t * vm, u32 node_index, char *fmt, ...)
 {
@@ -115,7 +89,7 @@ vlib_node_rename (vlib_main_t * vm, u32 node_index, char *fmt, ...)
   node_set_elog_name (vm, node_index);
 
   /* Propagate the change to all worker threads */
-  vlib_worker_thread_node_rename (node_index);
+  vlib_worker_thread_node_runtime_update ();
 }
 
 static void
@@ -433,35 +407,36 @@ register_node (vlib_main_t * vm, vlib_node_registration_t * r)
     if (n->type == VLIB_NODE_TYPE_PROCESS)
       {
 	vlib_process_t *p;
-	uword log2_n_stack_bytes;
+	void *map;
+	uword log2_n_stack_bytes, stack_bytes;
+	int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
 
-	log2_n_stack_bytes = clib_max (r->process_log2_n_stack_bytes, 15);
+	log2_n_stack_bytes = clib_max (r->process_log2_n_stack_bytes,
+				       VLIB_PROCESS_LOG2_STACK_SIZE);
+	log2_n_stack_bytes = clib_max (log2_n_stack_bytes,
+				       min_log2 (page_size));
 
-#ifdef CLIB_UNIX
-	/*
-	 * Bump the stack size if running over a kernel with a large page size,
-	 * and the stack isn't any too big to begin with. Otherwise, we'll
-	 * trip over the stack guard page for sure.
-	 */
-	if ((page_size > (4 << 10)) && log2_n_stack_bytes < 19)
-	  {
-	    if ((1 << log2_n_stack_bytes) <= page_size)
-	      log2_n_stack_bytes = min_log2 (page_size) + 1;
-	    else
-	      log2_n_stack_bytes++;
-	  }
-#endif
-
-	p = clib_mem_alloc_aligned_at_offset
-	  (sizeof (p[0]) + (1 << log2_n_stack_bytes),
-	   STACK_ALIGN, STRUCT_OFFSET_OF (vlib_process_t, stack),
-	   0 /* no, don't call os_out_of_memory */ );
-	if (p == 0)
-	  clib_panic ("failed to allocate process stack (%d bytes)",
-		      1 << log2_n_stack_bytes);
-
+	p = clib_mem_alloc_aligned (sizeof (p[0]), CLIB_CACHE_LINE_BYTES);
 	clib_memset (p, 0, sizeof (p[0]));
 	p->log2_n_stack_bytes = log2_n_stack_bytes;
+
+	stack_bytes = 1ULL << log2_n_stack_bytes;
+	/* map stack size + 2 extra guard pages */
+	map = mmap (0, stack_bytes + page_size, PROT_READ | PROT_WRITE,
+		    mmap_flags, -1, 0);
+
+	if (map == MAP_FAILED)
+	  clib_panic ("failed to allocate process stack (%d bytes)",
+		      stack_bytes);
+
+	/* skip the guard page */
+	p->stack = map + page_size;
+
+	mmap_flags |= MAP_FIXED;
+	map = mmap (map, page_size, PROT_NONE, mmap_flags, -1, 0);
+
+	if (map == MAP_FAILED)
+	  clib_unix_warning ("failed to create stack guard page");
 
 	/* Process node's runtime index is really index into process
 	   pointer vector. */
@@ -475,16 +450,6 @@ register_node (vlib_main_t * vm, vlib_node_registration_t * r)
 
 	/* Node runtime is stored inside of process. */
 	rt = &p->node_runtime;
-
-#ifdef CLIB_UNIX
-	/*
-	 * Disallow writes to the bottom page of the stack, to
-	 * catch stack overflows.
-	 */
-	if (mprotect (p->stack, page_size, PROT_READ) < 0)
-	  clib_unix_warning ("process stack");
-#endif
-
       }
     else
       {

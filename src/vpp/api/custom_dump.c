@@ -1385,7 +1385,7 @@ static void *vl_api_add_node_next_t_print
 
   s = format (0, "SCRIPT: add_node_next ");
 
-  s = format (0, "node %s next %s ", mp->node_name, mp->next_name);
+  s = format (s, "node %s next %s ", mp->node_name, mp->next_name);
 
   FINISH;
 }
@@ -1785,7 +1785,8 @@ static void *vl_api_sw_interface_vhost_user_dump_t_print
   u8 *s;
 
   s = format (0, "SCRIPT: sw_interface_vhost_user_dump ");
-  s = format (s, "sw_if_index %d ", (mp->sw_if_index));
+  if (mp->sw_if_index != ~0)
+    s = format (s, "sw_if_index %d ", (mp->sw_if_index));
 
   FINISH;
 }
@@ -2520,9 +2521,9 @@ static void *vl_api_pg_create_interface_t_print
   u8 *s;
 
   s = format (0, "SCRIPT: pg_create_interface ");
-  s = format (0, "if_id %d", (mp->interface_id));
-  s = format (0, "gso-enabled %u", mp->gso_enabled);
-  s = format (0, "gso-size %u", (mp->gso_size));
+  s = format (s, "if_id %d ", (mp->interface_id));
+  s = format (s, "gso-enabled %u ", mp->gso_enabled);
+  s = format (s, "gso-size %u", (mp->gso_size));
 
   FINISH;
 }
@@ -2533,8 +2534,8 @@ static void *vl_api_pg_capture_t_print
   u8 *s;
 
   s = format (0, "SCRIPT: pg_capture ");
-  s = format (0, "if_id %d ", (mp->interface_id));
-  s = format (0, "pcap %s", mp->pcap_file_name);
+  s = format (s, "if_id %d ", (mp->interface_id));
+  s = format (s, "pcap %s", mp->pcap_file_name);
   if (mp->count != ~0)
     s = format (s, "count %d ", (mp->count));
   if (!mp->is_enabled)
@@ -2650,20 +2651,31 @@ static void *vl_api_lisp_pitr_set_locator_set_t_print
 }
 
 static u8 *
+format_nsh_address_vat (u8 * s, va_list * args)
+{
+  nsh_t *a = va_arg (*args, nsh_t *);
+  return format (s, "SPI:%d SI:%d", clib_net_to_host_u32 (a->spi), a->si);
+}
+
+static u8 *
 format_lisp_flat_eid (u8 * s, va_list * args)
 {
-  u32 type = va_arg (*args, u32);
-  u8 *eid = va_arg (*args, u8 *);
-  u32 eid_len = va_arg (*args, u32);
+  vl_api_eid_t *eid = va_arg (*args, vl_api_eid_t *);
 
-  switch (type)
+  switch (eid->type)
     {
-    case 0:
-      return format (s, "%U/%d", format_ip4_address, eid, eid_len);
-    case 1:
-      return format (s, "%U/%d", format_ip6_address, eid, eid_len);
-    case 3:
-      return format (s, "%U", format_ethernet_address, eid);
+    case EID_TYPE_API_PREFIX:
+      if (eid->address.prefix.address.af)
+	return format (s, "%U/%d", format_ip6_address,
+		       eid->address.prefix.address.un.ip6,
+		       eid->address.prefix.len);
+      return format (s, "%U/%d", format_ip4_address,
+		     eid->address.prefix.address.un.ip4,
+		     eid->address.prefix.len);
+    case EID_TYPE_API_MAC:
+      return format (s, "%U", format_ethernet_address, eid->address.mac);
+    case EID_TYPE_API_NSH:
+      return format (s, "%U", format_nsh_address_vat, eid->address.nsh);
     }
   return 0;
 }
@@ -2682,11 +2694,11 @@ static void *vl_api_lisp_add_del_remote_mapping_t_print
   s = format (s, "%s ", mp->is_add ? "add" : "del");
   s = format (s, "vni %d ", (mp->vni));
 
-  s = format (s, "eid %U ", format_lisp_flat_eid, mp->deid);
+  s = format (s, "eid %U ", format_lisp_flat_eid, &mp->deid);
 
   if (mp->is_src_dst)
     {
-      s = format (s, "seid %U ", format_lisp_flat_eid, mp->seid);
+      s = format (s, "seid %U ", format_lisp_flat_eid, &mp->seid);
     }
   rloc_num = (mp->rloc_num);
 
@@ -2706,7 +2718,8 @@ static void *vl_api_lisp_add_del_adjacency_t_print
   s = format (s, "%s ", mp->is_add ? "add" : "del");
   s = format (s, "vni %d ", (mp->vni));
   s = format (s, "reid %U leid %U ",
-	      format_lisp_flat_eid, mp->reid, format_lisp_flat_eid, mp->leid);
+	      format_lisp_flat_eid, &mp->reid, format_lisp_flat_eid,
+	      &mp->leid);
 
   FINISH;
 }
@@ -2752,7 +2765,7 @@ static void *vl_api_lisp_add_del_local_eid_t_print
     s = format (s, "del ");
 
   s = format (s, "vni %d ", (mp->vni));
-  s = format (s, "eid %U ", format_lisp_flat_eid, mp->eid);
+  s = format (s, "eid %U ", format_lisp_flat_eid, &mp->eid);
   s = format (s, "locator-set %s ", mp->locator_set_name);
   if (mp->key.id)
     {
@@ -2885,7 +2898,7 @@ static void *vl_api_lisp_eid_table_dump_t_print
   if (mp->eid_set)
     {
       s = format (s, "vni %d ", (mp->vni));
-      s = format (s, "eid %U ", format_lisp_flat_eid, mp->eid);
+      s = format (s, "eid %U ", format_lisp_flat_eid, &mp->eid);
       switch (mp->filter)
 	{
 	case 1:

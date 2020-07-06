@@ -179,7 +179,6 @@ tap_create_if (vlib_main_t * vm, tap_create_if_args_t * args)
     {
       vif->type = VIRTIO_IF_TYPE_TUN;
       ifr.ifr_flags |= IFF_TUN;
-      args->tap_flags &= ~(TAP_FLAG_GSO | TAP_FLAG_CSUM_OFFLOAD);
     }
   else
     {
@@ -457,16 +456,17 @@ tap_create_if (vlib_main_t * vm, tap_create_if_args_t * args)
 	  args->rv = VNET_API_ERROR_NETLINK_ERROR;
 	  goto error;
 	}
-    }
 
-  if (args->host_bridge)
-    {
-      args->error = vnet_netlink_set_link_master (vif->ifindex,
-						  (char *) args->host_bridge);
-      if (args->error)
+      if (args->host_bridge)
 	{
-	  args->rv = VNET_API_ERROR_NETLINK_ERROR;
-	  goto error;
+	  args->error = vnet_netlink_set_link_master (vif->ifindex,
+						      (char *)
+						      args->host_bridge);
+	  if (args->error)
+	    {
+	      args->rv = VNET_API_ERROR_NETLINK_ERROR;
+	      goto error;
+	    }
 	}
     }
 
@@ -666,11 +666,12 @@ tap_create_if (vlib_main_t * vm, tap_create_if_args_t * args)
 	ethernet_mac_address_generate (args->mac_addr.bytes);
 
       clib_memcpy (vif->mac_addr, args->mac_addr.bytes, 6);
+      vif->host_bridge = format (0, "%s%c", args->host_bridge, 0);
     }
   vif->host_if_name = format (0, "%s%c", host_if_name, 0);
   vif->net_ns = format (0, "%s%c", args->host_namespace, 0);
-  vif->host_bridge = format (0, "%s%c", args->host_bridge, 0);
   vif->host_mtu_size = args->host_mtu_size;
+  vif->tap_flags = args->tap_flags;
   clib_memcpy (vif->host_mac_addr, args->host_mac_addr.bytes, 6);
   vif->host_ip4_prefix_len = args->host_ip4_prefix_len;
   vif->host_ip6_prefix_len = args->host_ip6_prefix_len;
@@ -808,9 +809,6 @@ tap_csum_offload_enable_disable (vlib_main_t * vm, u32 sw_if_index,
 
   vif = pool_elt_at_index (mm->interfaces, hw->dev_instance);
 
-  if (vif->type == VIRTIO_IF_TYPE_TUN)
-    return VNET_API_ERROR_UNIMPLEMENTED;
-
   const unsigned int csum_offload_on = TUN_F_CSUM;
   const unsigned int csum_offload_off = 0;
   unsigned int offload = enable_disable ? csum_offload_on : csum_offload_off;
@@ -868,9 +866,6 @@ tap_gso_enable_disable (vlib_main_t * vm, u32 sw_if_index, int enable_disable)
 
   vif = pool_elt_at_index (mm->interfaces, hw->dev_instance);
 
-  if (vif->type == VIRTIO_IF_TYPE_TUN)
-    return VNET_API_ERROR_UNIMPLEMENTED;
-
   const unsigned int gso_on = TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6;
   const unsigned int gso_off = 0;
   unsigned int offload = enable_disable ? gso_on : gso_off;
@@ -918,7 +913,8 @@ tap_dump_ifs (tap_interface_details_t ** out_tapids)
 
   /* *INDENT-OFF* */
   pool_foreach (vif, mm->interfaces,
-    if (vif->type != VIRTIO_IF_TYPE_TAP)
+    if ((vif->type != VIRTIO_IF_TYPE_TAP)
+      && (vif->type != VIRTIO_IF_TYPE_TUN))
       continue;
     vec_add2(r_tapids, tapid, 1);
     clib_memset (tapid, 0, sizeof (*tapid));
@@ -932,6 +928,7 @@ tap_dump_ifs (tap_interface_details_t ** out_tapids)
     tapid->rx_ring_sz = vring->size;
     vring = vec_elt_at_index (vif->txq_vrings, TX_QUEUE_ACCESS(0));
     tapid->tx_ring_sz = vring->size;
+    tapid->tap_flags = vif->tap_flags;
     clib_memcpy(&tapid->host_mac_addr, vif->host_mac_addr, 6);
     if (vif->host_if_name)
       {

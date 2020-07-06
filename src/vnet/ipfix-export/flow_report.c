@@ -500,7 +500,8 @@ set_ipfix_exporter_command_fn (vlib_main_t * vm,
     {
       if (unformat (input, "collector %U", unformat_ip4_address, &collector))
 	;
-      else if (unformat (input, "port %u", &collector_port))
+      else if (unformat (input, "port %U", unformat_udp_port,
+			 &collector_port))
 	;
       else if (unformat (input, "src %U", unformat_ip4_address, &src))
 	;
@@ -569,7 +570,7 @@ VLIB_CLI_COMMAND (set_ipfix_exporter_command, static) = {
                   "collector <ip4-address> [port <port>] "
                   "src <ip4-address> [fib-id <fib-id>] "
                   "[path-mtu <path-mtu>] "
-                  "[template-interval <template-interval>]",
+                  "[template-interval <template-interval>] "
                   "[udp-checksum]",
     .function = set_ipfix_exporter_command_fn,
 };

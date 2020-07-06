@@ -33,6 +33,8 @@
 #include <vlibapi/api.h>
 #include <vlib/log.h>
 #include <vppinfra/bihash_16_8.h>
+#include <nat/lib/lib.h>
+#include <nat/lib/inlines.h>
 
 /* default session timeouts */
 #define SNAT_UDP_TIMEOUT 300
@@ -50,35 +52,21 @@ typedef enum
 {
   NAT_NEXT_DROP,
   NAT_NEXT_ICMP_ERROR,
-  NAT_NEXT_IN2OUT_PRE,
-  NAT_NEXT_OUT2IN_PRE,
   NAT_NEXT_IN2OUT_ED_FAST_PATH,
   NAT_NEXT_IN2OUT_ED_SLOW_PATH,
   NAT_NEXT_IN2OUT_ED_OUTPUT_SLOW_PATH,
   NAT_NEXT_OUT2IN_ED_FAST_PATH,
   NAT_NEXT_OUT2IN_ED_SLOW_PATH,
+  NAT_NEXT_IN2OUT_CLASSIFY,
+  NAT_NEXT_OUT2IN_CLASSIFY,
   NAT_N_NEXT,
 } nat_next_t;
 
 typedef struct
 {
   u32 next_index;
+  u32 arc_next_index;
 } nat_pre_trace_t;
-
-/* session key (4-tuple) */
-typedef struct
-{
-  union
-  {
-    struct
-    {
-      ip4_address_t addr;
-      u16 port;
-      u16 protocol:3, fib_index:13;
-    };
-    u64 as_u64;
-  };
-} snat_session_key_t;
 
 /* deterministic session outside key */
 typedef struct
@@ -140,21 +128,6 @@ typedef enum
 #undef _
 } nat_addr_and_port_alloc_alg_t;
 
-
-/* Supported L4 protocols */
-#define foreach_snat_protocol \
-  _(UDP, 0, udp, "udp")       \
-  _(TCP, 1, tcp, "tcp")       \
-  _(ICMP, 2, icmp, "icmp")
-
-typedef enum
-{
-#define _(N, i, n, s) SNAT_PROTOCOL_##N = i,
-  foreach_snat_protocol
-#undef _
-} snat_protocol_t;
-
-
 /* Session state */
 #define foreach_snat_session_state          \
   _(0, UNKNOWN, "unknown")                 \
@@ -181,18 +154,14 @@ _(IN2OUT_PACKETS, "good in2out packets processed")      \
 _(OUT_OF_PORTS, "out of ports")                         \
 _(BAD_ICMP_TYPE, "unsupported ICMP type")               \
 _(MAX_SESSIONS_EXCEEDED, "maximum sessions exceeded")   \
-_(MAX_USER_SESS_EXCEEDED, "max user sessions exceeded") \
 _(DROP_FRAGMENT, "drop fragment")                       \
-_(CANNOT_CREATE_USER, "cannot create NAT user")         \
 _(NON_SYN, "non-SYN packet try to create session")      \
 _(TCP_PACKETS, "TCP packets")                           \
 _(TCP_CLOSED, "drops due to TCP in transitory timeout") \
 _(UDP_PACKETS, "UDP packets")                           \
 _(ICMP_PACKETS, "ICMP packets")                         \
 _(OTHER_PACKETS, "other protocol packets")              \
-_(FRAGMENTS, "fragments")                               \
-_(CACHED_FRAGMENTS, "cached fragments")                 \
-_(PROCESSED_FRAGMENTS, "processed fragments")
+_(FRAGMENTS, "fragments")
 
 typedef enum
 {
@@ -218,9 +187,7 @@ _(TCP_CLOSED, "drops due to TCP in transitory timeout") \
 _(UDP_PACKETS, "UDP packets")                           \
 _(ICMP_PACKETS, "ICMP packets")                         \
 _(OTHER_PACKETS, "other protocol packets")              \
-_(FRAGMENTS, "fragments")                               \
-_(CACHED_FRAGMENTS, "cached fragments")                 \
-_(PROCESSED_FRAGMENTS, "processed fragments")
+_(FRAGMENTS, "fragments")
 
 typedef enum
 {
@@ -263,11 +230,23 @@ typedef enum
 /* *INDENT-OFF* */
 typedef CLIB_PACKED(struct
 {
-  /* Outside network key */
-  snat_session_key_t out2in;
+  /* Outside network tuple */
+  struct
+  {
+    ip4_address_t addr;
+    u32 fib_index;
+    u16 port;
+  } out2in;
 
-  /* Inside network key */
-  snat_session_key_t in2out;
+  /* Inside network tuple */
+  struct
+  {
+    ip4_address_t addr;
+    u32 fib_index;
+    u16 port;
+  } in2out;
+
+  nat_protocol_t nat_proto;
 
   /* Flags */
   u32 flags;
@@ -276,8 +255,10 @@ typedef CLIB_PACKED(struct
   u32 per_user_index;
   u32 per_user_list_head_index;
 
+  /* head of LRU list in which this session is tracked */
+  u32 lru_head_index;
   /* index in global LRU list */
-  u32 global_lru_index;
+  u32 lru_index;
   f64 last_lru_update;
 
   /* Last heard timer */
@@ -302,7 +283,7 @@ typedef CLIB_PACKED(struct
   u8 state;
   u32 i2o_fin_seq;
   u32 o2i_fin_seq;
-  u32 tcp_close_timestamp;
+  u64 tcp_closed_timestamp;
 
   /* user index */
   u32 user_index;
@@ -328,7 +309,7 @@ typedef struct
   u16 busy_##n##_ports; \
   u16 * busy_##n##_ports_per_thread; \
   u32 busy_##n##_port_refcounts[65535];
-  foreach_snat_protocol
+  foreach_nat_protocol
 #undef _
 /* *INDENT-ON* */
 } snat_address_t;
@@ -419,7 +400,7 @@ typedef struct
   u32 vrf_id;
   u32 fib_index;
   /* protocol */
-  snat_protocol_t proto;
+  nat_protocol_t proto;
   /* 0 = disabled, otherwise client IP affinity sticky time in seconds */
   u32 affinity;
   /* worker threads used by backends/local host */
@@ -447,7 +428,7 @@ typedef struct
   u16 e_port;
   u32 sw_if_index;
   u32 vrf_id;
-  snat_protocol_t proto;
+  nat_protocol_t proto;
   u32 flags;
   int addr_only;
   int twice_nat;
@@ -464,7 +445,6 @@ typedef struct
   clib_bihash_8_8_t in2out;
 
   /* Endpoint dependent sessions lookup tables */
-  clib_bihash_16_8_t out2in_ed;
   clib_bihash_16_8_t in2out_ed;
 
   /* Find-a-user => src address lookup */
@@ -480,8 +460,12 @@ typedef struct
   dlist_elt_t *list_pool;
 
   /* LRU session list - head is stale, tail is fresh */
-  dlist_elt_t *global_lru_pool;
-  u32 global_lru_head_index;
+  dlist_elt_t *lru_pool;
+  u32 tcp_trans_lru_head_index;
+  u32 tcp_estab_lru_head_index;
+  u32 udp_lru_head_index;
+  u32 icmp_lru_head_index;
+  u32 unk_proto_lru_head_index;
 
   /* NAT thread index */
   u32 snat_thread_index;
@@ -498,10 +482,13 @@ typedef u32 (snat_icmp_match_function_t) (struct snat_main_s * sm,
 					  vlib_node_runtime_t * node,
 					  u32 thread_index,
 					  vlib_buffer_t * b0,
-					  ip4_header_t * ip0, u8 * p_proto,
-					  snat_session_key_t * p_value,
-					  u8 * p_dont_translate, void *d,
-					  void *e);
+					  ip4_header_t * ip0,
+					  ip4_address_t * addr,
+					  u16 * port,
+					  u32 * fib_index,
+					  nat_protocol_t * proto,
+					  void *d, void *e,
+					  u8 * dont_translate);
 
 /* Return worker thread index for given packet */
 typedef u32 (snat_get_worker_in2out_function_t) (ip4_header_t * ip,
@@ -518,7 +505,9 @@ typedef int (nat_alloc_out_addr_and_port_function_t) (snat_address_t *
 						      addresses,
 						      u32 fib_index,
 						      u32 thread_index,
-						      snat_session_key_t * k,
+						      nat_protocol_t proto,
+						      ip4_address_t * addr,
+						      u16 * port,
 						      u16 port_per_thread,
 						      u32 snat_thread_index);
 
@@ -536,7 +525,6 @@ typedef struct snat_main_s
   snat_get_worker_in2out_function_t *worker_in2out_cb;
   snat_get_worker_out2in_function_t *worker_out2in_cb;
   u16 port_per_thread;
-  u32 num_snat_thread;
 
   /* Per thread data */
   snat_main_per_thread_data_t *per_thread_data;
@@ -549,6 +537,9 @@ typedef struct snat_main_s
 
   /* Static mapping pool */
   snat_static_mapping_t *static_mappings;
+
+  /* Endpoint-dependent out2in mappings */
+  clib_bihash_16_8_t out2in_ed;
 
   /* Interface pool */
   snat_interface_t *interfaces;
@@ -638,9 +629,9 @@ typedef struct snat_main_s
 
   u32 translation_buckets;
   uword translation_memory_size;
-  u32 max_translations;
+  u32 max_translations_per_thread;
   u32 *max_translations_per_fib;
-
+  u32 max_users_per_thread;
   u32 user_buckets;
   uword user_memory_size;
   u32 max_translations_per_user;
@@ -659,11 +650,11 @@ typedef struct snat_main_s
 
   /* TCP MSS clamping */
   u16 mss_clamping;
-  u16 mss_value_net;
 
   /* counters/gauges */
   vlib_simple_counter_main_t total_users;
   vlib_simple_counter_main_t total_sessions;
+  vlib_simple_counter_main_t user_limit_reached;;
 
   /* API message ID base */
   u16 msg_id_base;
@@ -722,10 +713,10 @@ format_function_t format_snat_session;
 format_function_t format_det_map_ses;
 format_function_t format_snat_key;
 format_function_t format_static_mapping_key;
-format_function_t format_snat_protocol;
+format_function_t format_nat_protocol;
 format_function_t format_nat_addr_and_port_alloc_alg;
 /* unformat functions */
-unformat_function_t unformat_snat_protocol;
+unformat_function_t unformat_nat_protocol;
 
 /** \brief Check if SNAT session is created from static mapping.
     @param s SNAT session
@@ -1014,48 +1005,54 @@ do                                                        \
 /* ICMP session match functions */
 u32 icmp_match_in2out_fast (snat_main_t * sm, vlib_node_runtime_t * node,
 			    u32 thread_index, vlib_buffer_t * b0,
-			    ip4_header_t * ip0, u8 * p_proto,
-			    snat_session_key_t * p_value,
-			    u8 * p_dont_translate, void *d, void *e);
+			    ip4_header_t * ip0, ip4_address_t * addr,
+			    u16 * port, u32 * fib_index,
+			    nat_protocol_t * proto, void *d, void *e,
+			    u8 * dont_translate);
 u32 icmp_match_in2out_slow (snat_main_t * sm, vlib_node_runtime_t * node,
 			    u32 thread_index, vlib_buffer_t * b0,
-			    ip4_header_t * ip0, u8 * p_proto,
-			    snat_session_key_t * p_value,
-			    u8 * p_dont_translate, void *d, void *e);
+			    ip4_header_t * ip0, ip4_address_t * addr,
+			    u16 * port, u32 * fib_index,
+			    nat_protocol_t * proto, void *d, void *e,
+			    u8 * dont_translate);
 u32 icmp_match_out2in_fast (snat_main_t * sm, vlib_node_runtime_t * node,
 			    u32 thread_index, vlib_buffer_t * b0,
-			    ip4_header_t * ip0, u8 * p_proto,
-			    snat_session_key_t * p_value,
-			    u8 * p_dont_translate, void *d, void *e);
+			    ip4_header_t * ip0, ip4_address_t * addr,
+			    u16 * port, u32 * fib_index,
+			    nat_protocol_t * proto, void *d, void *e,
+			    u8 * dont_translate);
 u32 icmp_match_out2in_slow (snat_main_t * sm, vlib_node_runtime_t * node,
 			    u32 thread_index, vlib_buffer_t * b0,
-			    ip4_header_t * ip0, u8 * p_proto,
-			    snat_session_key_t * p_value,
-			    u8 * p_dont_translate, void *d, void *e);
+			    ip4_header_t * ip0, ip4_address_t * addr,
+			    u16 * port, u32 * fib_index,
+			    nat_protocol_t * proto, void *d, void *e,
+			    u8 * dont_translate);
 
 /* ICMP deterministic NAT session match functions */
 u32 icmp_match_out2in_det (snat_main_t * sm, vlib_node_runtime_t * node,
 			   u32 thread_index, vlib_buffer_t * b0,
-			   ip4_header_t * ip0, u8 * p_proto,
-			   snat_session_key_t * p_value,
-			   u8 * p_dont_translate, void *d, void *e);
+			   ip4_header_t * ip0, ip4_address_t * addr,
+			   u16 * port, u32 * fib_index,
+			   nat_protocol_t * proto, void *d, void *e,
+			   u8 * dont_translate);
 u32 icmp_match_in2out_det (snat_main_t * sm, vlib_node_runtime_t * node,
 			   u32 thread_index, vlib_buffer_t * b0,
-			   ip4_header_t * ip0, u8 * p_proto,
-			   snat_session_key_t * p_value,
-			   u8 * p_dont_translate, void *d, void *e);
+			   ip4_header_t * ip0, ip4_address_t * addr,
+			   u16 * port, u32 * fib_index,
+			   nat_protocol_t * proto, void *d, void *e,
+			   u8 * dont_translate);
 
 /* ICMP endpoint-dependent session match functions */
 u32 icmp_match_out2in_ed (snat_main_t * sm, vlib_node_runtime_t * node,
 			  u32 thread_index, vlib_buffer_t * b0,
-			  ip4_header_t * ip0, u8 * p_proto,
-			  snat_session_key_t * p_value,
-			  u8 * p_dont_translate, void *d, void *e);
+			  ip4_header_t * ip0, ip4_address_t * addr,
+			  u16 * port, u32 * fib_index, nat_protocol_t * proto,
+			  void *d, void *e, u8 * dont_translate);
 u32 icmp_match_in2out_ed (snat_main_t * sm, vlib_node_runtime_t * node,
 			  u32 thread_index, vlib_buffer_t * b0,
-			  ip4_header_t * ip0, u8 * p_proto,
-			  snat_session_key_t * p_value,
-			  u8 * p_dont_translate, void *d, void *e);
+			  ip4_header_t * ip0, ip4_address_t * addr,
+			  u16 * port, u32 * fib_index, nat_protocol_t * proto,
+			  void *d, void *e, u8 * dont_translate);
 
 u32 icmp_in2out (snat_main_t * sm, vlib_buffer_t * b0, ip4_header_t * ip0,
 		 icmp46_header_t * icmp0, u32 sw_if_index0, u32 rx_fib_index0,
@@ -1075,9 +1072,11 @@ void nat_hairpinning_sm_unknown_proto (snat_main_t * sm, vlib_buffer_t * b,
 				       ip4_header_t * ip);
 void nat44_ed_hairpinning_unknown_proto (snat_main_t * sm, vlib_buffer_t * b,
 					 ip4_header_t * ip);
-int snat_hairpinning (snat_main_t * sm, vlib_buffer_t * b0,
+int snat_hairpinning (vlib_main_t * vm, vlib_node_runtime_t * node,
+		      snat_main_t * sm, vlib_buffer_t * b0,
 		      ip4_header_t * ip0, udp_header_t * udp0,
-		      tcp_header_t * tcp0, u32 proto0, int is_ed);
+		      tcp_header_t * tcp0, u32 proto0, int is_ed,
+		      int do_trace);
 
 /* Call back functions for clib_bihash_add_or_overwrite_stale */
 int nat44_i2o_ed_is_idle_session_cb (clib_bihash_kv_16_8_t * kv, void *arg);
@@ -1143,7 +1142,7 @@ void nat44_add_del_address_dpo (ip4_address_t addr, u8 is_add);
 int snat_add_static_mapping (ip4_address_t l_addr, ip4_address_t e_addr,
 			     u16 l_port, u16 e_port, u32 vrf_id,
 			     int addr_only, u32 sw_if_index,
-			     snat_protocol_t proto, int is_add,
+			     nat_protocol_t proto, int is_add,
 			     twice_nat_type_t twice_nat, u8 out2in_only,
 			     u8 * tag, u8 identity_nat);
 
@@ -1163,14 +1162,14 @@ int snat_add_static_mapping (ip4_address_t l_addr, ip4_address_t e_addr,
  * @return 0 on success, non-zero value otherwise
  */
 int nat44_add_del_lb_static_mapping (ip4_address_t e_addr, u16 e_port,
-				     snat_protocol_t proto,
+				     nat_protocol_t proto,
 				     nat44_lb_addr_port_t * locals, u8 is_add,
 				     twice_nat_type_t twice_nat,
 				     u8 out2in_only, u8 * tag, u32 affinity);
 
 int nat44_lb_static_mapping_add_del_local (ip4_address_t e_addr, u16 e_port,
 					   ip4_address_t l_addr, u16 l_port,
-					   snat_protocol_t proto, u32 vrf_id,
+					   nat_protocol_t proto, u32 vrf_id,
 					   u8 probability, u8 is_add);
 
 clib_error_t *snat_api_init (vlib_main_t * vm, snat_main_t * sm);
@@ -1231,7 +1230,7 @@ int snat_add_interface_address (snat_main_t * sm, u32 sw_if_index, int is_del,
  * @return 0 on success, non-zero value otherwise
  */
 int nat44_del_session (snat_main_t * sm, ip4_address_t * addr, u16 port,
-		       snat_protocol_t proto, u32 vrf_id, int is_in);
+		       nat_protocol_t proto, u32 vrf_id, int is_in);
 
 /**
  * @brief Delete NAT44 endpoint-dependent session
@@ -1294,6 +1293,8 @@ void nat44_db_init (snat_main_per_thread_data_t * tsm);
  */
 void nat44_db_free (snat_main_per_thread_data_t * tsm);
 
+void nat44_sessions_clear ();
+
 /**
  * @brief Find or create NAT user
  *
@@ -1323,18 +1324,6 @@ snat_session_t *nat_session_alloc_or_recycle (snat_main_t * sm,
 					      u32 thread_index, f64 now);
 
 /**
- * @brief Allocate NAT endpoint-dependent session
- *
- * @param sm           snat global configuration data
- * @param thread_index thread index
- * @param now          time now
- *
- * @return session data structure on success otherwise zero value
- */
-snat_session_t *nat_ed_session_alloc (snat_main_t * sm, u32 thread_index,
-				      f64 now);
-
-/**
  * @brief Set address and port assignment algorithm for MAP-E CE
  *
  * @param psid        Port Set Identifier value
@@ -1362,11 +1351,13 @@ void nat_set_alloc_addr_and_port_default (void);
  *
  * @param addresses    vector of outside addresses
  * @param thread_index thread index
- * @param k            address, port and protocol
+ * @param key          address, port and protocol
  */
-void snat_free_outside_address_and_port (snat_address_t * addresses,
-					 u32 thread_index,
-					 snat_session_key_t * k);
+void
+snat_free_outside_address_and_port (snat_address_t * addresses,
+				    u32 thread_index,
+				    ip4_address_t * addr,
+				    u16 port, nat_protocol_t protocol);
 
 /**
  * @brief Alloc outside address and port
@@ -1374,7 +1365,6 @@ void snat_free_outside_address_and_port (snat_address_t * addresses,
  * @param addresses         vector of outside addresses
  * @param fib_index         FIB table index
  * @param thread_index      thread index
- * @param k                 allocated address and port pair
  * @param port_per_thread   number of ports per thread
  * @param snat_thread_index NAT thread index
  *
@@ -1383,15 +1373,19 @@ void snat_free_outside_address_and_port (snat_address_t * addresses,
 int snat_alloc_outside_address_and_port (snat_address_t * addresses,
 					 u32 fib_index,
 					 u32 thread_index,
-					 snat_session_key_t * k,
+					 nat_protocol_t proto,
+					 ip4_address_t * addr,
+					 u16 * port,
 					 u16 port_per_thread,
 					 u32 snat_thread_index);
 
 /**
  * @brief Match NAT44 static mapping.
  *
- * @param match         address and port to match
- * @param mapping       external/local address and port of the matched mapping
+ * @param key           address and port to match
+ * @param addr          external/local address of the matched mapping
+ * @param port          port of the matched mapping
+ * @param fib_index     fib index of the matched mapping
  * @param by_external   if 0 match by local address otherwise match by external
  *                      address
  * @param is_addr_only  1 if matched mapping is address only
@@ -1402,8 +1396,13 @@ int snat_alloc_outside_address_and_port (snat_address_t * addresses,
  * @returns 0 if match found otherwise 1.
  */
 int snat_static_mapping_match (snat_main_t * sm,
-			       snat_session_key_t match,
-			       snat_session_key_t * mapping,
+			       ip4_address_t match_addr,
+			       u16 match_port,
+			       u32 match_fib_index,
+			       nat_protocol_t match_protocol,
+			       ip4_address_t * mapping_addr,
+			       u16 * mapping_port,
+			       u32 * mapping_fib_index,
 			       u8 by_external,
 			       u8 * is_addr_only,
 			       twice_nat_type_t * twice_nat,
@@ -1443,8 +1442,7 @@ typedef struct
   u16 src_port, dst_port;
 } tcp_udp_header_t;
 
-int nat_global_lru_free_one (snat_main_t * sm, int thread_index, f64 now);
-
+u8 *format_user_kvp (u8 * s, va_list * args);
 #endif /* __included_nat_h__ */
 /*
  * fd.io coding-style-patch-verification: ON

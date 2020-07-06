@@ -2901,7 +2901,7 @@ unformat_nsh_address (unformat_input_t * input, va_list * args)
   return unformat (input, "SPI:%d SI:%d", &nsh->spi, &nsh->si);
 }
 
-u8 *
+static u8 *
 format_nsh_address_vat (u8 * s, va_list * args)
 {
   nsh_t *a = va_arg (*args, nsh_t *);
@@ -2958,7 +2958,7 @@ vl_api_one_eid_table_details_t_handler (vl_api_one_eid_table_details_t * mp)
     s = format (0, "%d", clib_net_to_host_u32 (mp->locator_set_index));
 
   eid = format (0, "%U", format_lisp_eid_vat,
-		mp->deid, mp->seid, mp->is_src_dst);
+		&mp->deid, &mp->seid, mp->is_src_dst);
   vec_add1 (eid, 0);
 
   print (vam->ofp, "[%d] %-35s%-20s%-30s%-20d%-20d%-10d%-20s",
@@ -3007,7 +3007,7 @@ vl_api_one_eid_table_details_t_handler_json (vl_api_one_eid_table_details_t
   else
     {
       eid = format (0, "%U", format_lisp_eid_vat,
-		    mp->deid, mp->seid, mp->is_src_dst);
+		    &mp->deid, &mp->seid, mp->is_src_dst);
       vec_add1 (eid, 0);
       vat_json_object_add_string_copy (node, "eid", eid);
       vec_free (eid);
@@ -3031,9 +3031,9 @@ vl_api_one_stats_details_t_handler (vl_api_one_stats_details_t * mp)
   u8 *seid = 0, *deid = 0;
   ip46_address_t lloc, rloc;
 
-  deid = format (0, "%U", format_lisp_eid_vat, mp->deid, 0);
+  deid = format (0, "%U", format_lisp_eid_vat, &mp->deid, 0, 0);
 
-  seid = format (0, "%U", format_lisp_eid_vat, mp->seid, 0);
+  seid = format (0, "%U", format_lisp_eid_vat, &mp->seid, 0, 0);
 
   vec_add1 (deid, 0);
   vec_add1 (seid, 0);
@@ -3079,9 +3079,9 @@ vl_api_one_stats_details_t_handler_json (vl_api_one_stats_details_t * mp)
   node = vat_json_array_add (&vam->json_tree);
 
   vat_json_init_object (node);
-  deid = format (0, "%U", format_lisp_eid_vat, mp->deid, 0);
+  deid = format (0, "%U", format_lisp_eid_vat, &mp->deid, 0, 0);
 
-  seid = format (0, "%U", format_lisp_eid_vat, mp->seid, 0);
+  seid = format (0, "%U", format_lisp_eid_vat, &mp->seid, 0, 0);
 
   vec_add1 (deid, 0);
   vec_add1 (seid, 0);
@@ -12675,15 +12675,28 @@ static void vl_api_sw_interface_vhost_user_details_t_handler_json
 static int
 api_sw_interface_vhost_user_dump (vat_main_t * vam)
 {
+  unformat_input_t *i = vam->input;
   vl_api_sw_interface_vhost_user_dump_t *mp;
   vl_api_control_ping_t *mp_ping;
   int ret;
+  u32 sw_if_index = ~0;
+
+  while (unformat_check_input (i) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (i, "%U", api_unformat_sw_if_index, vam, &sw_if_index))
+	;
+      else if (unformat (i, "sw_if_index %d", &sw_if_index))
+	;
+      else
+	break;
+    }
+
   print (vam->ofp,
 	 "Interface name            idx hdr_sz features server regions filename");
 
   /* Get list of vhost-user interfaces */
   M (SW_INTERFACE_VHOST_USER_DUMP, mp);
-  mp->sw_if_index = ntohl (~0);
+  mp->sw_if_index = ntohl (sw_if_index);
   S (mp);
 
   /* Use a control ping for synchronization */
@@ -20729,7 +20742,7 @@ _(modify_vhost_user_if,                                                 \
         "<intfc> | sw_if_index <nn> socket <filename>\n"                \
         "[server] [renumber <dev_instance>] [gso] [packed]")            \
 _(delete_vhost_user_if, "<intfc> | sw_if_index <nn>")                   \
-_(sw_interface_vhost_user_dump, "")                                     \
+_(sw_interface_vhost_user_dump, "<intfc> | sw_if_index <nn>")           \
 _(show_version, "")                                                     \
 _(show_threads, "")                                                     \
 _(vxlan_gpe_add_del_tunnel,                                             \

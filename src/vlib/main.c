@@ -1496,6 +1496,8 @@ vlib_process_bootstrap (uword _a)
 
   vm = a->vm;
   p = a->process;
+  vlib_process_finish_switch_stack (vm);
+
   f = a->frame;
   node = &p->node_runtime;
 
@@ -1503,6 +1505,7 @@ vlib_process_bootstrap (uword _a)
 
   ASSERT (vlib_process_stack_is_valid (p));
 
+  vlib_process_start_switch_stack (vm, 0);
   clib_longjmp (&p->return_longjmp, n);
 
   return n;
@@ -1521,14 +1524,19 @@ vlib_process_startup (vlib_main_t * vm, vlib_process_t * p, vlib_frame_t * f)
 
   r = clib_setjmp (&p->return_longjmp, VLIB_PROCESS_RETURN_LONGJMP_RETURN);
   if (r == VLIB_PROCESS_RETURN_LONGJMP_RETURN)
-    r = clib_calljmp (vlib_process_bootstrap, pointer_to_uword (&a),
-		      (void *) p->stack + (1 << p->log2_n_stack_bytes));
+    {
+      vlib_process_start_switch_stack (vm, p);
+      r = clib_calljmp (vlib_process_bootstrap, pointer_to_uword (&a),
+			(void *) p->stack + (1 << p->log2_n_stack_bytes));
+    }
+  else
+    vlib_process_finish_switch_stack (vm);
 
   return r;
 }
 
 static_always_inline uword
-vlib_process_resume (vlib_process_t * p)
+vlib_process_resume (vlib_main_t * vm, vlib_process_t * p)
 {
   uword r;
   p->flags &= ~(VLIB_PROCESS_IS_SUSPENDED_WAITING_FOR_CLOCK
@@ -1536,7 +1544,12 @@ vlib_process_resume (vlib_process_t * p)
 		| VLIB_PROCESS_RESUME_PENDING);
   r = clib_setjmp (&p->return_longjmp, VLIB_PROCESS_RETURN_LONGJMP_RETURN);
   if (r == VLIB_PROCESS_RETURN_LONGJMP_RETURN)
-    clib_longjmp (&p->resume_longjmp, VLIB_PROCESS_RESUME_LONGJMP_RESUME);
+    {
+      vlib_process_start_switch_stack (vm, p);
+      clib_longjmp (&p->resume_longjmp, VLIB_PROCESS_RESUME_LONGJMP_RESUME);
+    }
+  else
+    vlib_process_finish_switch_stack (vm);
   return r;
 }
 
@@ -1655,7 +1668,7 @@ dispatch_suspended_process (vlib_main_t * vm,
   /* Save away current process for suspend. */
   nm->current_process_index = node->runtime_index;
 
-  n_vectors = vlib_process_resume (p);
+  n_vectors = vlib_process_resume (vm, p);
   t = clib_cpu_time_now ();
 
   nm->current_process_index = ~0;
@@ -1702,6 +1715,26 @@ vl_api_send_pending_rpc_requests (vlib_main_t * vm)
 {
 }
 
+static_always_inline u64
+dispatch_pending_interrupts (vlib_main_t * vm, vlib_node_main_t * nm,
+			     u64 cpu_time_now)
+{
+  vlib_node_runtime_t *n;
+
+  for (int i = 0; i < _vec_len (nm->pending_local_interrupts); i++)
+    {
+      vlib_node_interrupt_t *in;
+      in = vec_elt_at_index (nm->pending_local_interrupts, i);
+      n = vec_elt_at_index (nm->nodes_by_type[VLIB_NODE_TYPE_INPUT],
+			    in->node_runtime_index);
+      n->interrupt_data = in->data;
+      cpu_time_now = dispatch_node (vm, n, VLIB_NODE_TYPE_INPUT,
+				    VLIB_NODE_STATE_INTERRUPT, /* frame */ 0,
+				    cpu_time_now);
+    }
+  vec_reset_length (nm->pending_local_interrupts);
+  return cpu_time_now;
+}
 
 static_always_inline void
 vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
@@ -1712,7 +1745,6 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
   u64 cpu_time_now;
   f64 now;
   vlib_frame_queue_main_t *fqm;
-  u32 *last_node_runtime_indices = 0;
   u32 frame_queue_check_counter = 0;
 
   /* Initialize pending node vector. */
@@ -1732,10 +1764,11 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
     cpu_time_now = clib_cpu_time_now ();
 
   /* Pre-allocate interupt runtime indices and lock. */
-  vec_alloc (nm->pending_interrupt_node_runtime_indices, 32);
-  vec_alloc (last_node_runtime_indices, 32);
-  if (!is_main)
-    clib_spinlock_init (&nm->pending_interrupt_lock);
+  vec_alloc (nm->pending_local_interrupts, 32);
+  vec_alloc (nm->pending_remote_interrupts, 32);
+  vec_alloc_aligned (nm->pending_remote_interrupts_notify, 1,
+		     CLIB_CACHE_LINE_BYTES);
+  clib_spinlock_init (&nm->pending_interrupt_lock);
 
   /* Pre-allocate expired nodes. */
   if (!nm->polling_threshold_vector_length)
@@ -1821,40 +1854,28 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
       if (PREDICT_TRUE (is_main && vm->queue_signal_pending == 0))
 	vm->queue_signal_callback (vm);
 
-      /* Next handle interrupts. */
-      {
-	/* unlocked read, for performance */
-	uword l = _vec_len (nm->pending_interrupt_node_runtime_indices);
-	uword i;
-	if (PREDICT_FALSE (l > 0))
-	  {
-	    u32 *tmp;
-	    if (!is_main)
-	      {
-		clib_spinlock_lock (&nm->pending_interrupt_lock);
-		/* Re-read w/ lock held, in case another thread added an item */
-		l = _vec_len (nm->pending_interrupt_node_runtime_indices);
-	      }
+      /* handle local interruots */
+      if (_vec_len (nm->pending_local_interrupts))
+	cpu_time_now = dispatch_pending_interrupts (vm, nm, cpu_time_now);
 
-	    tmp = nm->pending_interrupt_node_runtime_indices;
-	    nm->pending_interrupt_node_runtime_indices =
-	      last_node_runtime_indices;
-	    last_node_runtime_indices = tmp;
-	    _vec_len (last_node_runtime_indices) = 0;
-	    if (!is_main)
-	      clib_spinlock_unlock (&nm->pending_interrupt_lock);
-	    for (i = 0; i < l; i++)
-	      {
-		n = vec_elt_at_index (nm->nodes_by_type[VLIB_NODE_TYPE_INPUT],
-				      last_node_runtime_indices[i]);
-		cpu_time_now =
-		  dispatch_node (vm, n, VLIB_NODE_TYPE_INPUT,
-				 VLIB_NODE_STATE_INTERRUPT,
-				 /* frame */ 0,
-				 cpu_time_now);
-	      }
-	  }
-      }
+      /* handle remote interruots */
+      if (PREDICT_FALSE (_vec_len (nm->pending_remote_interrupts)))
+	{
+	  vlib_node_interrupt_t *in;
+
+	  /* at this point it is known that
+	   * vec_len (nm->pending_local_interrupts) is zero so we quickly swap
+	   * local and remote vector under the spinlock */
+	  clib_spinlock_lock (&nm->pending_interrupt_lock);
+	  in = nm->pending_local_interrupts;
+	  nm->pending_local_interrupts = nm->pending_remote_interrupts;
+	  nm->pending_remote_interrupts = in;
+	  *nm->pending_remote_interrupts_notify = 0;
+	  clib_spinlock_unlock (&nm->pending_interrupt_lock);
+
+	  cpu_time_now = dispatch_pending_interrupts (vm, nm, cpu_time_now);
+	}
+
       /* Input nodes may have added work to the pending vector.
          Process pending vector until there is nothing left.
          All pending vectors will be processed from input -> output. */

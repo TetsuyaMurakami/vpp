@@ -458,8 +458,14 @@ bond_create_if (vlib_main_t * vm, bond_create_if_args_t * args)
   bif->numa_only = args->numa_only;
 
   hw = vnet_get_hw_interface (vnm, bif->hw_if_index);
-  hw->flags |= (VNET_HW_INTERFACE_FLAG_SUPPORTS_GSO |
-		VNET_HW_INTERFACE_FLAG_SUPPORTS_TX_L4_CKSUM_OFFLOAD);
+  /*
+   * Add GSO and Checksum offload flags if GSO is enabled on Bond
+   */
+  if (args->gso)
+    {
+      hw->flags |= (VNET_HW_INTERFACE_FLAG_SUPPORTS_GSO |
+		    VNET_HW_INTERFACE_FLAG_SUPPORTS_TX_L4_CKSUM_OFFLOAD);
+    }
   if (vlib_get_thread_main ()->n_vlib_mains > 1)
     clib_spinlock_init (&bif->lockp);
 
@@ -721,12 +727,11 @@ bond_enslave (vlib_main_t * vm, bond_enslave_args_t * args)
   bond_slave_add_del_mac_addrs (bif, sif->sw_if_index, 1 /* is_add */ );
 
   if (bif_hw->l2_if_count)
-    {
-      ethernet_set_flags (vnm, sif_hw->hw_if_index,
-			  ETHERNET_INTERFACE_FLAG_ACCEPT_ALL);
-      /* ensure all packets go to ethernet-input */
-      ethernet_set_rx_redirect (vnm, sif_hw, 1);
-    }
+    ethernet_set_flags (vnm, sif_hw->hw_if_index,
+			ETHERNET_INTERFACE_FLAG_ACCEPT_ALL);
+  else
+    ethernet_set_flags (vnm, sif_hw->hw_if_index,
+			/*ETHERNET_INTERFACE_FLAG_DEFAULT_L3 */ 0);
 
   if (bif->mode == BOND_MODE_LACP)
     {

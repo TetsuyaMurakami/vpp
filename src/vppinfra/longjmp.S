@@ -59,21 +59,21 @@ cdecl(clib_setjmp):
 	/* Save SP after return. */
 	leaq 8(%rsp), %rdx
 	movq %rdx, 8*6(%rdi)
-	
+
 	/* Save PC we are returning to from stack frame. */
 	movq 0(%rsp), %rax
 	movq %rax, 8*7(%rdi)
-	
+
 	/* Give back user's return value. */
 	movq %rsi, %rax
 	ret
-	
+
 	.global cdecl(clib_longjmp)
 	.align 4
 #ifndef __APPLE__
 	.type cdecl(clib_longjmp), @function
 #endif
-cdecl(clib_longjmp):	
+cdecl(clib_longjmp):
         /* Restore regs. */
 	movq 8*0(%rdi), %rbx
 	movq 8*1(%rdi), %rbp
@@ -83,13 +83,13 @@ cdecl(clib_longjmp):
 	movq 8*5(%rdi), %r15
 	movq 8*6(%rdi), %rsp
 	movq 8*7(%rdi), %rdx
-	
+
 	/* Give back user's return value. */
 	movq %rsi, %rax
-	
+
 	/* Away we go. */
-	jmpq *%rdx	
-	
+	jmpq *%rdx
+
 	.global cdecl(clib_calljmp)
 	.align 4
 #ifndef __APPLE__
@@ -100,33 +100,33 @@ cdecl(clib_calljmp):
 	movq %rdx, %rax
 	andq $0xf, %rax
 	subq %rax, %rdx
-	
+
 	/* Get return address. */
 	pop %rax
-	
+
 	/* Switch to new stack. */
 	xchgq %rsp, %rdx
-	
+
 	/* Save return address on new stack. */
 	push %rax
-	
+
 	/* Save old stack pointer on new stack. */
 	push %rdx
-	
+
 	/* Get function. */
 	movq %rdi, %rdx
-	
+
 	/* Move argument into place. */
 	movq %rsi, %rdi
-	
+
 	/* Away we go. */
 	callq *%rdx
-	
+
 	/* Switch back to old stack. */
 	movq 8(%rsp), %rdx
 	movq 0(%rsp), %rcx
 	xchgq %rcx, %rsp
-	
+
 	/* Return to caller. */
 	jmpq *%rdx
 
@@ -136,7 +136,7 @@ cdecl(clib_calljmp):
 	.type cdecl(clib_setjmp), @function
 cdecl(clib_setjmp):
 	movl 4(%esp), %ecx
-	
+
 	movl %ebp, 4*0(%ecx)
 	movl %ebx, 4*1(%ecx)
 	movl %edi, 4*2(%ecx)
@@ -145,24 +145,24 @@ cdecl(clib_setjmp):
 	/* Save SP after return. */
 	leal 4(%esp), %edx
 	movl %edx, 4*4(%ecx)
-	
+
 	/* Save PC we are returning to from stack frame. */
 	movl 0(%esp), %eax
 	movl %eax, 4*5(%ecx)
-	
+
 	/* Give back user's return value. */
 	movl 8(%esp), %eax
 	ret
-	
+
 	.global cdecl(clib_longjmp)
 	.align 4
 	.type cdecl(clib_longjmp), @function
-cdecl(clib_longjmp):	
+cdecl(clib_longjmp):
 	movl 4(%esp), %ecx
-	
+
 	/* Give back user's return value. */
 	movl 8(%esp), %eax
-	
+
         /* Restore regs. */
 	movl 4*0(%ecx), %ebp
 	movl 4*1(%ecx), %ebx
@@ -170,57 +170,44 @@ cdecl(clib_longjmp):
 	movl 4*3(%ecx), %esi
 	movl 4*4(%ecx), %esp
 	movl 4*5(%ecx), %edx
-	
+
 	/* Away we go. */
-	jmp *%edx	
-	
+	jmp *%edx
+
 	.global cdecl(clib_calljmp)
 	.align 4
 	.type cdecl(clib_calljmp), @function
-cdecl(clib_calljmp):	
+cdecl(clib_calljmp):
 	/* Get new stack pointer. */
 	movl 12(%esp), %edx
-	
+
 	/* Switch stacks. */
 	xchgl %esp, %edx
-	
+
 	/* Save old stack pointer on new stack. */
 	sub $8, %esp
 	movl %edx, 4(%esp)
-	
+
 	/* Put function argument in stack frame. */
 	movl 8(%edx), %eax
 	movl %eax, 0(%esp)
-	
+
 	/* Get function. */
 	movl 4(%edx), %eax
-	
+
 	/* Away we go. */
 	call *%eax
-	
+
 	/* Switch back to old stack. */
 	movl 4(%esp), %edx
 	xchgl %edx, %esp
-	
+
 	/* Return to caller. */
 	ret
-	
-#elif defined(__SPU__)
-	
-#elif defined(__powerpc64__)
-	
-	.text
 
-#define _prologue(n)				\
-    .align 2 ;					\
-    .globl n, .##n ;				\
-    .section ".opd", "aw" ;			\
-    .align 3 ;					\
-n:  .quad .##n, .TOC.@tocbase, 0 ;		\
-    .previous ;					\
-    .size n, 24 ;				\
-    .type .##n, @function ;			\
-.##n:
+#elif defined(__SPU__)
+
+#elif defined(__powerpc64__)
 
 #define _foreach_14_31							\
 _ (14, 0)  _ (15, 1)  _ (16, 2)  _ (17, 3)  _ (18, 4)  _ (19, 5)	\
@@ -230,14 +217,60 @@ _ (26, 12) _ (27, 13) _ (28, 14) _ (29, 15) _ (30, 16) _ (31, 17)
 #define _foreach_20_31						\
 _ (20, 0) _ (21, 1) _ (22, 2) _ (23, 3) _ (24, 4)  _ (25, 5)	\
 _ (26, 6) _ (27, 7) _ (28, 8) _ (29, 9) _ (30, 10) _ (31, 11)
-	
+
 #ifdef __ALTIVEC__
 #define CLIB_POWERPC_ALTIVEC_N_REGS 12
 #else
 #define CLIB_POWERPC_ALTIVEC_N_REGS 0
 #endif
 
-_prologue (cdecl(clib_setjmp))
+#if _CALL_ELF == 2
+
+#define _prologue(n)				\
+	.globl n ;				\
+	.p2align 4 ;				\
+	.type n, @function ;			\
+n: ;						\
+.L##n##_begin: ;
+
+#define _gep_lep(n)				\
+.L##n##_gep: ;					\
+	addis 2, 12, .TOC.-.L##n##_gep@ha ;	\
+	addi 2, 2, .TOC.-.L##n##_gep@l ;	\
+.L##n##_lep: ;					\
+	.localentry n, .L##n##_lep-.L##n##_gep
+
+#else /* _CALL_ELF == 1 */
+
+#define _prologue(n)				\
+    .globl n ;					\
+    .p2align 4 ;				\
+    .type .##n, @function ;			\
+    .section ".opd", "aw" ,@progbits ;		\
+n: ;						\
+    .p2align 3 ;				\
+    .quad .L##n##_begin ;			\
+    .quad .TOC.@tocbase ;			\
+    .quad 0 ;					\
+    .text ;					\
+.L##n##_begin: ;
+
+#endif
+
+#define _epilogue(n)				\
+	.long   0 ;				\
+	.quad   0 ;				\
+.L##n##_end: ;					\
+	.size   n, .L##n##_end-.L##n##_begin
+
+#if _CALL_ELF == 2
+	.abiversion 2
+	.section        ".text"
+#else
+	.text
+#endif
+
+_prologue(clib_setjmp)
 	mflr 0
 	std 0, 8*0(3)
 	std 1, 8*1(3)
@@ -246,14 +279,14 @@ _prologue (cdecl(clib_setjmp))
 	std 0, 8*3(3)
 	mfspr 0, 256
 	stw 0, 8*4(3)
-	
+
 	/* gprs 14 - 31 */
-#define _(a,b) std a, 8*((b) + 4 + 18*0)(3) ; 
+#define _(a,b) std a, 8*((b) + 4 + 18*0)(3) ;
 	_foreach_14_31
 #undef _
-	
+
 	/* fprs 14 - 31 */
-#define _(a,b) stfd a, 8*((b) + 4 + 18*1)(3) ; 
+#define _(a,b) stfd a, 8*((b) + 4 + 18*1)(3) ;
 	_foreach_14_31
 #undef _
 
@@ -264,13 +297,13 @@ _prologue (cdecl(clib_setjmp))
 	_foreach_20_31
 #undef _
 #endif /* CLIB_POWERPC_ALTIVEC_N_REGS > 0 */
-	
+
 	/* Return value. */
 	mr 3, 4
-	
 	blr
-	
-_prologue (cdecl(clib_longjmp))
+_epilogue(clib_setjmp)
+
+_prologue(clib_longjmp)
 	ld 0, 8*0(3)
 	mtlr 0
 	ld 1, 8*1(3)
@@ -279,17 +312,17 @@ _prologue (cdecl(clib_longjmp))
 	mtcrf 0xff, 0
 	lwz 0, 8*3(3)
 	mtspr 256, 0
-	
+
 	/* gprs 14 - 31 */
-#define _(a,b) ld a, 8*((b) + 4 + 18*0)(3) ; 
+#define _(a,b) ld a, 8*((b) + 4 + 18*0)(3) ;
 	_foreach_14_31
 #undef _
-	
+
 	/* fprs 14 - 31 */
-#define _(a,b) lfd a, 8*((b) + 4 + 18*1)(3) ; 
+#define _(a,b) lfd a, 8*((b) + 4 + 18*1)(3) ;
 	_foreach_14_31
 #undef _
-	
+
 #if CLIB_POWERPC_ALTIVEC_N_REGS > 0
 	/* vrs 20 - 31 */
 	li 5, 8*(4 + 18*2)
@@ -297,51 +330,64 @@ _prologue (cdecl(clib_longjmp))
 	_foreach_20_31
 #undef _
 #endif /* CLIB_POWERPC_ALTIVEC_N_REGS > 0 */
-	
+
 	/* Return value. */
 	mr 3, 4
-	
 	blr
+_epilogue(clib_longjmp)
 
-	.globl cdecl(clib_calljmp)
-	.section	".opd","aw"
-	.align 3
-cdecl(clib_calljmp):
-	.quad	.L.cdecl(clib_calljmp),.TOC.@tocbase,0
-	.previous
-	.type	cdecl(clib_calljmp), @function
-.L.cdecl(clib_calljmp):
-	mflr 0
-	mr 9,3
-	std 0,16(1)
-	stdu 1,-112(1)
-#APP
-	std 1,-8(5)
-	addi 5,5,-256
-	mr 1,5
-#NO_APP
+#if _CALL_ELF == 2
+_prologue(clib_calljmp)
+_gep_lep(clib_calljmp)
+	mflr 0			/* get link register into r0 */
+	std 0,16(1)		/* store r0 into the stack frame */
+	stdu 1,-32(1)		/* move sp down for one frame */
+	mr 12,3			/* move func pointer to r12 */
+	mr 3,4			/* pass func_arg as first arg */
+	std 1,-8(5)		/* store old sp into the top of the new stack */
+	addi 5,5,-256		/* stack_addr =- 256 */
+	mr 1,5			/* set new sp */
+	mtctr 12		/* put function pointer into CTR register */
+	std 2,24(1)		/* store TOC pointer into stack frame */
+	bctrl			/* unconditional branch to counter register */
+	ld 2,24(1)		/* load TOC pointer from stack frame */
+	addi 1,1,256		/* go back to the start of the new stack */
+	ld 1,-8(1)		/* load old sp */
+	addi 1,1,32		/* move sp back to previous frame */
+	ld 0,16(1)		/* get old link reg value from the stack */
+	mtlr 0			/* restore link reg value */
+	blr
+_epilogue(clib_calljmp)
+
+#else /* v1 ABI */
+
+_prologue(clib_calljmp)
+	mflr 0			/* get link register into r0 */
+	mr 9,3			/* store function pointer into the r9 */
+	std 0,16(1)		/* store r0 into the stack frame */
+	stdu 1,-112(1)		/* move sp down for one frame */
+	std 1,-8(5)		/* store old sp into the top of the new stack */
+	addi 5,5,-256		/* stack_addr =- 256 */
+	mr 1,5			/* set new sp */
 	ld 10,0(9)
-	std 2,40(1)
+	std 2,40(1)		/* store TOC pointer into the stack */
 	mr 3,4
 	mtctr 10
 	ld 11,16(9)
 	ld 2,8(9)
-	bctrl
-	ld 2,40(1)
-#APP
-	addi 1,1,256
-	ld 1,-8(1)
-#NO_APP
-	addi 1,1,112
-	ld 0,16(1)
+	bctrl			/* unconditional branch to counter register */
+	ld 2,40(1)		/* load TOC pointer from the stack */
+	addi 1,1,256		/* go back to the start of the new stack */
+	ld 1,-8(1)		/* load the old sp */
+	addi 1,1,112		/* move sp back to previous frame */
+	ld 0,16(1)		/* restore link register from the stack frame */
 	mtlr 0
 	blr
-	.long 0
-	.byte 0,0,0,1,128,0,0,0
-	.size	cdecl(clib_calljmp),.-.L.cdecl(clib_calljmp)
-	
+_epilogue(clib_calljmp)
+
+#endif
 #elif defined(__powerpc__)
-	
+
 #define _foreach_14_31							\
 _ (14, 0)  _ (15, 1)  _ (16, 2)  _ (17, 3)  _ (18, 4)  _ (19, 5)	\
 _ (20, 6)  _ (21, 7)  _ (22, 8)  _ (23, 9)  _ (24, 10) _ (25, 11)	\
@@ -350,7 +396,7 @@ _ (26, 12) _ (27, 13) _ (28, 14) _ (29, 15) _ (30, 16) _ (31, 17)
 #define _foreach_20_31						\
 _ (20, 0) _ (21, 1) _ (22, 2) _ (23, 3) _ (24, 4)  _ (25, 5)	\
 _ (26, 6) _ (27, 7) _ (28, 8) _ (29, 9) _ (30, 10) _ (31, 11)
-	
+
 #ifdef __ALTIVEC__
 #define CLIB_POWERPC_ALTIVEC_N_REGS 12
 #else
@@ -370,19 +416,19 @@ cdecl(clib_setjmp):
 	mfspr 0, 256
 #endif
 	stw 0, 4*3(3)
-	
+
 #if CLIB_POWERPC_ALTIVEC_N_REGS > 0
 	li 5, 4*4
 #define _(a,b) stvx a, 3, 5 ; addi 5, 5, 16 ;
 	_foreach_20_31
 #undef _
 #endif /* CLIB_POWERPC_ALTIVEC_N_REGS > 0 */
-	
+
 	/* gp 14 - 31 */
-#define _(a,b) stw a,  4*(1*(b) + 4 + 4*CLIB_POWERPC_ALTIVEC_N_REGS + 0*18)(3) ; 
+#define _(a,b) stw a,  4*(1*(b) + 4 + 4*CLIB_POWERPC_ALTIVEC_N_REGS + 0*18)(3) ;
 	_foreach_14_31
 #undef _
-	
+
 	/* fp 14 - 31 */
 #define _(a,b) stfd a, 4*(2*(b) + 4 + 4*CLIB_POWERPC_ALTIVEC_N_REGS + 1*18)(3) ;
 	_foreach_14_31
@@ -390,14 +436,14 @@ cdecl(clib_setjmp):
 
 	/* Return value. */
 	mr 3, 4
-	
+
 	blr
-	
+
 	.global cdecl(clib_longjmp)
 	.align 4
 	.type cdecl(clib_longjmp), @function
-cdecl(clib_longjmp):	
-	
+cdecl(clib_longjmp):
+
 	lwz 0, 4*0(3)
 	mtlr 0
 	lwz 1, 4*1(3)
@@ -407,19 +453,19 @@ cdecl(clib_longjmp):
 #if CLIB_POWERPC_ALTIVEC_N_REGS > 0
 	mtspr 256, 0
 #endif
-	
+
 #if CLIB_POWERPC_ALTIVEC_N_REGS > 0
 	li 5, 4*4
 #define _(a,b) lvx a, 3, 5 ; addi 5, 5, 16 ;
 	_foreach_20_31
 #undef _
 #endif /* CLIB_POWERPC_ALTIVEC_N_REGS > 0 */
-	
+
 	/* gp 14 - 31 */
 #define _(a,b) lwz a, 4*(1*(b) + 4 + 4*CLIB_POWERPC_ALTIVEC_N_REGS + 0*18)(3) ;
 	_foreach_14_31
 #undef _
-	
+
 	/* fp 14 - 31 */
 #define _(a,b) lfd a, 4*(2*(b) + 4 + 4*CLIB_POWERPC_ALTIVEC_N_REGS + 1*18)(3) ;
 	_foreach_14_31
@@ -427,50 +473,50 @@ cdecl(clib_longjmp):
 
 	/* Return value. */
 	mr 3, 4
-	
+
 	blr
 
 	.global cdecl(clib_calljmp)
 	.align 4
 	.type cdecl(clib_calljmp), @function
-cdecl(clib_calljmp):	
+cdecl(clib_calljmp):
 	/* Make sure stack is 16 byte aligned. */
 	andi. 0, 5, 0xf
 	sub  5, 5, 0
 	addi 5, 5, -16
-	
+
 	/* Save old stack/link pointer on new stack. */
 	stw 1, 0(5)
 	mflr 0
 	stw 0, 4(5)
-	
+
 	/* account for (sp, lr) tuple, and keep aligned */
 	addi 5, 5, -16
-	
+
 	/* Switch stacks. */
 	mr 1, 5
-	
+
 	/* Move argument into place. */
 	mtctr 3
 	mr 3, 4
-	
+
 	/* Away we go. */
 	bctrl
-	
+
 	/* back to our synthetic frame */
 	addi 1,1,16
-	
+
 	/* Switch back to old stack. */
 	lwz 0, 4(1)
 	mtlr 0
 	lwz 0, 0(1)
 	mr 1, 0
-	
+
 	/* Return to caller. */
 	blr
-	
+
 #elif defined(__arm__)
-	
+
 	.global cdecl(clib_setjmp)
 	.align 4
 	.type cdecl(clib_setjmp), %function
@@ -479,7 +525,7 @@ cdecl(clib_setjmp):
 
 	/* Save integer registers */
 	stmia ip!, {v1-v6, sl, fp, sp, lr}
-	
+
 #ifdef __IWMMXT__
 	/* Save the call-preserved iWMMXt registers.  */
 	wstrd wr10, [ip], #8
@@ -493,16 +539,16 @@ cdecl(clib_setjmp):
 	/* Give back user's return value. */
 	mov r0, r1
 	bx lr
-	
+
 	.global cdecl(clib_longjmp)
 	.align 4
 	.type cdecl(clib_longjmp), %function
-cdecl(clib_longjmp):	
+cdecl(clib_longjmp):
 	mov ip, r0		/* jmp buffer */
 
 	/* Restore integer registers. */
 	ldmia     ip!,  {v1-v6, sl, fp, sp, lr}
-	
+
 #ifdef __IWMMXT__
 	/* Save the call-preserved iWMMXt registers.  */
 	wldrd wr10, [ip], #8
@@ -512,7 +558,7 @@ cdecl(clib_longjmp):
 	wldrd wr14, [ip], #8
 	wldrd wr15, [ip], #8
 #endif
-	
+
 	/* Give back user's return value. */
 	mov r0, r1
 	bx lr
@@ -520,39 +566,39 @@ cdecl(clib_longjmp):
 	.global cdecl(clib_calljmp)
 	.align 4
 	.type cdecl(clib_calljmp), %function
-cdecl(clib_calljmp):	
+cdecl(clib_calljmp):
 	/* Make sure stack is 8 byte aligned. */
 	bic r2, r2, #7
-	
+
 	/* Allocate space for stack/link pointer on new stack. */
-	sub r2, r2, #8	
-	
+	sub r2, r2, #8
+
 	/* Save old stack/link pointer on new stack. */
 	str sp, [r2, #0]
 	str lr, [r2, #4]
-	
+
 	/* Switch stacks. */
 	mov sp, r2
-	
+
 	/* Save function to call. */
 	mov ip, r0
-	
+
 	/* Move argument into place. */
 	mov r0, r1
-	
+
 	/* Away we go. */
 	bx ip
-	
+
 	/* Switch back to old stack. */
 	ldr lr, [sp, #4]
 	ldr ip, [sp, #0]
 	mov sp, ip
-	
+
 	/* Return to caller. */
 	bx lr
-	
+
 #elif defined(__xtensa__)
-	
+
 	/* FIXME implement if needed. */
 	.global cdecl(clib_setjmp)
 	.align 4
@@ -563,17 +609,17 @@ cdecl(clib_setjmp):
 	.global cdecl(clib_longjmp)
 	.align 4
 	.type cdecl(clib_longjmp), @function
-cdecl(clib_longjmp):	
+cdecl(clib_longjmp):
 1:	j 1b
-	
+
 	.global cdecl(clib_calljmp)
 	.align 4
 	.type cdecl(clib_calljmp), %function
-cdecl(clib_calljmp):	
+cdecl(clib_calljmp):
 1:	j 1b
-	
+
 #elif defined(__TMS320C6X__)
-	
+
 	/* FIXME implement if needed. */
 	.global cdecl(clib_setjmp)
 	.align 4
@@ -584,15 +630,15 @@ cdecl(clib_setjmp):
 	.global cdecl(clib_longjmp)
 	.align 4
 	.type cdecl(clib_longjmp), @function
-cdecl(clib_longjmp):	
+cdecl(clib_longjmp):
 1:	B	.S1     1b
-	
+
 	.global cdecl(clib_calljmp)
 	.align 4
 	.type cdecl(clib_calljmp), %function
-cdecl(clib_calljmp):	
+cdecl(clib_calljmp):
 1:	B	.S1     1b
-	
+
 #elif defined(_mips) && __mips == 64
 
 	.global cdecl(clib_setjmp)
@@ -749,11 +795,11 @@ cdecl(clib_calljmp):
 	mov     x0, x1
 	// switch stacks
 	mov     x4, sp
-	
+
 	// space for saved sp, lr on new stack
 	sub     x2, x2, #16
 	mov     sp, x2
-	
+
 	// save old sp and link register on new stack
         str     x4, [sp]
 	str     x30,[sp,#8]
@@ -761,10 +807,10 @@ cdecl(clib_calljmp):
 
 	// go there
         blr     x3
-	
+
 	// restore old sp and link register
 	mov     x4, sp
-        
+
 	ldr     x3, [x4]
 	ldr     x30,[x4, #8]
         mov     sp, x3
@@ -772,7 +818,7 @@ cdecl(clib_calljmp):
 	.size	cdecl(clib_calljmp), .-cdecl(clib_calljmp)
 #else
 #error "unknown machine"
-#endif	
+#endif
 
 #ifndef __APPLE__
 .section .note.GNU-stack,"",%progbits

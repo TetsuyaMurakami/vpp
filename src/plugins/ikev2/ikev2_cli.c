@@ -355,27 +355,27 @@ ikev2_profile_add_del_command_fn (vlib_main_t * vm,
       else
 	if (unformat
 	    (line_input,
-	     "set %U esp-crypto-alg %U %u esp-integ-alg %U esp-dh %U",
+	     "set %U esp-crypto-alg %U %u esp-integ-alg %U",
 	     unformat_token, valid_chars, &name,
 	     unformat_ikev2_transform_encr_type, &crypto_alg, &tmp1,
-	     unformat_ikev2_transform_integ_type, &integ_alg,
-	     unformat_ikev2_transform_dh_type, &dh_type))
+	     unformat_ikev2_transform_integ_type, &integ_alg))
 	{
 	  r =
 	    ikev2_set_profile_esp_transforms (vm, name, crypto_alg, integ_alg,
-					      dh_type, tmp1);
+					      IKEV2_TRANSFORM_DH_TYPE_NONE,
+					      tmp1);
 	  goto done;
 	}
       else if (unformat
 	       (line_input,
-		"set %U esp-crypto-alg %U %u esp-dh %U",
+		"set %U esp-crypto-alg %U %u",
 		unformat_token, valid_chars, &name,
-		unformat_ikev2_transform_encr_type, &crypto_alg, &tmp1,
-		unformat_ikev2_transform_dh_type, &dh_type))
+		unformat_ikev2_transform_encr_type, &crypto_alg, &tmp1))
 	{
 	  r =
 	    ikev2_set_profile_esp_transforms (vm, name, crypto_alg, 0,
-					      dh_type, tmp1);
+					      IKEV2_TRANSFORM_DH_TYPE_NONE,
+					      tmp1);
 	  goto done;
 	}
       else if (unformat (line_input, "set %U sa-lifetime %lu %u %u %lu",
@@ -430,7 +430,7 @@ VLIB_CLI_COMMAND (ikev2_profile_add_del_command, static) = {
     "ikev2 profile set <id> responder <interface> <addr>\n"
     "ikev2 profile set <id> ike-crypto-alg <crypto alg> <key size> ike-integ-alg <integ alg> ike-dh <dh type>\n"
     "ikev2 profile set <id> esp-crypto-alg <crypto alg> <key size> "
-      "[esp-integ-alg <integ alg>] esp-dh <dh type>\n"
+      "[esp-integ-alg <integ alg>]\n"
     "ikev2 profile set <id> sa-lifetime <seconds> <jitter> <handover> <max bytes>",
     .function = ikev2_profile_add_del_command_fn,
 };
@@ -509,11 +509,29 @@ show_ikev2_profile_command_fn (vlib_main_t * vm,
     if (~0 != p->tun_itf)
       vlib_cli_output(vm, "  protected tunnel %U",
                       format_vnet_sw_if_index_name, vnet_get_main(), p->tun_itf);
+    if (~0 != p->responder.sw_if_index)
+      vlib_cli_output(vm, "  responder %U %U",
+                      format_vnet_sw_if_index_name, vnet_get_main(), p->responder.sw_if_index,
+                      format_ip4_address, &p->responder.ip4);
     if (p->udp_encap)
       vlib_cli_output(vm, "  udp-encap");
 
-    if (p->dst_port != IPSEC_UDP_PORT_NONE)
-      vlib_cli_output(vm, "  ipsec-over-udp port %d", p->dst_port);
+    if (p->ipsec_over_udp_port != IPSEC_UDP_PORT_NONE)
+      vlib_cli_output(vm, "  ipsec-over-udp port %d", p->ipsec_over_udp_port);
+
+    if (p->ike_ts.crypto_alg || p->ike_ts.integ_alg || p->ike_ts.dh_type || p->ike_ts.crypto_key_size)
+      vlib_cli_output(vm, "  ike-crypto-alg %U %u ike-integ-alg %U ike-dh %U",
+                    format_ikev2_transform_encr_type, p->ike_ts.crypto_alg, p->ike_ts.crypto_key_size,
+                    format_ikev2_transform_integ_type, p->ike_ts.integ_alg,
+                    format_ikev2_transform_dh_type, p->ike_ts.dh_type);
+
+    if (p->esp_ts.crypto_alg || p->esp_ts.integ_alg || p->esp_ts.dh_type)
+      vlib_cli_output(vm, "  esp-crypto-alg %U %u esp-integ-alg %U",
+                    format_ikev2_transform_encr_type, p->esp_ts.crypto_alg, p->esp_ts.crypto_key_size,
+                    format_ikev2_transform_integ_type, p->esp_ts.integ_alg);
+
+    vlib_cli_output(vm, "  lifetime %d jitter %d handover %d maxdata %d",
+                    p->lifetime, p->lifetime_jitter, p->handover, p->lifetime_maxdata);
   }));
   /* *INDENT-ON* */
 
@@ -683,7 +701,7 @@ ikev2_set_log_level_command_fn (vlib_main_t * vm,
 				vlib_cli_command_t * cmd)
 {
   unformat_input_t _line_input, *line_input = &_line_input;
-  u8 log_level = IKEV2_LOG_NONE;
+  u32 log_level = IKEV2_LOG_NONE;
   clib_error_t *error = 0;
 
   /* Get a line of input. */

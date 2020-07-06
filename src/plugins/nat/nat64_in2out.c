@@ -21,6 +21,7 @@
 #include <nat/nat_inlines.h>
 #include <vnet/ip/ip6_to_ip4.h>
 #include <vnet/fib/fib_table.h>
+#include <nat/lib/nat_inlines.h>
 
 typedef struct
 {
@@ -224,7 +225,7 @@ nat64_in2out_tcp_udp (vlib_main_t * vm, vlib_buffer_t * p, u16 l4_offset,
 	  u16 out_port;
 	  ip4_address_t out_addr;
 	  if (nat64_alloc_out_addr_and_port
-	      (fib_index, ip_proto_to_snat_proto (proto), &out_addr,
+	      (fib_index, ip_proto_to_nat_proto (proto), &out_addr,
 	       &out_port, ctx->thread_index))
 	    return -1;
 
@@ -276,7 +277,7 @@ nat64_in2out_tcp_udp (vlib_main_t * vm, vlib_buffer_t * p, u16 l4_offset,
 	  csum = ip_csum_add_even (csum, ip4->src_address.as_u32);
 	  csum = ip_csum_sub_even (csum, sport);
 	  csum = ip_csum_add_even (csum, udp->src_port);
-	  mss_clamping (nm->sm, tcp, &csum);
+	  mss_clamping (nm->sm->mss_clamping, tcp, &csum);
 	  tcp->checksum = ip_csum_fold (csum);
 
 	  nat64_tcp_session_set_state (ste, tcp, 1);
@@ -335,7 +336,7 @@ nat64_in2out_icmp_set_cb (ip6_header_t * ip6, ip4_header_t * ip4, void *arg)
 	      u16 out_id;
 	      ip4_address_t out_addr;
 	      if (nat64_alloc_out_addr_and_port
-		  (fib_index, SNAT_PROTOCOL_ICMP, &out_addr, &out_id,
+		  (fib_index, NAT_PROTOCOL_ICMP, &out_addr, &out_id,
 		   ctx->thread_index))
 		return -1;
 
@@ -715,7 +716,7 @@ nat64_in2out_tcp_udp_hairpinning (vlib_main_t * vm, vlib_buffer_t * b,
 	  u16 out_port;
 	  ip4_address_t out_addr;
 	  if (nat64_alloc_out_addr_and_port
-	      (fib_index, ip_proto_to_snat_proto (proto), &out_addr,
+	      (fib_index, ip_proto_to_nat_proto (proto), &out_addr,
 	       &out_port, thread_index))
 	    return -1;
 
@@ -1112,11 +1113,11 @@ nat64_in2out_node_fn_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 	      goto trace0;
 	    }
 
-	  proto0 = ip_proto_to_snat_proto (l4_protocol0);
+	  proto0 = ip_proto_to_nat_proto (l4_protocol0);
 
 	  if (is_slow_path)
 	    {
-	      if (PREDICT_TRUE (proto0 == ~0))
+	      if (PREDICT_TRUE (proto0 == NAT_PROTOCOL_OTHER))
 		{
 		  other_packets++;
 		  if (is_hairpinning (&ip60->dst_address))
@@ -1146,14 +1147,14 @@ nat64_in2out_node_fn_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 	    }
 	  else
 	    {
-	      if (PREDICT_FALSE (proto0 == ~0))
+	      if (PREDICT_FALSE (proto0 == NAT_PROTOCOL_OTHER))
 		{
 		  next0 = NAT64_IN2OUT_NEXT_SLOWPATH;
 		  goto trace0;
 		}
 	    }
 
-	  if (proto0 == SNAT_PROTOCOL_ICMP)
+	  if (proto0 == NAT_PROTOCOL_ICMP)
 	    {
 	      icmp_packets++;
 	      if (is_hairpinning (&ip60->dst_address))
@@ -1178,9 +1179,9 @@ nat64_in2out_node_fn_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 		  goto trace0;
 		}
 	    }
-	  else if (proto0 == SNAT_PROTOCOL_TCP || proto0 == SNAT_PROTOCOL_UDP)
+	  else if (proto0 == NAT_PROTOCOL_TCP || proto0 == NAT_PROTOCOL_UDP)
 	    {
-	      if (proto0 == SNAT_PROTOCOL_TCP)
+	      if (proto0 == NAT_PROTOCOL_TCP)
 		tcp_packets++;
 	      else
 		udp_packets++;

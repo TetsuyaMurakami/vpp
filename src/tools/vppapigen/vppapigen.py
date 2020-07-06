@@ -11,6 +11,8 @@ import os
 import sys
 from subprocess import Popen, PIPE
 
+assert sys.version_info >= (3, 6), \
+    "Not supported Python version: {}".format(sys.version)
 log = logging.getLogger('vppapigen')
 
 # Ensure we don't leave temporary files around
@@ -174,10 +176,11 @@ def vla_is_last_check(name, block):
 
 
 class Service():
-    def __init__(self, caller, reply, events=None, stream=False):
+    def __init__(self, caller, reply, events=None, stream_message=None, stream=False):
         self.caller = caller
         self.reply = reply
         self.stream = stream
+        self.stream_message = stream_message
         self.events = [] if events is None else events
 
 
@@ -285,7 +288,7 @@ class Define():
                     self.options[b.option] = b.value
                 remove.append(b)
 
-        block = [x for x in block if not x in remove]
+        block = [x for x in block if x not in remove]
         self.block = block
         self.vla = vla_is_last_check(name, block)
         self.crc = str(block).encode()
@@ -508,6 +511,10 @@ class VPPAPIParser(object):
             p[0] = Service(p[2], p[5], stream=True)
         else:
             p[0] = Service(p[2], p[4])
+
+    def p_service_statement2(self, p):
+        '''service_statement : RPC ID RETURNS ID STREAM ID ';' '''
+        p[0] = Service(p[2], p[4], stream_message=p[6], stream=True)
 
     def p_event_list(self, p):
         '''event_list : events
@@ -751,8 +758,15 @@ class VPPAPI(object):
     def parse_filename(self, filename, debug=0):
         if self.revision:
             git_show = f'git show  {self.revision}:{filename}'
-            with Popen(git_show.split(), stdout=PIPE, encoding='utf-8') as git:
-                return self.parse_fd(git.stdout, None)
+            proc = Popen(git_show.split(), stdout=PIPE, encoding='utf-8')
+            try:
+                data, errs = proc.communicate()
+                if proc.returncode != 0:
+                    print(f'File not found: {self.revision}:{filename}', file=sys.stderr)
+                    sys.exit(2)
+                return self.parse_string(data, debug=debug)
+            except Exception as e:
+                sys.exit(3)
         else:
             try:
                 with open(filename, encoding='utf-8') as fd:
@@ -765,7 +779,7 @@ class VPPAPI(object):
         block = [Field('u32', 'context'),
                  Field('i32', 'retval')]
         # inherhit the parent's options
-        for k,v in parent.options.items():
+        for k, v in parent.options.items():
             block.append(Option(k, v))
         return Define(name + '_reply', [], block)
 

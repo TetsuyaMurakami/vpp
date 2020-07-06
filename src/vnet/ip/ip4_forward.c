@@ -640,6 +640,8 @@ void
 ip4_sw_interface_enable_disable (u32 sw_if_index, u32 is_enable)
 {
   ip4_main_t *im = &ip4_main;
+  vnet_main_t *vnm = vnet_get_main ();
+  vnet_hw_interface_t *hi = vnet_get_sup_hw_interface (vnm, sw_if_index);
 
   vec_validate_init_empty (im->ip_enabled_by_sw_if_index, sw_if_index, 0);
 
@@ -663,6 +665,11 @@ ip4_sw_interface_enable_disable (u32 sw_if_index, u32 is_enable)
 
   vnet_feature_enable_disable ("ip4-multicast", "ip4-not-enabled",
 			       sw_if_index, !is_enable, 0, 0);
+
+  if (is_enable)
+    hi->l3_if_count++;
+  else if (hi->l3_if_count)
+    hi->l3_if_count--;
 
   {
     ip4_enable_disable_interface_callback_t *cb;
@@ -779,7 +786,10 @@ ip4_add_del_interface_address_internal (vlib_main_t * vm,
 	  goto done;
 	}
 
-      ip_interface_address_del (lm, if_address_index, addr_fib);
+      error = ip_interface_address_del (lm, vnm, if_address_index, addr_fib,
+					address_length, sw_if_index);
+      if (error)
+	goto done;
     }
   else
     {
@@ -2231,8 +2241,7 @@ ip4_rewrite_inline_with_gso (vlib_main_t * vm,
 	  next[0] = next_index;
 	  if (is_midchain)
 	    vnet_calc_checksums_inline (vm, b[0], 1 /* is_ip4 */ ,
-					0 /* is_ip6 */ ,
-					0 /* with gso */ );
+					0 /* is_ip6 */ );
 	}
       else
 	{
@@ -2256,9 +2265,8 @@ ip4_rewrite_inline_with_gso (vlib_main_t * vm,
 						adj1->ia_cfg_index);
 	  next[1] = next_index;
 	  if (is_midchain)
-	    vnet_calc_checksums_inline (vm, b[0], 1 /* is_ip4 */ ,
-					0 /* is_ip6 */ ,
-					0 /* with gso */ );
+	    vnet_calc_checksums_inline (vm, b[1], 1 /* is_ip4 */ ,
+					0 /* is_ip6 */ );
 	}
       else
 	{
@@ -2409,8 +2417,7 @@ ip4_rewrite_inline_with_gso (vlib_main_t * vm,
 	  if (is_midchain)
 	    {
 	      vnet_calc_checksums_inline (vm, b[0], 1 /* is_ip4 */ ,
-					  0 /* is_ip6 */ ,
-					  0 /* with gso */ );
+					  0 /* is_ip6 */ );
 
 	      /* Guess we are only writing on ipv4 header. */
 	      vnet_rewrite_one_header (adj0[0], ip0, sizeof (ip4_header_t));
@@ -2517,8 +2524,7 @@ ip4_rewrite_inline_with_gso (vlib_main_t * vm,
 	    {
 	      /* this acts on the packet that is about to be encapped */
 	      vnet_calc_checksums_inline (vm, b[0], 1 /* is_ip4 */ ,
-					  0 /* is_ip6 */ ,
-					  0 /* with gso */ );
+					  0 /* is_ip6 */ );
 
 	      /* Guess we are only writing on ipv4 header. */
 	      vnet_rewrite_one_header (adj0[0], ip0, sizeof (ip4_header_t));
@@ -3091,10 +3097,13 @@ ip4_config (vlib_main_t * vm, unformat_input_t * input)
     {
       if (unformat (input, "heap-size %U", unformat_memory_size, &heapsize))
 	;
+      else if (unformat (input, "mtrie-hugetlb %=", &im->mtrie_hugetlb, 1))
+	;
       else
 	return clib_error_return (0,
 				  "invalid heap-size parameter `%U'",
 				  format_unformat_error, input);
+
     }
 
   im->mtrie_heap_size = heapsize;
