@@ -184,7 +184,7 @@ void BV (clib_bihash_init)
 #define MFD_ALLOW_SEALING 0x0002U
 #endif
 
-void BV (clib_bihash_master_init_svm)
+void BV (clib_bihash_initiator_init_svm)
   (BVT (clib_bihash) * h, char *name, u32 nbuckets, u64 memory_size)
 {
   uword bucket_size;
@@ -253,7 +253,7 @@ void BV (clib_bihash_master_init_svm)
   h->instantiated = 1;
 }
 
-void BV (clib_bihash_slave_init_svm)
+void BV (clib_bihash_responder_init_svm)
   (BVT (clib_bihash) * h, char *name, int fd)
 {
   u8 *mmap_addr;
@@ -893,7 +893,7 @@ u8 *BV (format_bihash) (u8 * s, va_list * args)
   s = format (s, "Hash table %s\n", h->name ? h->name : (u8 *) "(unnamed)");
 
 #if BIHASH_LAZY_INSTANTIATE
-  if (PREDICT_FALSE (alloc_arena (h) == 0))
+  if (PREDICT_FALSE (h->instantiated == 0))
     return format (s, "[empty, uninitialized]");
 #endif
 
@@ -994,7 +994,7 @@ void BV (clib_bihash_foreach_key_value_pair)
 
 
 #if BIHASH_LAZY_INSTANTIATE
-  if (PREDICT_FALSE (alloc_arena (h) == 0))
+  if (PREDICT_FALSE (h->instantiated == 0))
     return;
 #endif
 

@@ -579,17 +579,17 @@ static void *vl_api_tap_create_v2_t_print
     s = format (s, "rx-ring-size %u ", (mp->rx_ring_sz));
   if (mp->host_mtu_set)
     s = format (s, "host-mtu-size %u ", (mp->host_mtu_size));
-  if ((mp->tap_flags) & 0x1)
+  if ((mp->tap_flags) & TAP_API_FLAG_GSO)
     s = format (s, "gso-enabled ");
-  if ((mp->tap_flags) & 0x2)
+  if ((mp->tap_flags) & TAP_API_FLAG_CSUM_OFFLOAD)
     s = format (s, "csum-offload-enabled ");
-  if ((mp->tap_flags) & 0x4)
+  if ((mp->tap_flags) & TAP_API_FLAG_PERSIST)
     s = format (s, "persist ");
-  if ((mp->tap_flags) & 0x8)
+  if ((mp->tap_flags) & TAP_API_FLAG_ATTACH)
     s = format (s, "attach ");
-  if ((mp->tap_flags) & 0x16)
+  if ((mp->tap_flags) & TAP_API_FLAG_TUN)
     s = format (s, "tun ");
-  if ((mp->tap_flags) & 0x32)
+  if ((mp->tap_flags) & TAP_API_FLAG_GRO_COALESCE)
     s = format (s, "gro-coalesce-enabled ");
   FINISH;
 }
@@ -695,12 +695,12 @@ static void *vl_api_bond_delete_t_print
   FINISH;
 }
 
-static void *vl_api_bond_enslave_t_print
-  (vl_api_bond_enslave_t * mp, void *handle)
+static void *vl_api_bond_add_member_t_print
+  (vl_api_bond_add_member_t * mp, void *handle)
 {
   u8 *s;
 
-  s = format (0, "SCRIPT: bond_enslave ");
+  s = format (0, "SCRIPT: bond_add_member ");
   s = format (s, "bond_sw_if_index %u ", (mp->bond_sw_if_index));
   s = format (s, "sw_if_index %u ", (mp->sw_if_index));
   if (mp->is_passive)
@@ -723,33 +723,35 @@ static void *vl_api_sw_interface_set_bond_weight_t_print
   FINISH;
 }
 
-static void *vl_api_bond_detach_slave_t_print
-  (vl_api_bond_detach_slave_t * mp, void *handle)
+static void *vl_api_bond_detach_member_t_print
+  (vl_api_bond_detach_member_t * mp, void *handle)
 {
   u8 *s;
 
-  s = format (0, "SCRIPT: bond_detach_slave ");
+  s = format (0, "SCRIPT: bond_detach_member ");
   s = format (s, "sw_if_index %d ", (mp->sw_if_index));
 
   FINISH;
 }
 
-static void *vl_api_sw_interface_bond_dump_t_print
-  (vl_api_sw_interface_bond_dump_t * mp, void *handle)
+static void *vl_api_sw_bond_interface_dump_t_print
+  (vl_api_sw_bond_interface_dump_t * mp, void *handle)
 {
   u8 *s;
 
-  s = format (0, "SCRIPT: sw_interface_bond_dump ");
+  s = format (0, "SCRIPT: sw_bond_interface_dump ");
+  if (mp->sw_if_index != ~0)
+    s = format (s, "sw_if_index %d ", (mp->sw_if_index));
 
   FINISH;
 }
 
-static void *vl_api_sw_interface_slave_dump_t_print
-  (vl_api_sw_interface_slave_dump_t * mp, void *handle)
+static void *vl_api_sw_member_interface_dump_t_print
+  (vl_api_sw_member_interface_dump_t * mp, void *handle)
 {
   u8 *s;
 
-  s = format (0, "SCRIPT: sw_interface_slave_dump ");
+  s = format (0, "SCRIPT: sw_member_interface_dump ");
   s = format (s, "sw_if_index %d ", (mp->sw_if_index));
 
   FINISH;
@@ -2560,6 +2562,21 @@ static void *vl_api_pg_enable_disable_t_print
   FINISH;
 }
 
+static void *vl_api_pg_interface_enable_disable_coalesce_t_print
+  (vl_api_pg_interface_enable_disable_coalesce_t * mp, void *handle)
+{
+  u8 *s;
+
+  s = format (0, "SCRIPT: pg_interface_enable_disable_coalesce ");
+  s = format (s, "sw_if_index %d ", (mp->sw_if_index));
+  if (!mp->coalesce_enabled)
+    s = format (s, "disable");
+  else
+    s = format (s, "enable");
+  FINISH;
+}
+
+
 static void *vl_api_ip_source_and_port_range_check_add_del_t_print
   (vl_api_ip_source_and_port_range_check_add_del_t * mp, void *handle)
 {
@@ -3543,11 +3560,11 @@ _(SW_INTERFACE_SET_VXLAN_BYPASS, sw_interface_set_vxlan_bypass)         \
 _(SW_INTERFACE_SET_GENEVE_BYPASS, sw_interface_set_geneve_bypass)       \
 _(BOND_CREATE, bond_create)                                             \
 _(BOND_DELETE, bond_delete)                                             \
-_(BOND_ENSLAVE, bond_enslave)                                           \
-_(BOND_DETACH_SLAVE, bond_detach_slave)                                 \
+_(BOND_ADD_MEMBER, bond_add_member)                                     \
+_(BOND_DETACH_MEMBER, bond_detach_member)                               \
 _(SW_INTERFACE_SET_BOND_WEIGHT, sw_interface_set_bond_weight)           \
-_(SW_INTERFACE_SLAVE_DUMP, sw_interface_slave_dump)                     \
-_(SW_INTERFACE_BOND_DUMP, sw_interface_bond_dump)                       \
+_(SW_MEMBER_INTERFACE_DUMP, sw_member_interface_dump)                   \
+_(SW_BOND_INTERFACE_DUMP, sw_bond_interface_dump)                       \
 _(SW_INTERFACE_RX_PLACEMENT_DUMP, sw_interface_rx_placement_dump)       \
 _(TAP_CREATE_V2, tap_create_v2)                                         \
 _(TAP_DELETE_V2, tap_delete_v2)                                         \
@@ -3654,6 +3671,7 @@ _(GET_NEXT_INDEX, get_next_index)                                       \
 _(PG_CREATE_INTERFACE,pg_create_interface)                              \
 _(PG_CAPTURE, pg_capture)                                               \
 _(PG_ENABLE_DISABLE, pg_enable_disable)                                 \
+_(PG_INTERFACE_ENABLE_DISABLE_COALESCE, pg_interface_enable_disable_coalesce) \
 _(POLICER_ADD_DEL, policer_add_del)                                     \
 _(POLICER_DUMP, policer_dump)                                           \
 _(POLICER_CLASSIFY_SET_INTERFACE, policer_classify_set_interface)       \

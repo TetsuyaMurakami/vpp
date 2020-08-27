@@ -20,23 +20,6 @@
 #define VIRTIO_PCI_ABI_VERSION 0
 
 /*
- * VirtIO Header, located in BAR 0.
- */
-#define VIRTIO_PCI_HOST_FEATURES  0	/* host's supported features (32bit, RO) */
-#define VIRTIO_PCI_GUEST_FEATURES 4	/* guest's supported features (32, RW) */
-#define VIRTIO_PCI_QUEUE_PFN      8	/* physical address of VQ (32, RW) */
-#define VIRTIO_PCI_QUEUE_NUM      12	/* number of ring entries (16, RO) */
-#define VIRTIO_PCI_QUEUE_SEL      14	/* current VQ selection (16, RW) */
-#define VIRTIO_PCI_QUEUE_NOTIFY   16	/* notify host regarding VQ (16, RW) */
-#define VIRTIO_PCI_STATUS         18	/* device status register (8, RW) */
-#define VIRTIO_PCI_ISR            19	/* interrupt status register, reading
-					 * also clears the register (8, RO) */
-/* Only if MSIX is enabled: */
-#define VIRTIO_MSI_CONFIG_VECTOR  20	/* configuration change vector (16, RW) */
-#define VIRTIO_MSI_QUEUE_VECTOR   22	/* vector for selected VQ notifications
-					   (16, RW) */
-
-/*
  * Vector value used to disable MSI for queue.
  * define in include/linux/virtio_pci.h
  * #define VIRTIO_MSI_NO_VECTOR 0xFFFF
@@ -99,7 +82,8 @@ typedef enum
  * at the end of the avail ring. Host should ignore the avail->flags field. */ \
 /* The Host publishes the avail index for which it expects a kick \
  * at the end of the used ring. Guest should ignore the used->flags field. */ \
-  _ (VHOST_USER_F_PROTOCOL_FEATURES, 30)
+  _ (VHOST_USER_F_PROTOCOL_FEATURES, 30)                                      \
+  _ (VIRTIO_F_VERSION_1, 32)                                                  \
 
 #define VIRTIO_NET_F_CTRL_GUEST_OFFLOADS 2
 #define VIRTIO_NET_F_MTU 3
@@ -164,8 +148,8 @@ typedef struct
   /* About the whole device. */
   u32 device_feature_select;	/* read-write */
   u32 device_feature;		/* read-only */
-  u32 guest_feature_select;	/* read-write */
-  u32 guest_feature;		/* read-write */
+  u32 driver_feature_select;	/* read-write */
+  u32 driver_feature;		/* read-write */
   u16 msix_config;		/* read-write */
   u16 num_queues;		/* read-only */
   u8 device_status;		/* read-write */
@@ -177,13 +161,18 @@ typedef struct
   u16 queue_msix_vector;	/* read-write */
   u16 queue_enable;		/* read-write */
   u16 queue_notify_off;		/* read-only */
-  u32 queue_desc_lo;		/* read-write */
-  u32 queue_desc_hi;		/* read-write */
-  u32 queue_avail_lo;		/* read-write */
-  u32 queue_avail_hi;		/* read-write */
-  u32 queue_used_lo;		/* read-write */
-  u32 queue_used_hi;		/* read-write */
+  u64 queue_desc;		/* read-write */
+  u64 queue_driver;		/* read-write */
+  u64 queue_device;		/* read-write */
 } virtio_pci_common_cfg_t;
+
+typedef struct
+{
+  u8 mac[6];
+  u16 status;
+  u16 max_virtqueue_pairs;
+  u16 mtu;
+} virtio_net_config_t;
 
 typedef struct
 {
@@ -215,6 +204,44 @@ typedef struct
   /* u16 avail_event; */
 } vring_used_t;
 
+typedef struct _virtio_pci_func
+{
+  void (*read_config) (vlib_main_t * vm, virtio_if_t * vif, void *dst,
+		       int len, u32 addr);
+  void (*write_config) (vlib_main_t * vm, virtio_if_t * vif, void *src,
+			int len, u32 addr);
+
+    u64 (*get_device_features) (vlib_main_t * vm, virtio_if_t * vif);
+    u64 (*get_driver_features) (vlib_main_t * vm, virtio_if_t * vif);
+  void (*set_driver_features) (vlib_main_t * vm, virtio_if_t * vif,
+			       u64 features);
+
+    u8 (*get_status) (vlib_main_t * vm, virtio_if_t * vif);
+  void (*set_status) (vlib_main_t * vm, virtio_if_t * vif, u8 status);
+    u8 (*device_reset) (vlib_main_t * vm, virtio_if_t * vif);
+
+    u8 (*get_isr) (vlib_main_t * vm, virtio_if_t * vif);
+
+    u16 (*get_queue_size) (vlib_main_t * vm, virtio_if_t * vif, u16 queue_id);
+  void (*set_queue_size) (vlib_main_t * vm, virtio_if_t * vif, u16 queue_id,
+			  u16 queue_size);
+    u8 (*setup_queue) (vlib_main_t * vm, virtio_if_t * vif, u16 queue_id,
+		       void *p);
+  void (*del_queue) (vlib_main_t * vm, virtio_if_t * vif, u16 queue_id);
+  void (*notify_queue) (vlib_main_t * vm, virtio_if_t * vif, u16 queue_id);
+
+    u16 (*set_config_irq) (vlib_main_t * vm, virtio_if_t * vif, u16 vec);
+    u16 (*set_queue_irq) (vlib_main_t * vm, virtio_if_t * vif, u16 vec,
+			  u16 queue_id);
+
+  void (*get_mac) (vlib_main_t * vm, virtio_if_t * vif);
+  void (*set_mac) (vlib_main_t * vm, virtio_if_t * vif);
+    u16 (*get_device_status) (vlib_main_t * vm, virtio_if_t * vif);
+    u16 (*get_max_queue_pairs) (vlib_main_t * vm, virtio_if_t * vif);
+    u16 (*get_mtu) (vlib_main_t * vm, virtio_if_t * vif);
+  void (*device_debug_config_space) (vlib_main_t * vm, virtio_if_t * vif);
+} virtio_pci_func_t;
+
 typedef struct
 {
   u32 addr;
@@ -229,7 +256,9 @@ typedef struct
   clib_error_t *error;
 } virtio_pci_create_if_args_t;
 
-extern void debug_device_config_space (vlib_main_t * vm, virtio_if_t * vif);
+extern const virtio_pci_func_t virtio_pci_legacy_func;
+extern const virtio_pci_func_t virtio_pci_modern_func;
+
 extern void device_status (vlib_main_t * vm, virtio_if_t * vif);
 void virtio_pci_create_if (vlib_main_t * vm,
 			   virtio_pci_create_if_args_t * args);

@@ -205,10 +205,11 @@ format_tcp_vars (u8 * s, va_list * args)
 	      tc->rcv_opts.tsecr, tc->tsecr_last_ack,
 	      tcp_time_now () - tc->tsval_recent_age);
   s = format (s, " snd_mss %u\n", tc->snd_mss);
-  s = format (s, " rto %u rto_boff %u srtt %u us %.3f rttvar %u rtt_ts %.4f",
-	      tc->rto, tc->rto_boff, tc->srtt, tc->mrtt_us * 1000, tc->rttvar,
-	      tc->rtt_ts);
-  s = format (s, " rtt_seq %u\n", tc->rtt_seq - tc->iss);
+  s = format (s, " rto %u rto_boff %u srtt %.1f us %.3f rttvar %.1f",
+	      tc->rto / 1000, tc->rto_boff, tc->srtt / 1000.0,
+	      tc->mrtt_us * 1e3, tc->rttvar / 1000.0);
+  s = format (s, " rtt_ts %.4f rtt_seq %u\n", tc->rtt_ts,
+	      tc->rtt_seq - tc->iss);
   s = format (s, " next_node %u opaque 0x%x fib_index %u\n",
 	      tc->next_node_index, tc->next_node_opaque, tc->c_fib_index);
   s = format (s, " cong:   %U", format_tcp_congestion, tc);
@@ -340,9 +341,10 @@ format_tcp_scoreboard (u8 * s, va_list * args)
 	      " rxt_sacked %u\n",
 	      sb->sacked_bytes, sb->last_sacked_bytes, sb->lost_bytes,
 	      sb->last_lost_bytes, sb->rxt_sacked);
-  s = format (s, "%Ulast_delivered %u high_sacked %u is_reneging %u\n",
+  s = format (s, "%Ulast_delivered %u high_sacked %u is_reneging %u",
 	      format_white_space, indent, sb->last_bytes_delivered,
 	      sb->high_sacked - tc->iss, sb->is_reneging);
+  s = format (s, " reorder %u\n", sb->reorder);
   s = format (s, "%Ucur_rxt_hole %u high_rxt %u rescue_rxt %u",
 	      format_white_space, indent, sb->cur_rxt_hole,
 	      sb->high_rxt - tc->iss, sb->rescue_rxt - tc->iss);
@@ -687,7 +689,7 @@ tcp_scoreboard_replay (u8 * s, tcp_connection_t * tc, u8 verbose)
   int i, trace_len;
   scoreboard_trace_elt_t *trace;
   u32 next_ack, left, group, has_new_ack = 0;
-  tcp_connection_t _dummy_tc, *dummy_tc = &_dummy_tc;
+  tcp_connection_t _placeholder_tc, *placeholder_tc = &_placeholder_tc;
   sack_block_t *block;
 
   if (!TCP_SCOREBOARD_TRACE)
@@ -699,10 +701,10 @@ tcp_scoreboard_replay (u8 * s, tcp_connection_t * tc, u8 verbose)
   if (!tc)
     return s;
 
-  clib_memset (dummy_tc, 0, sizeof (*dummy_tc));
-  tcp_connection_timers_init (dummy_tc);
-  scoreboard_init (&dummy_tc->sack_sb);
-  dummy_tc->rcv_opts.flags |= TCP_OPTS_FLAG_SACK;
+  clib_memset (placeholder_tc, 0, sizeof (*placeholder_tc));
+  tcp_connection_timers_init (placeholder_tc);
+  scoreboard_init (&placeholder_tc->sack_sb);
+  placeholder_tc->rcv_opts.flags |= TCP_OPTS_FLAG_SACK;
 
 #if TCP_SCOREBOARD_TRACE
   trace = tc->sack_sb.trace;
@@ -713,8 +715,8 @@ tcp_scoreboard_replay (u8 * s, tcp_connection_t * tc, u8 verbose)
     {
       if (trace[i].ack != 0)
 	{
-	  dummy_tc->snd_una = trace[i].ack - 1448;
-	  dummy_tc->snd_una_max = trace[i].ack;
+	  placeholder_tc->snd_una = trace[i].ack - 1448;
+	  placeholder_tc->snd_una_max = trace[i].ack;
 	}
     }
 
@@ -722,7 +724,7 @@ tcp_scoreboard_replay (u8 * s, tcp_connection_t * tc, u8 verbose)
   while (left < trace_len)
     {
       group = trace[left].group;
-      vec_reset_length (dummy_tc->rcv_opts.sacks);
+      vec_reset_length (placeholder_tc->rcv_opts.sacks);
       has_new_ack = 0;
       while (trace[left].group == group)
 	{
@@ -731,7 +733,7 @@ tcp_scoreboard_replay (u8 * s, tcp_connection_t * tc, u8 verbose)
 	      if (verbose)
 		s = format (s, "Adding ack %u, snd_una_max %u, segs: ",
 			    trace[left].ack, trace[left].snd_una_max);
-	      dummy_tc->snd_una_max = trace[left].snd_una_max;
+	      placeholder_tc->snd_una_max = trace[left].snd_una_max;
 	      next_ack = trace[left].ack;
 	      has_new_ack = 1;
 	    }
@@ -740,7 +742,7 @@ tcp_scoreboard_replay (u8 * s, tcp_connection_t * tc, u8 verbose)
 	      if (verbose)
 		s = format (s, "[%u, %u], ", trace[left].start,
 			    trace[left].end);
-	      vec_add2 (dummy_tc->rcv_opts.sacks, block, 1);
+	      vec_add2 (placeholder_tc->rcv_opts.sacks, block, 1);
 	      block->start = trace[left].start;
 	      block->end = trace[left].end;
 	    }
@@ -748,16 +750,17 @@ tcp_scoreboard_replay (u8 * s, tcp_connection_t * tc, u8 verbose)
 	}
 
       /* Push segments */
-      tcp_rcv_sacks (dummy_tc, next_ack);
+      tcp_rcv_sacks (placeholder_tc, next_ack);
       if (has_new_ack)
-	dummy_tc->snd_una = next_ack;
+	placeholder_tc->snd_una = next_ack;
 
       if (verbose)
 	s = format (s, "result: %U", format_tcp_scoreboard,
-		    &dummy_tc->sack_sb);
+		    &placeholder_tc->sack_sb);
 
     }
-  s = format (s, "result: %U", format_tcp_scoreboard, &dummy_tc->sack_sb);
+  s =
+    format (s, "result: %U", format_tcp_scoreboard, &placeholder_tc->sack_sb);
 
   return s;
 }

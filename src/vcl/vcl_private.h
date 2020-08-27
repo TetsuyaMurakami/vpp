@@ -218,6 +218,7 @@ typedef struct vppcom_cfg_t_
   u8 *vpp_api_socket_name;
   u8 *vpp_api_chroot;
   u32 tls_engine;
+  u8 mt_wrk_supported;
 } vppcom_cfg_t;
 
 void vppcom_cfg (vppcom_cfg_t * vcl_cfg);
@@ -307,7 +308,13 @@ typedef struct vcl_worker_
   socket_client_main_t bapi_sock_ctx;
   memory_client_main_t bapi_shm_ctx;
   api_main_t bapi_api_ctx;
+
+  /** vcl needs next epoll_create to go to libc_epoll */
+  u8 vcl_needs_real_epoll;
+  volatile int rpc_done;
 } vcl_worker_t;
+
+typedef void (vcl_rpc_fn_t) (void *args);
 
 typedef struct vppcom_main_t_
 {
@@ -357,6 +364,8 @@ typedef struct vppcom_main_t_
   /* VNET_API_ERROR_FOO -> "Foo" hash table */
   uword *error_string_by_error_number;
 
+  vcl_rpc_fn_t *wrk_rpc_fn;
+
 } vppcom_main_t;
 
 extern vppcom_main_t *vcm;
@@ -392,6 +401,13 @@ vcl_session_get (vcl_worker_t * wrk, u32 session_index)
   if (pool_is_free_index (wrk->sessions, session_index))
     return 0;
   return pool_elt_at_index (wrk->sessions, session_index);
+}
+
+static inline vcl_session_handle_t
+vcl_session_handle_from_wrk_session_index (u32 session_index, u32 wrk_index)
+{
+  ASSERT (session_index < 2 << 24);
+  return (wrk_index << 24 | session_index);
 }
 
 static inline vcl_session_handle_t
@@ -655,6 +671,8 @@ vcl_session_vpp_evt_q (vcl_worker_t * wrk, vcl_session_t * s)
 
 void vcl_send_session_worker_update (vcl_worker_t * wrk, vcl_session_t * s,
 				     u32 wrk_index);
+int vcl_send_worker_rpc (u32 dst_wrk_index, void *data, u32 data_len);
+
 /*
  * VCL Binary API
  */

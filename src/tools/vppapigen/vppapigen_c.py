@@ -525,6 +525,13 @@ def generate_include_types(s, module, stream):
     write('#ifndef included_{module}_api_types_h\n'.format(module=module))
     write('#define included_{module}_api_types_h\n'.format(module=module))
 
+    if 'version' in s['Option']:
+        v = s['Option']['version']
+        (major, minor, patch) = v.split('.')
+        write('#define VL_API_{m}_API_VERSION_MAJOR {v}\n'.format(m=module.upper(), v=major))
+        write('#define VL_API_{m}_API_VERSION_MINOR {v}\n'.format(m=module.upper(), v=minor))
+        write('#define VL_API_{m}_API_VERSION_PATCH {v}\n'.format(m=module.upper(), v=patch))
+
     if len(s['Import']):
         write('/* Imported API files */\n')
         for i in s['Import']:
@@ -637,6 +644,19 @@ def generate_c_boilerplate(services, defines, file_crc, module, stream):
               '                                  .is_autoendian = 0}};\n'
               .format(n=s.caller, ID=s.caller.upper()))
         write('   vl_msg_api_config (&c);\n')
+        try:
+            d = define_hash[s.reply]
+            write('   c = (vl_msg_api_msg_config_t) {{.id = VL_API_{ID} + msg_id_base,\n'
+                  '                                  .name = "{n}",\n'
+                  '                                  .handler = 0,\n'
+                  '                                  .cleanup = vl_noop_handler,\n'
+                  '                                  .endian = vl_api_{n}_t_endian,\n'
+                  '                                  .print = vl_api_{n}_t_print,\n'
+                  '                                  .is_autoendian = 0}};\n'
+                  .format(n=s.reply, ID=s.reply.upper()))
+            write('   vl_msg_api_config (&c);\n')
+        except KeyError:
+            pass
 
     write('   return msg_id_base;\n')
     write('}\n')

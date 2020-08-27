@@ -68,7 +68,7 @@ typedef struct
   };
 
   /** Event type index. */
-  u16 type;
+  u16 event_type;
 
   /** Track for this event.  Tracks allow events to be sorted and
      displayed by track.  Think of 2 dimensional display with time and
@@ -139,7 +139,7 @@ typedef struct
   u32 n_total_events_disable_limit;
 
   /** Dummy event to use when logger is disabled. */
-  elog_event_t dummy_event;
+  elog_event_t placeholder_event;
 
   /** Power of 2 number of elements in ring. */
   uword event_ring_size;
@@ -298,9 +298,9 @@ elog_event_data_inline (elog_main_t * em,
   uword ei;
   word type_index, track_index;
 
-  /* Return the user dummy memory to scribble data into. */
+  /* Return the user placeholder memory to scribble data into. */
   if (PREDICT_FALSE (!elog_is_enabled (em)))
-    return em->dummy_event.data;
+    return em->placeholder_event.data;
 
   type_index = (word) type->type_index_plus_one - 1;
   track_index = (word) track->track_index_plus_one - 1;
@@ -324,7 +324,7 @@ elog_event_data_inline (elog_main_t * em,
   e = vec_elt_at_index (em->event_ring, ei);
 
   e->time_cycles = cpu_time;
-  e->type = type_index;
+  e->event_type = type_index;
   e->track = track_index;
 
   /* Return user data for caller to fill in. */
@@ -352,9 +352,9 @@ elog_event_data_not_inline (elog_main_t * em,
 			    elog_event_type_t * type,
 			    elog_track_t * track, u64 cpu_time)
 {
-  /* Return the user dummy memory to scribble data into. */
+  /* Return the user placeholder memory to scribble data into. */
   if (PREDICT_FALSE (!elog_is_enabled (em)))
-    return em->dummy_event.data;
+    return em->placeholder_event.data;
   return elog_event_data (em, type, track, cpu_time);
 }
 
@@ -543,6 +543,9 @@ elog_write_file (elog_main_t * em, char *clib_file, int flush_ring)
   return error;
 }
 
+clib_error_t *elog_write_file_not_inline (elog_main_t * em, char *clib_file,
+					  int flush_ring);
+
 always_inline clib_error_t *
 elog_read_file (elog_main_t * em, char *clib_file)
 {
@@ -557,6 +560,9 @@ elog_read_file (elog_main_t * em, char *clib_file)
     unserialize_close (&m);
   return error;
 }
+
+clib_error_t *elog_read_file_not_inline (elog_main_t * em, char *clib_file);
+char *format_one_elog_event (void *em_arg, void *ep_arg);
 
 #endif /* CLIB_UNIX */
 

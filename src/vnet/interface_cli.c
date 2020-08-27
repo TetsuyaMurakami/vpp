@@ -66,16 +66,15 @@ compare_interface_names (void *a1, void *a2)
 static clib_error_t *
 show_or_clear_hw_interfaces (vlib_main_t * vm,
 			     unformat_input_t * input,
-			     vlib_cli_command_t * cmd)
+			     vlib_cli_command_t * cmd, int is_show)
 {
   clib_error_t *error = 0;
   vnet_main_t *vnm = vnet_get_main ();
   vnet_interface_main_t *im = &vnm->interface_main;
   vnet_hw_interface_t *hi;
   u32 hw_if_index, *hw_if_indices = 0;
-  int i, verbose = -1, is_show, show_bond = 0;
+  int i, verbose = -1, show_bond = 0;
 
-  is_show = strstr (cmd->path, "show") != 0;
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
     {
       /* See if user wants to show a specific interface. */
@@ -169,6 +168,21 @@ done:
   return error;
 }
 
+static clib_error_t *
+show_hw_interfaces (vlib_main_t * vm,
+		    unformat_input_t * input, vlib_cli_command_t * cmd)
+{
+  return show_or_clear_hw_interfaces (vm, input, cmd, 1 /* is_show */ );
+}
+
+static clib_error_t *
+clear_hw_interfaces (vlib_main_t * vm,
+		     unformat_input_t * input, vlib_cli_command_t * cmd)
+{
+  return show_or_clear_hw_interfaces (vm, input, cmd, 0 /* is_show */ );
+}
+
+
 /*?
  * Display more detailed information about all or a list of given interfaces.
  * The verboseness of the output can be controlled by the following optional
@@ -230,7 +244,7 @@ VLIB_CLI_COMMAND (show_hw_interfaces_command, static) = {
   .path = "show hardware-interfaces",
   .short_help = "show hardware-interfaces [brief|verbose|detail] [bond] "
     "[<interface> [<interface> [..]]] [<sw_idx> [<sw_idx> [..]]]",
-  .function = show_or_clear_hw_interfaces,
+  .function = show_hw_interfaces,
 };
 /* *INDENT-ON* */
 
@@ -251,7 +265,7 @@ VLIB_CLI_COMMAND (clear_hw_interface_counters_command, static) = {
   .path = "clear hardware-interfaces",
   .short_help = "clear hardware-interfaces "
     "[<interface> [<interface> [..]]] [<sw_idx> [<sw_idx> [..]]]",
-  .function = show_or_clear_hw_interfaces,
+  .function = clear_hw_interfaces,
 };
 /* *INDENT-ON* */
 
@@ -1959,16 +1973,27 @@ vnet_pcap_dispatch_trace_configure (vnet_pcap_dispatch_trace_args_t * a)
 
   if (a->rx_enable + a->tx_enable + a->drop_enable)
     {
+      void *save_pcap_data;
+
       /* Sanity check max bytes per pkt */
       if (a->max_bytes_per_pkt < 32 || a->max_bytes_per_pkt > 9000)
 	return VNET_API_ERROR_INVALID_MEMORY_SIZE;
 
       /* Clean up from previous run, if any */
-      vec_free (pm->file_name);
-      vec_free (pm->pcap_data);
+      vec_reset_length (pm->pcap_data);
+
+      /* Throw away the data buffer? */
+      if (a->free_data)
+	vec_free (pm->pcap_data);
+
+      save_pcap_data = pm->pcap_data;
+
       memset (pm, 0, sizeof (*pm));
 
-      vec_validate_aligned (vnet_trace_dummy, 2048, CLIB_CACHE_LINE_BYTES);
+      pm->pcap_data = save_pcap_data;
+
+      vec_validate_aligned (vnet_trace_placeholder, 2048,
+			    CLIB_CACHE_LINE_BYTES);
       if (pm->lock == 0)
 	clib_spinlock_init (&(pm->lock));
 
@@ -1989,6 +2014,14 @@ vnet_pcap_dispatch_trace_configure (vnet_pcap_dispatch_trace_args_t * a)
       pm->file_name = (char *) a->filename;
       pm->n_packets_captured = 0;
       pm->packet_type = PCAP_PACKET_TYPE_ethernet;
+      /* Preallocate the data vector? */
+      if (a->preallocate_data)
+	{
+	  vec_validate
+	    (pm->pcap_data, a->packets_to_capture
+	     * ((sizeof (pcap_packet_header_t) + a->max_bytes_per_pkt)));
+	  vec_reset_length (pm->pcap_data);
+	}
       pm->n_packets_to_capture = a->packets_to_capture;
       pp->pcap_sw_if_index = a->sw_if_index;
       if (a->filter)
@@ -2021,6 +2054,9 @@ vnet_pcap_dispatch_trace_configure (vnet_pcap_dispatch_trace_args_t * a)
 	      clib_error_report (error);
 	      return VNET_API_ERROR_SYSCALL_ERROR_1;
 	    }
+	  vec_free (pm->file_name);
+	  if (a->free_data)
+	    vec_free (pm->pcap_data);
 	  return 0;
 	}
       else
@@ -2043,9 +2079,11 @@ pcap_trace_command_fn (vlib_main_t * vm,
   int rv;
   int rx_enable = 0;
   int tx_enable = 0;
+  int preallocate_data = 0;
   int drop_enable = 0;
   int status = 0;
   int filter = 0;
+  int free_data = 0;
   u32 sw_if_index = 0;		/* default: any interface */
 
   /* Get a line of input. */
@@ -2077,7 +2115,16 @@ pcap_trace_command_fn (vlib_main_t * vm,
       else if (unformat (line_input, "intfc %U",
 			 unformat_vnet_sw_interface, vnm, &sw_if_index))
 	;
-      else if (unformat (line_input, "intfc any"))
+      else if (unformat (line_input, "interface %U",
+			 unformat_vnet_sw_interface, vnm, &sw_if_index))
+	;
+      else if (unformat (line_input, "preallocate-data %=",
+			 &preallocate_data, 1))
+	;
+      else if (unformat (line_input, "free-data %=", &free_data, 1))
+	;
+      else if (unformat (line_input, "intfc any")
+	       || unformat (line_input, "interface any"))
 	sw_if_index = 0;
       else if (unformat (line_input, "filter"))
 	filter = 1;
@@ -2094,6 +2141,8 @@ pcap_trace_command_fn (vlib_main_t * vm,
   a->filename = filename;
   a->rx_enable = rx_enable;
   a->tx_enable = tx_enable;
+  a->preallocate_data = preallocate_data;
+  a->free_data = free_data;
   a->drop_enable = drop_enable;
   a->status = status;
   a->packets_to_capture = max;
@@ -2163,6 +2212,12 @@ pcap_trace_command_fn (vlib_main_t * vm,
  * - <b>max-bytes-per-pkt <nnnn></b> - Maximum number of bytes to capture
  *   for each packet. Must be >= 32, <= 9000.
  *
+ * - <b>preallocate-data</b> - Preallocate the data buffer, to avoid
+ *   vector expansion delays during pcap capture
+ *
+ * - <b>free-data</b> - Free the data buffer. Ordinarily it's a feature
+ *   to retain the data buffer so this option is seldom used.
+ *
  * - <b>intfc <interface-name>|any</b> - Used to specify a given interface,
  *   or use '<em>any</em>' to run packet capture on all interfaces.
  *   '<em>any</em>' is the default if not provided. Settings from a previous
@@ -2212,7 +2267,9 @@ pcap_trace_command_fn (vlib_main_t * vm,
 VLIB_CLI_COMMAND (pcap_tx_trace_command, static) = {
     .path = "pcap trace",
     .short_help =
-    "pcap trace rx tx drop off [max <nn>] [intfc <interface>|any] [file <name>] [status] [max-bytes-per-pkt <nnnn>][filter]",
+    "pcap trace [rx] [tx] [drop] [off] [max <nn>] [intfc <interface>|any]\n"
+    "           [file <name>] [status] [max-bytes-per-pkt <nnnn>][filter]\n"
+    "           [preallocate-data][free-data]",
     .function = pcap_trace_command_fn,
 };
 /* *INDENT-ON* */

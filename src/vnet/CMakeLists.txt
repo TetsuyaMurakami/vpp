@@ -29,6 +29,7 @@ list(APPEND VNET_SOURCES
   devices/netlink.c
   flow/flow.c
   flow/flow_cli.c
+  flow/flow_api.c
   handoff.c
   interface.c
   interface_api.c
@@ -77,6 +78,8 @@ list(APPEND VNET_API_FILES
   interface.api
   interface_types.api
   ip/ip_types.api
+  flow/flow_types.api
+  flow/flow.api
 )
 
 ##############################################################################
@@ -489,6 +492,7 @@ list(APPEND VNET_HEADERS
   ip/ip6_hop_by_hop_packet.h
   ip/ip6_packet.h
   ip/ip.h
+  ip/ip_table.h
   ip/ip_interface.h
   ip/ip_packet.h
   ip/ip_source_and_port_range_check.h
@@ -581,6 +585,7 @@ list(APPEND VNET_SOURCES
   ipsec/ipsec_format.c
   ipsec/ipsec_handoff.c
   ipsec/ipsec_input.c
+  ipsec/ipsec_itf.c
   ipsec/ipsec_punt.c
   ipsec/ipsec_sa.c
   ipsec/ipsec_spd.c
@@ -999,6 +1004,8 @@ list(APPEND VNET_SOURCES
 )
 
 list(APPEND VNET_HEADERS
+  gso/gro.h
+  gso/gro_func.h
   gso/hdr_offset_parser.h
   gso/gso.h
 )
@@ -1093,12 +1100,16 @@ list(APPEND VNET_SOURCES
   devices/virtio/vhost_user_api.c
   devices/virtio/virtio.c
   devices/virtio/virtio_api.c
+  devices/virtio/virtio_pci_legacy.c
+  devices/virtio/virtio_pci_modern.c
   devices/virtio/virtio_types_api.c
 )
 
 list(APPEND VNET_HEADERS
   devices/virtio/pci.h
   devices/virtio/virtio.h
+  devices/virtio/virtio_pci_legacy.h
+  devices/virtio/virtio_pci_modern.h
   devices/virtio/vhost_user.h
   devices/virtio/virtio_types_api.h
 )

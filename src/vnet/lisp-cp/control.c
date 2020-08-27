@@ -1699,7 +1699,7 @@ vnet_lisp_use_petr (ip_address_t * ip, u8 is_add)
 
   if (is_add)
     {
-      /* Create dummy petr locator-set */
+      /* Create placeholder petr locator-set */
       clib_memset (&loc, 0, sizeof (loc));
       gid_address_from_ip (&loc.address, ip);
       loc.priority = 1;
@@ -2083,14 +2083,9 @@ vnet_lisp_add_del_locator_set (vnet_lisp_add_del_locator_set_args_t * a,
 	      ls->name = vec_dup (a->name);
 
 	      if (!lcm->locator_set_index_by_name)
-		lcm->locator_set_index_by_name = hash_create_vec (
-								   /* size */
-								   0,
-								   sizeof
-								   (ls->name
-								    [0]),
-								   sizeof
-								   (uword));
+		lcm->locator_set_index_by_name =
+		  hash_create_vec ( /* size */ 0, sizeof (ls->name[0]),
+				   sizeof (uword));
 	      hash_set_mem (lcm->locator_set_index_by_name, ls->name,
 			    ls_index);
 
@@ -2877,7 +2872,7 @@ lisp_cp_output (vlib_main_t * vm, vlib_node_runtime_t * node,
   return 0;
 }
 
-/* dummy node used only for statistics */
+/* placeholder node used only for statistics */
 /* *INDENT-OFF* */
 VLIB_REGISTER_NODE (lisp_cp_output_node) = {
   .function = lisp_cp_output,

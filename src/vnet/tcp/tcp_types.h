@@ -22,10 +22,14 @@
 #include <vnet/session/transport.h>
 #include <vppinfra/tw_timer_16t_2w_512sl.h>
 
-#define TCP_TICK 0.001			/**< TCP tick period (s) */
-#define THZ (u32) (1/TCP_TICK)		/**< TCP tick frequency */
-#define TCP_TSTAMP_RESOLUTION TCP_TICK	/**< Time stamp resolution */
-#define TCP_PAWS_IDLE 24 * 24 * 60 * 60 * THZ /**< 24 days */
+#define TCP_TICK 0.000001			/**< TCP tick period (s) */
+#define THZ (u32) (1/TCP_TICK)			/**< TCP tick frequency */
+
+#define TCP_TSTP_TICK 0.001			/**< Timestamp tick (s) */
+#define TCP_TSTP_HZ (u32) (1/TCP_TSTP_TICK)	/**< Timestamp freq */
+#define TCP_PAWS_IDLE (24 * 86400 * TCP_TSTP_HZ)/**< 24 days */
+#define TCP_TSTP_TO_HZ (u32) (TCP_TSTP_TICK * THZ)
+
 #define TCP_FIB_RECHECK_PERIOD	1 * THZ	/**< Recheck every 1s */
 #define TCP_MAX_OPTION_SPACE 40
 #define TCP_CC_DATA_SZ 24
@@ -62,7 +66,6 @@ typedef enum _tcp_state
 /** TCP timers */
 #define foreach_tcp_timer               \
   _(RETRANSMIT, "RETRANSMIT")           \
-  _(DELACK, "DELAYED ACK")              \
   _(PERSIST, "PERSIST")                 \
   _(WAITCLOSE, "WAIT CLOSE")            \
   _(RETRANSMIT_SYN, "RETRANSMIT SYN")   \
@@ -148,6 +151,7 @@ typedef enum tcp_connection_flag_
 #define TCP_SCOREBOARD_TRACE (0)
 #define TCP_MAX_SACK_BLOCKS 255	/**< Max number of SACK blocks stored */
 #define TCP_INVALID_SACK_HOLE_INDEX ((u32)~0)
+#define TCP_MAX_SACK_REORDER 300
 
 typedef struct _scoreboard_trace_elt
 {
@@ -182,7 +186,8 @@ typedef struct _sack_scoreboard
   u32 lost_bytes;			/**< Bytes lost as per RFC6675 */
   u32 last_lost_bytes;			/**< Number of bytes last lost */
   u32 cur_rxt_hole;			/**< Retransmitting from this hole */
-  u8 is_reneging;
+  u32 reorder;				/**< Estimate of segment reordering */
+  u8 is_reneging;			/**< Flag set if peer is reneging*/
 
 #if TCP_SCOREBOARD_TRACE
   scoreboard_trace_elt_t *trace;
@@ -281,6 +286,7 @@ typedef struct _tcp_connection
   u8 cfg_flags;			/**< Connection configuration flags */
   u16 flags;			/**< Connection flags (see tcp_conn_flags_e) */
   u32 timers[TCP_N_TIMERS];	/**< Timer handles into timer wheel */
+  u32 pending_timers;		/**< Expired timers not yet handled */
 
   u64 segs_in;		/** RFC4022/4898 tcpHCInSegs/tcpEStatsPerfSegsIn */
   u64 bytes_in;		/** RFC4898 tcpEStatsPerfHCDataOctetsIn */
@@ -355,7 +361,7 @@ typedef struct _tcp_connection
   /* RTT and RTO */
   u32 rto;		/**< Retransmission timeout */
   u32 rto_boff;		/**< Index for RTO backoff */
-  u32 srtt;		/**< Smoothed RTT */
+  u32 srtt;		/**< Smoothed RTT measured in @ref TCP_TICK */
   u32 rttvar;		/**< Smoothed mean RTT difference. Approximates variance */
   u32 rtt_seq;		/**< Sequence number for tracked ACK */
   f64 rtt_ts;		/**< Timestamp for tracked ACK */

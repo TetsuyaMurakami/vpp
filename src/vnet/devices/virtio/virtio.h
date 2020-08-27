@@ -22,6 +22,7 @@
 #include <linux/virtio_net.h>
 #include <linux/virtio_pci.h>
 #include <linux/virtio_ring.h>
+#include <vnet/gso/gro.h>
 
 #define foreach_virtio_net_features      \
   _ (VIRTIO_NET_F_CSUM, 0)	/* Host handles pkts w/ partial csum */ \
@@ -56,7 +57,7 @@
 /* The Host publishes the avail index for which it expects a kick \
  * at the end of the used ring. Guest should ignore the used->flags field. */ \
   _ (VHOST_USER_F_PROTOCOL_FEATURES, 30) \
-  _ (VIRTIO_F_VERSION_1, 32)
+  _ (VIRTIO_F_VERSION_1, 32)  /* v1.0 compliant. */           \
 
 #define foreach_virtio_if_flag		\
   _(0, ADMIN_UP, "admin-up")		\
@@ -69,15 +70,15 @@ typedef enum
 #undef _
 } virtio_if_flag_t;
 
-#define VIRTIO_NUM_RX_DESC 256
-#define VIRTIO_NUM_TX_DESC 256
-
 #define VIRTIO_FEATURE(X) (1ULL << X)
 
 #define TX_QUEUE(X) ((X*2) + 1)
 #define RX_QUEUE(X) (X*2)
 #define TX_QUEUE_ACCESS(X) (X/2)
 #define RX_QUEUE_ACCESS(X) (X/2)
+
+#define VIRTIO_NUM_RX_DESC 256
+#define VIRTIO_NUM_TX_DESC 256
 
 #define foreach_virtio_if_types \
   _ (TAP, 0)                    \
@@ -91,15 +92,6 @@ typedef enum
 #undef _
     VIRTIO_IF_N_TYPES = (1 << 3),
 } virtio_if_type_t;
-
-
-typedef struct
-{
-  u8 mac[6];
-  u16 status;
-  u16 max_virtqueue_pairs;
-  u16 mtu;
-} virtio_net_config_t;
 
 #define VIRTIO_RING_FLAG_MASK_INT 1
 
@@ -123,6 +115,7 @@ typedef struct
   u16 last_used_idx;
   u16 last_kick_avail_idx;
   u32 call_file_index;
+  gro_flow_table_t *flow_table;
 } virtio_vring_t;
 
 typedef union
@@ -136,6 +129,9 @@ typedef union
   };
   u32 as_u32;
 } pci_addr_t;
+
+/* forward declaration */
+typedef struct _virtio_pci_func virtio_pci_func_t;
 
 typedef struct
 {
@@ -165,35 +161,51 @@ typedef struct
   u32 sw_if_index;
 
     CLIB_CACHE_LINE_ALIGN_MARK (cacheline1);
-  union
-  {
-    u32 id;
-    pci_addr_t pci_addr;
-  };
-  int *vhost_fds;
+  int packet_coalesce;
   u32 dev_instance;
   u32 numa_node;
   u64 remote_features;
 
   /* error */
   clib_error_t *error;
-  u8 support_int_mode;		/* support interrupt mode */
-  u16 max_queue_pairs;
-  u16 msix_table_size;
-  u8 status;
   u8 mac_addr[6];
-  u8 *host_if_name;
-  u8 *net_ns;
-  u8 *host_bridge;
-  u8 host_mac_addr[6];
-  ip4_address_t host_ip4_addr;
-  u8 host_ip4_prefix_len;
-  ip6_address_t host_ip6_addr;
-  u8 host_ip6_prefix_len;
-  u32 host_mtu_size;
-  u32 tap_flags;
-  int ifindex;
-  virtio_vring_t *cxq_vring;
+  union
+  {
+    struct			/* tun/tap interface */
+    {
+      ip6_address_t host_ip6_addr;
+      int *vhost_fds;
+      u8 *host_if_name;
+      u8 *net_ns;
+      u8 *host_bridge;
+      u8 host_mac_addr[6];
+      u32 id;
+      u32 host_mtu_size;
+      u32 tap_flags;
+      int ifindex;
+      ip4_address_t host_ip4_addr;
+      u8 host_ip4_prefix_len;
+      u8 host_ip6_prefix_len;
+    };
+    struct			/* native virtio */
+    {
+      void *bar;
+      virtio_vring_t *cxq_vring;
+      pci_addr_t pci_addr;
+      u32 bar_id;
+      u32 notify_off_multiplier;
+      u32 is_modern;
+      u16 common_offset;
+      u16 notify_offset;
+      u16 device_offset;
+      u16 isr_offset;
+      u16 max_queue_pairs;
+      u16 msix_table_size;
+      u8 support_int_mode;	/* support interrupt mode */
+      u8 status;
+    };
+  };
+  const virtio_pci_func_t *virtio_pci_func;
 } virtio_if_t;
 
 typedef struct
@@ -221,7 +233,10 @@ extern void virtio_free_rx_buffers (vlib_main_t * vm, virtio_vring_t * vring);
 extern void virtio_set_net_hdr_size (virtio_if_t * vif);
 extern void virtio_show (vlib_main_t * vm, u32 * hw_if_indices, u8 show_descr,
 			 u32 type);
+extern void virtio_set_packet_coalesce (virtio_if_t * vif);
 extern void virtio_pci_legacy_notify_queue (vlib_main_t * vm,
+					    virtio_if_t * vif, u16 queue_id);
+extern void virtio_pci_modern_notify_queue (vlib_main_t * vm,
 					    virtio_if_t * vif, u16 queue_id);
 format_function_t format_virtio_device_name;
 format_function_t format_virtio_log_name;
@@ -230,7 +245,12 @@ static_always_inline void
 virtio_kick (vlib_main_t * vm, virtio_vring_t * vring, virtio_if_t * vif)
 {
   if (vif->type == VIRTIO_IF_TYPE_PCI)
-    virtio_pci_legacy_notify_queue (vm, vif, vring->queue_id);
+    {
+      if (vif->is_modern)
+	virtio_pci_modern_notify_queue (vm, vif, vring->queue_id);
+      else
+	virtio_pci_legacy_notify_queue (vm, vif, vring->queue_id);
+    }
   else
     {
       u64 x = 1;
@@ -240,7 +260,6 @@ virtio_kick (vlib_main_t * vm, virtio_vring_t * vring, virtio_if_t * vif)
       vring->last_kick_avail_idx = vring->avail->idx;
     }
 }
-
 
 #define virtio_log_debug(vif, f, ...)				\
 {								\

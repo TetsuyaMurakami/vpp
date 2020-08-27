@@ -85,8 +85,8 @@ static stat_segment_directory_entry_t *
 get_stat_vector_r (stat_client_main_t * sm)
 {
   ASSERT (sm->shared_header);
-  return stat_segment_pointer (sm->shared_header,
-			       sm->shared_header->directory_offset);
+  return stat_segment_adjust (sm,
+			      (void *) sm->shared_header->directory_vector);
 }
 
 int
@@ -142,7 +142,7 @@ stat_segment_connect_r (const char *socket_name, stat_client_main_t * sm)
   sm->memory_size = st.st_size;
   sm->shared_header = memaddr;
   sm->directory_vector =
-    stat_segment_pointer (memaddr, sm->shared_header->directory_offset);
+    stat_segment_adjust (sm, (void *) sm->shared_header->directory_vector);
 
   return 0;
 }
@@ -177,7 +177,8 @@ stat_segment_heartbeat_r (stat_client_main_t * sm)
   /* Has directory been update? */
   if (sm->shared_header->epoch != sm->current_epoch)
     return 0;
-  stat_segment_access_start (&sa, sm);
+  if (stat_segment_access_start (&sa, sm))
+    return 0;
   ep = vec_elt_at_index (sm->directory_vector, STAT_COUNTER_HEARTBEAT);
   if (!stat_segment_access_end (&sa, sm))
     return 0.0;
@@ -198,7 +199,7 @@ copy_data (stat_segment_directory_entry_t * ep, stat_client_main_t * sm)
   int i;
   vlib_counter_t **combined_c;	/* Combined counter */
   counter_t **simple_c;		/* Simple counter */
-  uint64_t *offset_vector;
+  uint64_t *error_vector;
 
   assert (sm->shared_header);
 
@@ -211,67 +212,47 @@ copy_data (stat_segment_directory_entry_t * ep, stat_client_main_t * sm)
       break;
 
     case STAT_DIR_TYPE_COUNTER_VECTOR_SIMPLE:
-      if (ep->offset == 0)
-	return result;
-      simple_c = stat_segment_pointer (sm->shared_header, ep->offset);
+      simple_c = stat_segment_adjust (sm, ep->data);
       result.simple_counter_vec = vec_dup (simple_c);
-      offset_vector =
-	stat_segment_pointer (sm->shared_header, ep->offset_vector);
       for (i = 0; i < vec_len (simple_c); i++)
 	{
-	  counter_t *cb =
-	    stat_segment_pointer (sm->shared_header, offset_vector[i]);
+	  counter_t *cb = stat_segment_adjust (sm, simple_c[i]);
 	  result.simple_counter_vec[i] = vec_dup (cb);
 	}
       break;
 
     case STAT_DIR_TYPE_COUNTER_VECTOR_COMBINED:
-      if (ep->offset == 0)
-	return result;
-      combined_c = stat_segment_pointer (sm->shared_header, ep->offset);
+      combined_c = stat_segment_adjust (sm, ep->data);
       result.combined_counter_vec = vec_dup (combined_c);
-      offset_vector =
-	stat_segment_pointer (sm->shared_header, ep->offset_vector);
       for (i = 0; i < vec_len (combined_c); i++)
 	{
-	  vlib_counter_t *cb =
-	    stat_segment_pointer (sm->shared_header, offset_vector[i]);
+	  vlib_counter_t *cb = stat_segment_adjust (sm, combined_c[i]);
 	  result.combined_counter_vec[i] = vec_dup (cb);
 	}
       break;
 
     case STAT_DIR_TYPE_ERROR_INDEX:
       /* Gather errors from all threads into a vector */
-      offset_vector = stat_segment_pointer (sm->shared_header,
-					    sm->shared_header->error_offset);
-      vec_validate (result.error_vector, vec_len (offset_vector) - 1);
-      for (i = 0; i < vec_len (offset_vector); i++)
+      error_vector =
+	stat_segment_adjust (sm, (void *) sm->shared_header->error_vector);
+      vec_validate (result.error_vector, vec_len (error_vector) - 1);
+      for (i = 0; i < vec_len (error_vector); i++)
 	{
-	  counter_t *cb =
-	    stat_segment_pointer (sm->shared_header, offset_vector[i]);
+	  counter_t *cb = stat_segment_adjust (sm, (void *) error_vector[i]);
 	  result.error_vector[i] = cb[ep->index];
 	}
       break;
 
     case STAT_DIR_TYPE_NAME_VECTOR:
-      if (ep->offset == 0)
-	return result;
-      uint8_t **name_vector =
-	stat_segment_pointer (sm->shared_header, ep->offset);
-      result.name_vector = vec_dup (name_vector);
-      offset_vector =
-	stat_segment_pointer (sm->shared_header, ep->offset_vector);
-      for (i = 0; i < vec_len (name_vector); i++)
-	{
-	  if (offset_vector[i])
-	    {
-	      u8 *name =
-		stat_segment_pointer (sm->shared_header, offset_vector[i]);
-	      result.name_vector[i] = vec_dup (name);
-	    }
-	  else
-	    result.name_vector[i] = 0;
-	}
+      {
+	uint8_t **name_vector = stat_segment_adjust (sm, ep->data);
+	result.name_vector = vec_dup (name_vector);
+	for (i = 0; i < vec_len (name_vector); i++)
+	  {
+	    u8 *name = stat_segment_adjust (sm, name_vector[i]);
+	    result.name_vector[i] = vec_dup (name);
+	  }
+      }
       break;
 
     case STAT_DIR_TYPE_EMPTY:
@@ -301,8 +282,16 @@ stat_segment_data_free (stat_segment_data_t * res)
 	    vec_free (res[i].combined_counter_vec[j]);
 	  vec_free (res[i].combined_counter_vec);
 	  break;
+	case STAT_DIR_TYPE_NAME_VECTOR:
+	  for (j = 0; j < vec_len (res[i].name_vector); j++)
+	    vec_free (res[i].name_vector[j]);
+	  vec_free (res[i].name_vector);
+	  break;
+	case STAT_DIR_TYPE_ERROR_INDEX:
+	  vec_free (res[i].error_vector);
+	  break;
 	default:
-	  ;
+	  assert (0);
 	}
       free (res[i].name);
     }
@@ -328,7 +317,8 @@ stat_segment_ls_r (uint8_t ** patterns, stat_client_main_t * sm)
 	}
     }
 
-  stat_segment_access_start (&sa, sm);
+  if (stat_segment_access_start (&sa, sm))
+    return 0;
 
   stat_segment_directory_entry_t *counter_vec = get_stat_vector_r (sm);
   for (j = 0; j < vec_len (counter_vec); j++)
@@ -381,7 +371,9 @@ stat_segment_dump_r (uint32_t * stats, stat_client_main_t * sm)
   if (sm->shared_header->epoch != sm->current_epoch)
     return 0;
 
-  stat_segment_access_start (&sa, sm);
+  if (stat_segment_access_start (&sa, sm))
+    return 0;
+
   for (i = 0; i < vec_len (stats); i++)
     {
       /* Collect counter */
@@ -436,7 +428,8 @@ stat_segment_dump_entry_r (uint32_t index, stat_client_main_t * sm)
   stat_segment_data_t *res = 0;
   stat_segment_access_t sa;
 
-  stat_segment_access_start (&sa, sm);
+  if (stat_segment_access_start (&sa, sm))
+    return 0;
 
   /* Collect counter */
   ep = vec_elt_at_index (sm->directory_vector, index);
@@ -464,7 +457,8 @@ stat_segment_index_to_name_r (uint32_t index, stat_client_main_t * sm)
   /* Has directory been update? */
   if (sm->shared_header->epoch != sm->current_epoch)
     return 0;
-  stat_segment_access_start (&sa, sm);
+  if (stat_segment_access_start (&sa, sm))
+    return 0;
   vec = get_stat_vector_r (sm);
   ep = vec_elt_at_index (vec, index);
   if (!stat_segment_access_end (&sa, sm))

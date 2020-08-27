@@ -318,9 +318,9 @@ void BV (clib_bihash_init)
 void BV (clib_bihash_init2) (BVT (clib_bihash_init2_args) * a);
 
 #if BIHASH_32_64_SVM
-void BV (clib_bihash_master_init_svm)
+void BV (clib_bihash_initiator_init_svm)
   (BVT (clib_bihash) * h, char *name, u32 nbuckets, u64 memory_size);
-void BV (clib_bihash_slave_init_svm)
+void BV (clib_bihash_responder_init_svm)
   (BVT (clib_bihash) * h, char *name, int fd);
 #endif
 
@@ -388,7 +388,7 @@ static inline int BV (clib_bihash_search_inline_with_hash)
   /* *INDENT-ON* */
 
 #if BIHASH_LAZY_INSTANTIATE
-  if (PREDICT_FALSE (alloc_arena (h) == 0))
+  if (PREDICT_FALSE (h->instantiated == 0))
     return -1;
 #endif
 
@@ -453,7 +453,7 @@ static inline void BV (clib_bihash_prefetch_data)
   BVT (clib_bihash_bucket) * b;
 
 #if BIHASH_LAZY_INSTANTIATE
-  if (PREDICT_FALSE (alloc_arena (h) == 0))
+  if (PREDICT_FALSE (h->instantiated == 0))
     return;
 #endif
 
@@ -489,7 +489,7 @@ static inline int BV (clib_bihash_search_inline_2_with_hash)
   ASSERT (valuep);
 
 #if BIHASH_LAZY_INSTANTIATE
-  if (PREDICT_FALSE (alloc_arena (h) == 0))
+  if (PREDICT_FALSE (h->instantiated == 0))
     return -1;
 #endif
 
