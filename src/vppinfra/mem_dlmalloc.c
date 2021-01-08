@@ -21,9 +21,6 @@
 #include <vppinfra/elf_clib.h>
 #include <vppinfra/sanitizer.h>
 
-void *clib_per_cpu_mheaps[CLIB_MAX_MHEAPS];
-void *clib_per_numa_mheaps[CLIB_MAX_NUMAS];
-
 typedef struct
 {
   /* Address of callers: outer first, inner last. */
@@ -77,16 +74,16 @@ mheap_get_trace (uword offset, uword size)
   /* Spurious Coverity warnings be gone. */
   clib_memset (&trace, 0, sizeof (trace));
 
-  /* Skip our frame and mspace_get_aligned's frame */
-  n_callers = clib_backtrace (trace.callers, ARRAY_LEN (trace.callers), 2);
-  if (n_callers == 0)
-    return;
-
   clib_spinlock_lock (&tm->lock);
 
   /* Turn off tracing to avoid embarrassment... */
   save_enabled = tm->enabled;
   tm->enabled = 0;
+
+  /* Skip our frame and mspace_get_aligned's frame */
+  n_callers = clib_backtrace (trace.callers, ARRAY_LEN (trace.callers), 2);
+  if (n_callers == 0)
+    goto out;
 
   if (!tm->trace_by_callers)
     tm->trace_by_callers =
@@ -140,6 +137,8 @@ mheap_get_trace (uword offset, uword size)
   t->n_bytes += size;
   t->offset = offset;		/* keep a sample to autopsy */
   hash_set (tm->trace_index_by_offset, offset, t - tm->traces);
+
+out:
   tm->enabled = save_enabled;
   clib_spinlock_unlock (&tm->lock);
 }
@@ -197,68 +196,105 @@ mheap_trace_main_free (mheap_trace_main_t * tm)
   hash_free (tm->trace_index_by_offset);
 }
 
+static clib_mem_heap_t *
+clib_mem_create_heap_internal (void *base, uword size,
+			       clib_mem_page_sz_t log2_page_sz, int is_locked,
+			       char *name)
+{
+  clib_mem_heap_t *h;
+  u8 flags = 0;
+  int sz = sizeof (clib_mem_heap_t);
+
+  if (base == 0)
+    {
+      log2_page_sz = clib_mem_log2_page_size_validate (log2_page_sz);
+      size = round_pow2 (size, clib_mem_page_bytes (log2_page_sz));
+      base = clib_mem_vm_map_internal (0, log2_page_sz, size, -1, 0,
+				       "main heap");
+
+      if (base == CLIB_MEM_VM_MAP_FAILED)
+	return 0;
+
+      flags = CLIB_MEM_HEAP_F_UNMAP_ON_DESTROY;
+    }
+  else
+    log2_page_sz = CLIB_MEM_PAGE_SZ_UNKNOWN;
+
+  if (is_locked)
+    flags |= CLIB_MEM_HEAP_F_LOCKED;
+
+  h = base;
+  h->base = base;
+  h->size = size;
+  h->log2_page_sz = log2_page_sz;
+  h->flags = flags;
+  sz = strlen (name);
+  strcpy (h->name, name);
+  sz = round_pow2 (sz + sizeof (clib_mem_heap_t), 16);
+  h->mspace = create_mspace_with_base (base + sz, size - sz, is_locked);
+
+  mspace_disable_expand (h->mspace);
+
+  CLIB_MEM_POISON (mspace_least_addr (h->mspace),
+		   mspace_footprint (h->mspace));
+
+  return h;
+}
+
 /* Initialize CLIB heap based on memory/size given by user.
    Set memory to 0 and CLIB will try to allocate its own heap. */
 static void *
-clib_mem_init_internal (void *memory, uword memory_size, int set_heap)
+clib_mem_init_internal (void *base, uword size,
+			clib_mem_page_sz_t log2_page_sz)
 {
-  u8 *heap;
+  clib_mem_heap_t *h;
 
-  if (memory)
-    {
-      heap = create_mspace_with_base (memory, memory_size, 1 /* locked */ );
-      mspace_disable_expand (heap);
-    }
-  else
-    heap = create_mspace (memory_size, 1 /* locked */ );
+  clib_mem_main_init ();
 
-  CLIB_MEM_POISON (mspace_least_addr (heap), mspace_footprint (heap));
+  h = clib_mem_create_heap_internal (base, size, log2_page_sz,
+				     1 /*is_locked */ , "main heap");
 
-  if (set_heap)
-    clib_mem_set_heap (heap);
+  clib_mem_set_heap (h);
 
   if (mheap_trace_main.lock == 0)
     clib_spinlock_init (&mheap_trace_main.lock);
 
-  return heap;
+  return h;
 }
 
-void *
+__clib_export void *
 clib_mem_init (void *memory, uword memory_size)
 {
   return clib_mem_init_internal (memory, memory_size,
-				 1 /* do clib_mem_set_heap */ );
+				 CLIB_MEM_PAGE_SZ_DEFAULT);
 }
 
-void *
+__clib_export void *
+clib_mem_init_with_page_size (uword memory_size,
+			      clib_mem_page_sz_t log2_page_sz)
+{
+  return clib_mem_init_internal (0, memory_size, log2_page_sz);
+}
+
+__clib_export void *
 clib_mem_init_thread_safe (void *memory, uword memory_size)
 {
   return clib_mem_init_internal (memory, memory_size,
-				 1 /* do clib_mem_set_heap */ );
+				 CLIB_MEM_PAGE_SZ_DEFAULT);
 }
 
-void *
-clib_mem_init_thread_safe_numa (void *memory, uword memory_size, u8 numa)
+__clib_export void
+clib_mem_destroy (void)
 {
-  clib_mem_vm_alloc_t alloc = { 0 };
-  clib_error_t *err;
-  void *heap;
+  mheap_trace_main_t *tm = &mheap_trace_main;
+  clib_mem_heap_t *heap = clib_mem_get_heap ();
+  void *base = mspace_least_addr (heap->mspace);
 
-  alloc.size = memory_size;
-  alloc.flags = CLIB_MEM_VM_F_NUMA_FORCE;
-  alloc.numa_node = numa;
-  if ((err = clib_mem_vm_ext_alloc (&alloc)))
-    {
-      clib_error_report (err);
-      return 0;
-    }
+  if (tm->enabled && heap->mspace == tm->current_traced_mheap)
+    tm->enabled = 0;
 
-  heap = clib_mem_init_internal (memory, memory_size,
-				 0 /* do NOT clib_mem_set_heap */ );
-
-  ASSERT (heap);
-
-  return heap;
+  destroy_mspace (heap->mspace);
+  clib_mem_vm_unmap (base);
 }
 
 u8 *
@@ -382,44 +418,61 @@ format_mheap_trace (u8 * s, va_list * va)
   return s;
 }
 
-
-u8 *
-format_mheap (u8 * s, va_list * va)
+__clib_export u8 *
+format_clib_mem_heap (u8 * s, va_list * va)
 {
-  void *heap = va_arg (*va, u8 *);
+  clib_mem_heap_t *heap = va_arg (*va, clib_mem_heap_t *);
   int verbose = va_arg (*va, int);
   struct dlmallinfo mi;
   mheap_trace_main_t *tm = &mheap_trace_main;
+  u32 indent = format_get_indent (s) + 2;
 
-  mi = mspace_mallinfo (heap);
+  if (heap == 0)
+    heap = clib_mem_get_heap ();
 
-  s = format (s, "total: %U, used: %U, free: %U, trimmable: %U",
+  mi = mspace_mallinfo (heap->mspace);
+
+  s = format (s, "base %p, size %U",
+	      heap->base, format_memory_size, heap->size);
+
+#define _(i,v,str) \
+  if (heap->flags & CLIB_MEM_HEAP_F_##v) s = format (s, ", %s", str);
+  foreach_clib_mem_heap_flag;
+#undef _
+
+  s = format (s, ", name '%s'", heap->name);
+
+  if (heap->log2_page_sz != CLIB_MEM_PAGE_SZ_UNKNOWN)
+    {
+      clib_mem_page_stats_t stats;
+      clib_mem_get_page_stats (heap->base, heap->log2_page_sz,
+			       heap->size >> heap->log2_page_sz, &stats);
+      s = format (s, "\n%U%U", format_white_space, indent,
+		  format_clib_mem_page_stats, &stats);
+    }
+
+  s = format (s, "\n%Utotal: %U, used: %U, free: %U, trimmable: %U",
+	      format_white_space, indent,
 	      format_msize, mi.arena,
 	      format_msize, mi.uordblks,
 	      format_msize, mi.fordblks, format_msize, mi.keepcost);
   if (verbose > 0)
     {
-      s = format (s, "\n    free chunks %llu free fastbin blks %llu",
-		  mi.ordblks, mi.smblks);
-      s =
-	format (s, "\n    max total allocated %U", format_msize, mi.usmblks);
+      s = format (s, "\n%Ufree chunks %llu free fastbin blks %llu",
+		  format_white_space, indent + 2, mi.ordblks, mi.smblks);
+      s = format (s, "\n%Umax total allocated %U",
+		  format_white_space, indent + 2, format_msize, mi.usmblks);
     }
 
-  if (mspace_is_traced (heap))
+  if (mspace_is_traced (heap->mspace))
     s = format (s, "\n%U", format_mheap_trace, tm, verbose);
   return s;
 }
 
-void
-clib_mem_usage (clib_mem_usage_t * u)
+__clib_export void
+clib_mem_get_heap_usage (clib_mem_heap_t * heap, clib_mem_usage_t * usage)
 {
-  clib_warning ("unimp");
-}
-
-void
-mheap_usage (void *heap, clib_mem_usage_t * usage)
-{
-  struct dlmallinfo mi = mspace_mallinfo (heap);
+  struct dlmallinfo mi = mspace_mallinfo (heap->mspace);
 
   /* TODO: Fill in some more values */
   usage->object_count = 0;
@@ -434,22 +487,16 @@ mheap_usage (void *heap, clib_mem_usage_t * usage)
 /* Call serial number for debugger breakpoints. */
 uword clib_mem_validate_serial = 0;
 
-void
-clib_mem_validate (void)
+__clib_export void
+mheap_trace (clib_mem_heap_t * h, int enable)
 {
-  clib_warning ("unimp");
-}
-
-void
-mheap_trace (void *v, int enable)
-{
-  (void) mspace_enable_disable_trace (v, enable);
+  (void) mspace_enable_disable_trace (h->mspace, enable);
 
   if (enable == 0)
     mheap_trace_main_free (&mheap_trace_main);
 }
 
-void
+__clib_export void
 clib_mem_trace (int enable)
 {
   mheap_trace_main_t *tm = &mheap_trace_main;
@@ -467,10 +514,11 @@ clib_mem_trace (int enable)
 int
 clib_mem_is_traced (void)
 {
-  return mspace_is_traced (clib_mem_get_heap ());
+  clib_mem_heap_t *h = clib_mem_get_heap ();
+  return mspace_is_traced (h->mspace);
 }
 
-uword
+__clib_export uword
 clib_mem_trace_enable_disable (uword enable)
 {
   uword rv;
@@ -481,24 +529,66 @@ clib_mem_trace_enable_disable (uword enable)
   return rv;
 }
 
-/*
- * These API functions seem like layering violations, but
- * by introducing them we greatly reduce the number
- * of code changes required to use dlmalloc spaces
- */
-void *
-mheap_alloc_with_lock (void *memory, uword size, int locked)
+__clib_export clib_mem_heap_t *
+clib_mem_create_heap (void *base, uword size, int is_locked, char *fmt, ...)
 {
-  void *rv;
-  if (memory == 0)
-    return create_mspace (size, locked);
-  else
+  clib_mem_page_sz_t log2_page_sz = clib_mem_get_log2_page_size ();
+  clib_mem_heap_t *h;
+  char *name;
+  u8 *s = 0;
+
+  if (fmt == 0)
     {
-      rv = create_mspace_with_base (memory, size, locked);
-      if (rv)
-	mspace_disable_expand (rv);
-      return rv;
+      name = "";
     }
+  else if (strchr (fmt, '%'))
+    {
+      va_list va;
+      va_start (va, fmt);
+      s = va_format (0, fmt, &va);
+      vec_add1 (s, 0);
+      va_end (va);
+      name = (char *) s;
+    }
+  else
+    name = fmt;
+
+  h = clib_mem_create_heap_internal (base, size, log2_page_sz, is_locked,
+				     name);
+  vec_free (s);
+  return h;
+}
+
+__clib_export void
+clib_mem_destroy_heap (clib_mem_heap_t * h)
+{
+  mheap_trace_main_t *tm = &mheap_trace_main;
+
+  if (tm->enabled && h->mspace == tm->current_traced_mheap)
+    tm->enabled = 0;
+
+  destroy_mspace (h->mspace);
+  if (h->flags & CLIB_MEM_HEAP_F_UNMAP_ON_DESTROY)
+    clib_mem_vm_unmap (h->base);
+}
+
+__clib_export uword
+clib_mem_get_heap_free_space (clib_mem_heap_t * h)
+{
+  struct dlmallinfo dlminfo = mspace_mallinfo (h->mspace);
+  return dlminfo.fordblks;
+}
+
+__clib_export void *
+clib_mem_get_heap_base (clib_mem_heap_t * h)
+{
+  return h->base;
+}
+
+__clib_export uword
+clib_mem_get_heap_size (clib_mem_heap_t * heap)
+{
+  return heap->size;
 }
 
 /*

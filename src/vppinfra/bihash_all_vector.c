@@ -16,10 +16,10 @@
 #include <vppinfra/mem.h>
 
 /* Vector of all bihashes */
-void **clib_all_bihashes;
-static void **clib_all_bihash_heap;
+__clib_export void **clib_all_bihashes;
+static clib_mem_heap_t *clib_all_bihash_heap;
 
-void *
+__clib_export clib_mem_heap_t *
 clib_all_bihash_set_heap (void)
 {
   if (PREDICT_FALSE (clib_all_bihash_heap == 0))
@@ -32,7 +32,7 @@ clib_all_bihash_set_heap (void)
  * Leave it to Beaver to change the size of a bihash
  * by making a clone in a stack local and then copying it...
  */
-void
+__clib_export void
 clib_bihash_copied (void *dst, void *src)
 {
   int i;

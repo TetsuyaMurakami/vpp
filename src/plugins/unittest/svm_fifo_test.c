@@ -190,11 +190,13 @@ static svm_fifo_t *
 fifo_prepare (fifo_segment_t * fs, u32 fifo_size)
 {
   svm_fifo_t *f;
+  svm_fifo_chunk_t *c;
 
   f = fifo_segment_alloc_fifo (fs, fifo_size, FIFO_SEGMENT_RX_FIFO);
 
-  /* Paint fifo data vector with -1's */
-  clib_memset (svm_fifo_head_chunk (f)->data, 0xFF, fifo_size);
+  /* Paint 1st fifo chunk with -1's */
+  c = svm_fifo_head_chunk (f);
+  clib_memset (c->data, 0xFF, c->length);
 
   svm_fifo_init_ooo_lookup (f, 1 /* deq ooo */ );
   return f;
@@ -254,7 +256,7 @@ sfifo_test_fifo1 (vlib_main_t * vm, unformat_input_t * input)
    */
   rv = svm_fifo_enqueue (f, sizeof (u32), (u8 *) test_data);
   SFIFO_TEST ((rv == sizeof (u32)), "enqueued %d", rv);
-  SFIFO_TEST ((f->tail == 4), "fifo tail %u", f->tail);
+  SFIFO_TEST ((f->shr->tail == 4), "fifo tail %u", f->shr->tail);
 
   /*
    * Create 3 chunks in the future. The offsets are relative
@@ -262,7 +264,7 @@ sfifo_test_fifo1 (vlib_main_t * vm, unformat_input_t * input)
    */
   for (i = 0; i < 3; i++)
     {
-      offset = (2 * i + 1) * sizeof (u32) - f->tail;
+      offset = (2 * i + 1) * sizeof (u32) - f->shr->tail;
       data = (u8 *) (test_data + (2 * i + 1));
       if (i == 0)
 	{
@@ -284,14 +286,14 @@ sfifo_test_fifo1 (vlib_main_t * vm, unformat_input_t * input)
   if (verbose)
     vlib_cli_output (vm, "fifo after odd segs: %U", format_svm_fifo, f, 1);
 
-  SFIFO_TEST ((f->tail == 8), "fifo tail %u", f->tail);
+  SFIFO_TEST ((f->shr->tail == 8), "fifo tail %u", f->shr->tail);
   SFIFO_TEST ((svm_fifo_n_ooo_segments (f) == 2),
 	      "number of ooo segments %u", svm_fifo_n_ooo_segments (f));
 
   /*
    * Try adding a completely overlapped segment
    */
-  offset = 3 * sizeof (u32) - f->tail;
+  offset = 3 * sizeof (u32) - f->shr->tail;
   data = (u8 *) (test_data + 3);
   rv = svm_fifo_enqueue_with_offset (f, offset, sizeof (u32), data);
   if (rv)
@@ -317,7 +319,7 @@ sfifo_test_fifo1 (vlib_main_t * vm, unformat_input_t * input)
    */
   for (i = 3; i > 1; i--)
     {
-      offset = (2 * i + 0) * sizeof (u32) - f->tail;
+      offset = (2 * i + 0) * sizeof (u32) - f->shr->tail;
       data = (u8 *) (test_data + (2 * i + 0));
       rv = svm_fifo_enqueue_with_offset (f, offset, sizeof (u32), data);
       if (verbose)
@@ -379,7 +381,7 @@ sfifo_test_fifo1 (vlib_main_t * vm, unformat_input_t * input)
 
   for (i = 0; i < 4; i++)
     {
-      offset = (2 * i + 1) * sizeof (u32) - f->tail;
+      offset = (2 * i + 1) * sizeof (u32) - f->shr->tail;
       data = (u8 *) (test_data + (2 * i + 1));
       rv = svm_fifo_enqueue_with_offset (f, offset, sizeof (u32), data);
       if (verbose)
@@ -392,7 +394,7 @@ sfifo_test_fifo1 (vlib_main_t * vm, unformat_input_t * input)
 	}
     }
 
-  rv = svm_fifo_enqueue_with_offset (f, 8 - f->tail, 21, data);
+  rv = svm_fifo_enqueue_with_offset (f, 8 - f->shr->tail, 21, data);
   SFIFO_TEST ((rv == 0), "ooo enqueued %u", rv);
   SFIFO_TEST ((svm_fifo_n_ooo_segments (f) == 1),
 	      "number of ooo segments %u", svm_fifo_n_ooo_segments (f));
@@ -420,7 +422,7 @@ sfifo_test_fifo1 (vlib_main_t * vm, unformat_input_t * input)
 
   for (i = 0; i < 4; i++)
     {
-      offset = (2 * i + 1) * sizeof (u32) - f->tail;
+      offset = (2 * i + 1) * sizeof (u32) - f->shr->tail;
       data = (u8 *) (test_data + (2 * i + 1));
       rv = svm_fifo_enqueue_with_offset (f, offset, sizeof (u32), data);
       if (verbose)
@@ -498,8 +500,8 @@ sfifo_test_fifo2 (vlib_main_t * vm)
     {
       tp = vp + i;
       data64 = tp->offset;
-      svm_fifo_enqueue_with_offset (f, tp->offset - f->tail, tp->len,
-				    (u8 *) & data64);
+      svm_fifo_enqueue_with_offset (f, tp->offset - f->shr->tail, tp->len,
+				    (u8 *) &data64);
     }
 
   /* Expected result: one big fat chunk at offset 4 */
@@ -528,8 +530,8 @@ sfifo_test_fifo2 (vlib_main_t * vm)
     {
       tp = &test_data[i];
       data64 = tp->offset;
-      rv = svm_fifo_enqueue_with_offset (f, tp->offset - f->tail, tp->len,
-					 (u8 *) & data64);
+      rv = svm_fifo_enqueue_with_offset (f, tp->offset - f->shr->tail, tp->len,
+					 (u8 *) &data64);
       if (rv)
 	{
 	  clib_warning ("enqueue returned %d", rv);
@@ -702,10 +704,9 @@ sfifo_test_fifo3 (vlib_main_t * vm, unformat_input_t * input)
   for (i = !randomize; i < vec_len (generate); i++)
     {
       tp = generate + i;
-      svm_fifo_enqueue_with_offset (f,
-				    fifo_initial_offset + tp->offset -
-				    f->tail, tp->len,
-				    (u8 *) data_pattern + tp->offset);
+      svm_fifo_enqueue_with_offset (
+	f, fifo_initial_offset + tp->offset - f->shr->tail, tp->len,
+	(u8 *) data_pattern + tp->offset);
     }
 
   /* Add the first segment in order for non random data */
@@ -821,8 +822,8 @@ sfifo_test_fifo4 (vlib_main_t * vm, unformat_input_t * input)
 
   for (i = test_n_bytes - 1; i > 0; i--)
     {
-      rv = svm_fifo_enqueue_with_offset (f, fifo_initial_offset + i - f->tail,
-					 sizeof (u8), &test_data[i]);
+      rv = svm_fifo_enqueue_with_offset (
+	f, fifo_initial_offset + i - f->shr->tail, sizeof (u8), &test_data[i]);
       if (verbose)
 	vlib_cli_output (vm, "add [%d] [%d, %d]", i, i, i + sizeof (u8));
       if (rv)
@@ -1148,7 +1149,8 @@ sfifo_test_fifo7 (vlib_main_t * vm, unformat_input_t * input)
       if (compare_data (data_buf, test_data, 0, n_test_bytes, (u32 *) & j))
 	SFIFO_TEST (0, "[%d] dequeued %u expected %u", j, data_buf[j],
 		    test_data[j]);
-      svm_fifo_init_pointers (f, (~0 - i) % f->size, (~0 - i) % f->size);
+      svm_fifo_init_pointers (f, (~0 - i) % f->shr->size,
+			      (~0 - i) % f->shr->size);
     }
   SFIFO_TEST (1, "passed multiple ooo enqueue/dequeue");
 
@@ -1410,13 +1412,13 @@ sfifo_test_fifo_grow (vlib_main_t * vm, unformat_input_t * input)
   SFIFO_TEST (rv == 2, "should have 2 chunks has %u", rv);
   SFIFO_TEST (svm_fifo_is_sane (f), "fifo should be sane");
 
-  c = f->head_chunk;
+  c = f_head_cptr (f);
   SFIFO_TEST (c->start_byte == 0, "head start byte should be %u", 0);
   SFIFO_TEST (c->length == 4096, "head chunk length should be %u", 4096);
-  SFIFO_TEST (f->tail_chunk == 0, "no tail chunk");
+  SFIFO_TEST (f->shr->tail_chunk == 0, "no tail chunk");
   SFIFO_TEST (f->ooo_enq == 0, "should have no ooo enq chunk");
   SFIFO_TEST (f->ooo_deq == 0, "should have no ooo deq chunk");
-  c = f->end_chunk;
+  c = f_end_cptr (f);
   SFIFO_TEST (c->start_byte == last_start_byte, "end chunk start byte should"
 	      " be %u", last_start_byte);
   SFIFO_TEST (c->length == 4096, "end chunk length should be %u", 4096);
@@ -1436,8 +1438,8 @@ sfifo_test_fifo_grow (vlib_main_t * vm, unformat_input_t * input)
     vlib_cli_output (vm, "[%d] dequeued %u expected %u", i, data_buf[i],
 		     test_data[i]);
   SFIFO_TEST ((rv == 0), "dequeued compared to original returned %d", rv);
-  SFIFO_TEST (f->head_chunk == 0, "head chunk should be 0");
-  SFIFO_TEST (f->tail_chunk == 0, "tail chunk should be 0");
+  SFIFO_TEST (f->shr->head_chunk == 0, "head chunk should be 0");
+  SFIFO_TEST (f->shr->tail_chunk == 0, "tail chunk should be 0");
   SFIFO_TEST (f->ooo_deq == 0, "should have no ooo deq chunk");
   SFIFO_TEST (svm_fifo_is_sane (f), "fifo should be sane");
 
@@ -1459,12 +1461,12 @@ sfifo_test_fifo_grow (vlib_main_t * vm, unformat_input_t * input)
   SFIFO_TEST (rv == 2, "should have %u chunks has %u", 2, rv);
   SFIFO_TEST (svm_fifo_is_sane (f), "fifo should be sane");
 
-  SFIFO_TEST (f->head_chunk == 0, "should have no head chunk");
+  SFIFO_TEST (f->shr->head_chunk == 0, "should have no head chunk");
   /* When new fifo chunks are allocated, tail is initialized */
-  SFIFO_TEST (f->tail_chunk != 0, "should have no tail chunk");
+  SFIFO_TEST (f->shr->tail_chunk != 0, "should have no tail chunk");
   SFIFO_TEST (f->ooo_enq != 0, "should have an ooo enq chunk");
 
-  c = f->end_chunk;
+  c = f_end_cptr (f);
   SFIFO_TEST (c->start_byte == last_start_byte,
 	      "end chunk should start at %u", last_start_byte);
   SFIFO_TEST (c->length == 8192, "end chunk length should be %u", 8192);
@@ -1481,9 +1483,9 @@ sfifo_test_fifo_grow (vlib_main_t * vm, unformat_input_t * input)
   SFIFO_TEST (rv == 2, "should have %u chunks has %u", 2, rv);
   SFIFO_TEST (svm_fifo_is_sane (f), "fifo should be sane");
 
-  SFIFO_TEST (f->head_chunk == 0, "should have no head chunk");
+  SFIFO_TEST (f->shr->head_chunk == 0, "should have no head chunk");
   /* Fifo is full so tail and ooo_enq should be 0 */
-  SFIFO_TEST (f->tail_chunk == 0, "should have no tail chunk");
+  SFIFO_TEST (f->shr->tail_chunk == 0, "should have no tail chunk");
   SFIFO_TEST (f->ooo_enq == 0, "should have no ooo enq chunk");
 
   /*
@@ -1540,8 +1542,8 @@ sfifo_test_fifo_grow (vlib_main_t * vm, unformat_input_t * input)
   last_start_byte += 8192;
 
   SFIFO_TEST (svm_fifo_is_sane (f), "fifo should be sane");
-  SFIFO_TEST (f->head_chunk == 0, "should have no head chunk");
-  SFIFO_TEST (f->tail_chunk == 0, "should have no tail chunk");
+  SFIFO_TEST (f->shr->head_chunk == 0, "should have no head chunk");
+  SFIFO_TEST (f->shr->tail_chunk == 0, "should have no tail chunk");
 
   /* We don't remove the last chunk even when the fifo goes empty */
   rv = svm_fifo_n_chunks (f);
@@ -1573,12 +1575,12 @@ sfifo_test_fifo_grow (vlib_main_t * vm, unformat_input_t * input)
   SFIFO_TEST (rv == 2, "should have %u chunks has %u", 2, rv);
   SFIFO_TEST (svm_fifo_is_sane (f), "fifo should be sane");
 
-  SFIFO_TEST (f->head_chunk == 0, "should have no head chunk");
+  SFIFO_TEST (f->shr->head_chunk == 0, "should have no head chunk");
   /* When new fifo chunks are allocated, tail is initialized */
-  SFIFO_TEST (f->tail_chunk != 0, "should have no tail chunk");
+  SFIFO_TEST (f->shr->tail_chunk != 0, "should have no tail chunk");
   SFIFO_TEST (f->ooo_enq != 0, "should have an ooo enq chunk");
 
-  c = f->end_chunk;
+  c = f_end_cptr (f);
   SFIFO_TEST (c->start_byte == last_start_byte,
 	      "end chunk should start at %u", last_start_byte);
   SFIFO_TEST (c->length == 16384, "end chunk length should be %u", 16384);
@@ -1596,9 +1598,12 @@ sfifo_test_fifo_grow (vlib_main_t * vm, unformat_input_t * input)
   SFIFO_TEST (svm_fifo_is_sane (f), "fifo should be sane");
 
   /*
-   * Dequeue just a part of data
+   * Dequeue just a part of data. Because we're tracking ooo data, we can't
+   * call dequeue. Therefore, first peek and then dequeue drop
    */
-  rv = svm_fifo_dequeue (f, fifo_inc, data_buf);
+  rv = svm_fifo_peek (f, 0, fifo_inc, data_buf);
+  SFIFO_TEST (rv == fifo_inc, "should dequeue all data");
+  rv = svm_fifo_dequeue_drop (f, fifo_inc);
   SFIFO_TEST (rv == fifo_inc, "should dequeue all data");
   rv = svm_fifo_n_chunks (f);
   SFIFO_TEST (rv == 1, "should have %u chunks has %u", 1, rv);
@@ -1618,16 +1623,17 @@ sfifo_test_fifo_grow (vlib_main_t * vm, unformat_input_t * input)
   SFIFO_TEST (svm_fifo_is_sane (f), "fifo should be sane");
 
   last_start_byte += 16384;
-  c = f->end_chunk;
+  c = f_end_cptr (f);
   SFIFO_TEST (c->start_byte == last_start_byte,
 	      "end chunk should start at %u", last_start_byte);
   SFIFO_TEST (c->length == 4096, "end chunk length should be %u", 4096);
 
   /*
-   * Dequeue all
+   * Dequeue all. Don't call dequeue see above
    */
-  rv = svm_fifo_dequeue (f, fifo_size, data_buf + fifo_inc);
+  rv = svm_fifo_peek (f, 0, fifo_size, data_buf + fifo_inc);
   SFIFO_TEST (rv == fifo_size, "should dequeue all data");
+  SFIFO_TEST (svm_fifo_is_sane (f), "fifo should be sane");
 
   rv = compare_data (data_buf, test_data, 0, vec_len (test_data),
 		     (u32 *) & i);
@@ -1635,10 +1641,14 @@ sfifo_test_fifo_grow (vlib_main_t * vm, unformat_input_t * input)
     vlib_cli_output (vm, "[%d] dequeued %u expected %u", i, data_buf[i],
 		     test_data[i]);
   SFIFO_TEST ((rv == 0), "dequeued compared to original returned %d", rv);
+
+  rv = svm_fifo_dequeue_drop (f, fifo_size);
+  SFIFO_TEST (rv == fifo_size, "should dequeue all data");
+
   SFIFO_TEST (svm_fifo_is_sane (f), "fifo should be sane");
   /* fifo does not end on chunk boundary because of the - 100 */
-  SFIFO_TEST (f->head_chunk != 0, "should have head chunk");
-  SFIFO_TEST (f->tail_chunk != 0, "should have tail chunk");
+  SFIFO_TEST (f->shr->head_chunk != 0, "should have head chunk");
+  SFIFO_TEST (f->shr->tail_chunk != 0, "should have tail chunk");
 
   /*
    * Enqueue and dequeue byte-by-byte ooo
@@ -1663,7 +1673,7 @@ sfifo_test_fifo_grow (vlib_main_t * vm, unformat_input_t * input)
   SFIFO_TEST (svm_fifo_is_sane (f), "fifo should be sane");
 
   last_start_byte += 4096;
-  c = f->end_chunk;
+  c = f_end_cptr (f);
   SFIFO_TEST (c->start_byte == last_start_byte,
 	      "end chunk should start at %u", last_start_byte);
   SFIFO_TEST (c->length == 16384, "end chunk length should be %u", 16384);
@@ -1678,8 +1688,8 @@ sfifo_test_fifo_grow (vlib_main_t * vm, unformat_input_t * input)
   SFIFO_TEST ((rv == fifo_size), "all bytes should be dropped %u", rv);
 
   SFIFO_TEST (svm_fifo_is_sane (f), "fifo should be sane");
-  SFIFO_TEST (f->head_chunk != 0, "should have head chunk");
-  SFIFO_TEST (f->tail_chunk != 0, "should have tail chunk");
+  SFIFO_TEST (f->shr->head_chunk != 0, "should have head chunk");
+  SFIFO_TEST (f->shr->tail_chunk != 0, "should have tail chunk");
 
   /* We don't remove the last chunk even when the fifo goes empty */
   rv = svm_fifo_n_chunks (f);
@@ -1711,7 +1721,10 @@ sfifo_test_fifo_grow (vlib_main_t * vm, unformat_input_t * input)
   /*
    * Dequeue all
    */
-  rv = svm_fifo_dequeue (f, fifo_size, data_buf);
+
+  /* Because we're tracking ooo data, we can't call dequeue. Therefore,
+   * first peek and then dequeue drop */
+  rv = svm_fifo_peek (f, 0, fifo_size, data_buf);
   SFIFO_TEST (rv == fifo_size, "should dequeue all data");
 
   rv = compare_data (data_buf, test_data, 0, vec_len (test_data),
@@ -1721,6 +1734,11 @@ sfifo_test_fifo_grow (vlib_main_t * vm, unformat_input_t * input)
 		     test_data[i]);
   SFIFO_TEST (svm_fifo_is_sane (f), "fifo should be sane");
   SFIFO_TEST ((rv == 0), "dequeued compared to original returned %d", rv);
+
+
+  rv = svm_fifo_dequeue_drop (f, fifo_size);
+  SFIFO_TEST ((rv == fifo_size), "all bytes should be dropped %u", rv);
+  SFIFO_TEST (svm_fifo_is_sane (f), "fifo should be sane");
   SFIFO_TEST (f->ooo_deq == 0, "should have no ooo deq chunk");
   rv = svm_fifo_n_chunks (f);
   SFIFO_TEST (rv == 1, "should have %u chunks has %u", 1, rv);
@@ -1923,12 +1941,13 @@ sfifo_test_fifo_indirect (vlib_main_t * vm, unformat_input_t * input)
   svm_fifo_set_size (f, fifo_size);
   validate_test_and_buf_vecs (&test_data, &data_buf, fifo_size);
 
-  c = f->start_chunk;
+  c = f_start_cptr (f);
   SFIFO_TEST (c->next == 0, "no next");
 
   svm_fifo_fill_chunk_list (f);
   SFIFO_TEST (c->next != 0, "new chunk should've been allocated");
-  SFIFO_TEST (c->next->length == 4 << 20, "new chunk should be 4MB");
+  SFIFO_TEST (f_cptr (f, c->next)->length == 4 << 20,
+	      "new chunk should be 4MB");
 
   rv = svm_fifo_max_write_chunk (f);
   SFIFO_TEST (rv == 4096, "max write chunk %u", rv);
@@ -1940,7 +1959,7 @@ sfifo_test_fifo_indirect (vlib_main_t * vm, unformat_input_t * input)
   SFIFO_TEST (svm_fifo_is_sane (f), "fifo should be sane");
 
   c = svm_fifo_tail_chunk (f);
-  SFIFO_TEST (c == f->end_chunk, "tail is end chunk");
+  SFIFO_TEST (c == f_end_cptr (f), "tail is end chunk");
 
   /* Initialize head chunk */
   rv = svm_fifo_max_read_chunk (f);
@@ -1954,7 +1973,7 @@ sfifo_test_fifo_indirect (vlib_main_t * vm, unformat_input_t * input)
   SFIFO_TEST (rv == 4096, "dequeue should work");
 
   c = svm_fifo_head_chunk (f);
-  SFIFO_TEST (c == f->end_chunk, "head chunk should be last");
+  SFIFO_TEST (c == f_end_cptr (f), "head chunk should be last");
 
   rv = svm_fifo_max_read_chunk (f);
   SFIFO_TEST (rv == 0, "max read chunk %u", rv);
@@ -2085,6 +2104,7 @@ sfifo_test_fifo_segment_hello_world (int verbose)
   clib_memset (a, 0, sizeof (*a));
   a->segment_name = "fifo-test1";
   a->segment_size = 256 << 10;
+  a->segment_type = SSVM_SEGMENT_PRIVATE;
 
   rv = fifo_segment_create (sm, a);
   SFIFO_TEST (!rv, "svm_fifo_segment_create returned %d", rv);
@@ -2135,6 +2155,9 @@ sfifo_test_fifo_segment_fifo_grow (int verbose)
   a->segment_name = "fifo-test1";
   /* size chosen to be able to force multi chunk allocation lower */
   a->segment_size = 256 << 10;
+  /* overhead that reduces the amount of space dedicated to fifos */
+  a->segment_size += 1 << 14;
+  a->segment_type = SSVM_SEGMENT_PRIVATE;
 
   /* fifo allocation allocates chunks in batch */
   n_batch = FIFO_SEGMENT_ALLOC_BATCH_SIZE;
@@ -2387,13 +2410,13 @@ sfifo_test_fifo_segment_slave (int verbose)
       svm_fifo_dequeue (f, vec_len (retrieved_data), retrieved_data);
       if (memcmp (retrieved_data, test_data, vec_len (retrieved_data)))
 	{
-	  result = (u32 *) f->head_chunk->data;
+	  result = (u32 *) f_head_cptr (f)->data;
 	  *result = 1;
 	  _exit (0);
 	}
     }
 
-  result = (u32 *) f->head_chunk->data;
+  result = (u32 *) f_head_cptr (f)->data;
   *result = 0;
 
   vec_free (test_data);
@@ -2447,7 +2470,7 @@ sfifo_test_fifo_segment_master_slave (int verbose)
 
   usleep (1e3);
 
-  result = (u32 *) f->head_chunk->data;
+  result = (u32 *) f_head_cptr (f)->data;
   SFIFO_TEST (*result == 0, "slave reported no error");
 
   vec_free (a->new_segment_indices);
@@ -2472,6 +2495,7 @@ sfifo_test_fifo_segment_mempig (int verbose)
 
   a->segment_name = "fifo-test1";
   a->segment_size = 256 << 10;
+  a->segment_type = SSVM_SEGMENT_PRIVATE;
 
   rv = fifo_segment_create (sm, a);
 
@@ -2518,20 +2542,31 @@ sfifo_test_fifo_segment_mempig (int verbose)
 }
 
 static int
+approx_leq (uword a, uword b, u32 margin)
+{
+  if (a - margin <= b && b <= a)
+    return 1;
+  return 0;
+}
+
+static int
 sfifo_test_fifo_segment_prealloc (int verbose)
 {
+  u32 max_pairs, pairs_req, free_space, pair_mem, overhead;
   fifo_segment_create_args_t _a, *a = &_a;
   fifo_segment_main_t *sm = &segment_main;
-  u32 max_pairs, pairs_req, free_space, pair_mem;
   svm_fifo_t *f, *tf, *old;
   fifo_segment_t *fs;
   int rv, alloc;
 
   clib_memset (a, 0, sizeof (*a));
 
+  /* Overhead due to segment internal headers and offsets. The magic 384
+   * bytes are the fsh->n_reserved_bytes after seg init */
+  overhead = (8 << 10) + 384;
   a->segment_name = "fifo-test-prealloc";
-  a->segment_size = 256 << 10;
-  a->segment_type = SSVM_SEGMENT_MEMFD;
+  a->segment_size = (256 << 10) + overhead;
+  a->segment_type = SSVM_SEGMENT_PRIVATE;
 
   rv = fifo_segment_create (sm, a);
   SFIFO_TEST (!rv, "svm_fifo_segment_create returned %d", rv);
@@ -2542,7 +2577,7 @@ sfifo_test_fifo_segment_prealloc (int verbose)
    * Prealloc chunks and headers
    */
   free_space = fifo_segment_free_bytes (fs);
-  SFIFO_TEST (free_space <= 256 << 10, "free space expected %u is %u",
+  SFIFO_TEST (free_space - 4096 <= 256 << 10, "free space expected %u is %u",
 	      256 << 10, free_space);
   rv = fifo_segment_prealloc_fifo_chunks (fs, 0, 4096, 50);
   SFIFO_TEST (rv == 0, "chunk prealloc should work");
@@ -2550,8 +2585,10 @@ sfifo_test_fifo_segment_prealloc (int verbose)
   SFIFO_TEST (rv == 50, "prealloc chunks expected %u is %u", 50, rv);
   rv = fifo_segment_free_bytes (fs);
   free_space -= (sizeof (svm_fifo_chunk_t) + 4096) * 50;
-  SFIFO_TEST (rv == free_space, "free space expected %u is %u", free_space,
-	      rv);
+  /* Memory alloc alignment accounts for the difference */
+  SFIFO_TEST (approx_leq (free_space, rv, 16), "free space expected %u is %u",
+	      free_space, rv);
+  free_space = rv;
   rv = fifo_segment_fl_chunk_bytes (fs);
   SFIFO_TEST (rv == 4096 * 50, "chunk free space expected %u is %u",
 	      4096 * 50, rv);
@@ -2561,11 +2598,12 @@ sfifo_test_fifo_segment_prealloc (int verbose)
   rv = fifo_segment_num_free_fifos (fs);
   SFIFO_TEST (rv == 50, "prealloc fifo hdrs expected %u is %u", 50, rv);
   rv = fifo_segment_free_bytes (fs);
-  free_space -= sizeof (svm_fifo_t) * 50;
-  SFIFO_TEST (rv == free_space, "free space expected %u is %u", free_space,
-	      rv);
+  free_space -= sizeof (svm_fifo_shared_t) * 50;
+  /* Memory alloc alignment accounts for the difference */
+  SFIFO_TEST (approx_leq (free_space, rv, 128), "free space expected %u is %u",
+	      free_space, rv);
+  free_space = rv;
 
-  fifo_segment_update_free_bytes (fs);
   rv = fifo_segment_free_bytes (fs);
   SFIFO_TEST (clib_abs (rv - (int) free_space) < 512,
 	      "free space expected %u is %u", free_space, rv);
@@ -2588,7 +2626,6 @@ sfifo_test_fifo_segment_prealloc (int verbose)
   /*
    * Multiple preallocs that consume the remaining space
    */
-  fifo_segment_update_free_bytes (fs);
   free_space = fifo_segment_free_bytes (fs);
   pair_mem = 2 * (4096 + sizeof (*f) + sizeof (svm_fifo_chunk_t));
   max_pairs = pairs_req = (free_space / pair_mem) - 1;
@@ -2598,7 +2635,6 @@ sfifo_test_fifo_segment_prealloc (int verbose)
   SFIFO_TEST (rv == max_pairs * 2, "prealloc chunks expected %u is %u",
 	      max_pairs * 2, rv);
 
-  fifo_segment_update_free_bytes (fs);
   rv = fifo_segment_free_bytes (fs);
   SFIFO_TEST (rv < 2 * pair_mem, "free bytes %u less than %u", rv,
 	      2 * pair_mem);
@@ -2639,7 +2675,6 @@ sfifo_test_fifo_segment_prealloc (int verbose)
    */
   fifo_segment_free_fifo (fs, old);
   fifo_segment_free_fifo (fs, tf);
-  close (fs->ssvm.fd);
   fifo_segment_delete (sm, fs);
   return 0;
 }
@@ -2710,8 +2745,8 @@ svm_fifo_test (vlib_main_t * vm, unformat_input_t * input,
   int res = 0;
   char *str;
 
-  clib_warning ("high mem %lu", HIGH_SEGMENT_BASEVA << 1);
-  fifo_segment_main_init (&segment_main, HIGH_SEGMENT_BASEVA << 1, 5);
+  clib_warning ("high mem %lu", HIGH_SEGMENT_BASEVA);
+  fifo_segment_main_init (&segment_main, HIGH_SEGMENT_BASEVA, 5);
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
     {
       if (unformat (input, "fifo1"))

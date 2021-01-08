@@ -407,8 +407,7 @@ clib_error_t *set_hw_interface_change_rx_mode (vnet_main_t * vnm,
 					       u32 hw_if_index,
 					       u8 queue_id_valid,
 					       u32 queue_id,
-					       vnet_hw_interface_rx_mode
-					       mode);
+					       vnet_hw_if_rx_mode mode);
 
 /* Set rx-placement on the interface */
 clib_error_t *set_hw_interface_rx_placement (u32 hw_if_index, u32 queue_id,
@@ -431,9 +430,14 @@ int vnet_sw_interface_stats_collect_enable_disable (u32 sw_if_index,
 void vnet_sw_interface_ip_directed_broadcast (vnet_main_t * vnm,
 					      u32 sw_if_index, u8 enable);
 
+/* set interface rss queues */
+clib_error_t *vnet_hw_interface_set_rss_queues (vnet_main_t * vnm,
+						vnet_hw_interface_t * hi,
+						clib_bitmap_t * bitmap);
+
 /* Formats sw/hw interface. */
 format_function_t format_vnet_hw_interface;
-format_function_t format_vnet_hw_interface_rx_mode;
+format_function_t format_vnet_hw_if_rx_mode;
 format_function_t format_vnet_hw_if_index_name;
 format_function_t format_vnet_sw_interface;
 format_function_t format_vnet_sw_interface_name;

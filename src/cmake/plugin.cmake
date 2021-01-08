@@ -15,7 +15,7 @@ macro(add_vpp_plugin name)
   cmake_parse_arguments(PLUGIN
     ""
     "LINK_FLAGS;COMPONENT;DEV_COMPONENT"
-    "SOURCES;API_FILES;MULTIARCH_SOURCES;LINK_LIBRARIES;INSTALL_HEADERS;API_TEST_SOURCES"
+    "SOURCES;API_FILES;MULTIARCH_SOURCES;LINK_LIBRARIES;INSTALL_HEADERS;API_TEST_SOURCES;"
     ${ARGN}
   )
   set(plugin_name ${name}_plugin)
@@ -45,17 +45,25 @@ macro(add_vpp_plugin name)
   endforeach()
   add_library(${plugin_name} SHARED ${PLUGIN_SOURCES} ${api_includes})
   set_target_properties(${plugin_name} PROPERTIES NO_SONAME 1)
+  target_compile_options(${plugin_name} PRIVATE "-fvisibility=hidden")
+  target_compile_options (${plugin_name} PRIVATE "-ffunction-sections")
+  target_compile_options (${plugin_name} PRIVATE "-fdata-sections")
+  target_link_libraries (${plugin_name} "-Wl,--gc-sections")
+  set(deps "")
   if(PLUGIN_API_FILES)
-    add_dependencies(${plugin_name} ${plugin_name}_api_headers)
+    list(APPEND deps ${plugin_name}_api_headers)
   endif()
   if(NOT VPP_EXTERNAL_PROJECT)
-    add_dependencies(${plugin_name} vpp_version_h api_headers)
+    list(APPEND deps vpp_version_h api_headers)
+  endif()
+  if(deps)
+    add_dependencies(${plugin_name} ${deps})
   endif()
   set_target_properties(${plugin_name} PROPERTIES
     PREFIX ""
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/vpp_plugins)
   if(PLUGIN_MULTIARCH_SOURCES)
-    vpp_library_set_multiarch_sources(${plugin_name} ${PLUGIN_MULTIARCH_SOURCES})
+    vpp_library_set_multiarch_sources(${plugin_name} "${deps}" ${PLUGIN_MULTIARCH_SOURCES})
   endif()
   if(PLUGIN_LINK_LIBRARIES)
     target_link_libraries(${plugin_name} ${PLUGIN_LINK_LIBRARIES})
@@ -93,6 +101,10 @@ macro(add_vpp_plugin name)
       COMPONENT ${PLUGIN_COMPONENT}
     )
   endif()
+  if (PLUGIN_API_FILES)
+    add_vpp_test_library(${name}_test_plugin ${PLUGIN_API_FILES})
+  endif()
+
   install(
     TARGETS ${plugin_name}
     DESTINATION ${VPP_LIBRARY_DIR}/vpp_plugins

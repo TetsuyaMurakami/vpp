@@ -251,6 +251,20 @@ autoreply define ikev2_profile_set_id
   option status="in_progress";
 };
 
+/** \brief IKEv2: Disable NAT traversal
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param name - IKEv2 profile name
+*/
+autoreply define ikev2_profile_disable_natt
+{
+  u32 client_index;
+  u32 context;
+
+  string name[64];
+  option status="in_progress";
+};
+
 /** \brief IKEv2: Set IKEv2 profile traffic selector parameters
     @param client_index - opaque cookie to identify the sender
     @param context - sender context, to match reply w/ request
@@ -264,7 +278,7 @@ autoreply define ikev2_profile_set_ts
 
   string name[64];
   vl_api_ikev2_ts_t ts;
-  option vat_help = "name <profile_name> protocol <proto> start_port <port> end_port <port> start_addr <ip4> end_addr <ip4> (local|remote)";
+  option vat_help = "name <profile_name> protocol <proto> start_port <port> end_port <port> start_addr <ip> end_addr <ip> (local|remote)";
   option status="in_progress";
 };
 

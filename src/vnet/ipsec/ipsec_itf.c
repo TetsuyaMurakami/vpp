@@ -20,6 +20,7 @@
 #include <vnet/ipsec/ipsec_tun.h>
 #include <vnet/ipsec/ipsec.h>
 #include <vnet/adj/adj_midchain.h>
+#include <vnet/ethernet/mac_address.h>
 
 /* bitmap of Allocated IPSEC_ITF instances */
 static uword *ipsec_itf_instances;
@@ -28,6 +29,12 @@ static uword *ipsec_itf_instances;
 static ipsec_itf_t *ipsec_itf_pool;
 
 static u32 *ipsec_itf_index_by_sw_if_index;
+
+ipsec_itf_t *
+ipsec_itf_get (index_t ii)
+{
+  return (pool_elt_at_index (ipsec_itf_pool, ii));
+}
 
 static ipsec_itf_t *
 ipsec_itf_find_by_sw_if_index (u32 sw_if_index)
@@ -76,7 +83,7 @@ ipsec_itf_adj_stack (adj_index_t ai, u32 sai)
       };
       /* *INDENT-ON* */
 
-      adj_midchain_delegate_stack (ai, 0, &dst);
+      adj_midchain_delegate_stack (ai, sa->tx_fib_index, &dst);
     }
   else
     adj_midchain_delegate_unstack (ai);
@@ -197,6 +204,12 @@ VNET_HW_INTERFACE_CLASS(ipsec_hw_interface_class) = {
   .update_adjacency = ipsec_itf_update_adj,
   .flags = VNET_HW_INTERFACE_CLASS_FLAG_P2P,
 };
+VNET_HW_INTERFACE_CLASS(ipsec_p2mp_hw_interface_class) = {
+  .name = "IPSec",
+  .build_rewrite = ipsec_itf_build_rewrite_i,
+  .update_adjacency = ipsec_itf_update_adj,
+  .flags = VNET_HW_INTERFACE_CLASS_FLAG_NBMA,
+};
 /* *INDENT-ON* */
 
 /*
@@ -276,9 +289,6 @@ ipsec_itf_create (u32 user_instance, tunnel_mode_t mode, u32 * sw_if_indexp)
 
   *sw_if_indexp = (u32) ~ 0;
 
-  if (mode != TUNNEL_MODE_P2P)
-    return VNET_API_ERROR_UNSUPPORTED;
-
   /*
    * Allocate a ipsec_itf instance.  Either select on dynamically
    * or try to use the desired user_instance number.
@@ -294,13 +304,13 @@ ipsec_itf_create (u32 user_instance, tunnel_mode_t mode, u32 * sw_if_indexp)
 
   ipsec_itf->ii_mode = mode;
   ipsec_itf->ii_user_instance = instance;
-  if (~0 == ipsec_itf->ii_user_instance)
-    ipsec_itf->ii_user_instance = t_idx;
 
   hw_if_index = vnet_register_interface (vnm,
 					 ipsec_itf_device_class.index,
-					 t_idx,
-					 ipsec_hw_interface_class.index,
+					 ipsec_itf->ii_user_instance,
+					 (mode == TUNNEL_MODE_P2P ?
+					  ipsec_hw_interface_class.index :
+					  ipsec_p2mp_hw_interface_class.index),
 					 t_idx);
 
   hi = vnet_get_hw_interface (vnm, hw_if_index);
@@ -452,6 +462,33 @@ VLIB_CLI_COMMAND (ipsec_itf_delete_command, static) = {
 };
 /* *INDENT-ON* */
 
+static clib_error_t *
+ipsec_interface_show (vlib_main_t * vm,
+		      unformat_input_t * input, vlib_cli_command_t * cmd)
+{
+  index_t ii;
+
+  /* *INDENT-OFF* */
+  pool_foreach_index (ii, ipsec_itf_pool)
+   {
+    vlib_cli_output (vm, "%U", format_ipsec_itf, ii);
+  }
+  /* *INDENT-ON* */
+
+  return NULL;
+}
+
+/**
+ * show IPSEC tunnel protection hash tables
+ */
+/* *INDENT-OFF* */
+VLIB_CLI_COMMAND (ipsec_interface_show_node, static) =
+{
+  .path = "show ipsec interface",
+  .function = ipsec_interface_show,
+  .short_help =  "show ipsec interface",
+};
+/* *INDENT-ON* */
 
 /*
  * fd.io coding-style-patch-verification: ON

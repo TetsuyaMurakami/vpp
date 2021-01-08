@@ -137,10 +137,10 @@ vl_api_map_domain_dump_t_handler (vl_api_map_domain_dump_t * mp)
     return;
 
   /* *INDENT-OFF* */
-  pool_foreach_index(i, mm->domains,
-  ({
+  pool_foreach_index (i, mm->domains)
+   {
     send_domain_details(i, reg, mp->context);
-  }));
+  }
   /* *INDENT-ON* */
 }
 
@@ -153,7 +153,10 @@ vl_api_map_domains_get_t_handler (vl_api_map_domains_get_t * mp)
   i32 rv = 0;
 
   if (pool_elts (mm->domains) == 0)
-    return;
+    {
+      REPLY_MACRO (VL_API_MAP_DOMAINS_GET_REPLY);
+      return;
+    }
 
   /* *INDENT-OFF* */
   REPLY_AND_DETAILS_MACRO (VL_API_MAP_DOMAINS_GET_REPLY, mm->domains,

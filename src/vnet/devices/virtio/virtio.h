@@ -18,46 +18,10 @@
 #ifndef _VNET_DEVICES_VIRTIO_VIRTIO_H_
 #define _VNET_DEVICES_VIRTIO_VIRTIO_H_
 
-#include <linux/virtio_config.h>
-#include <linux/virtio_net.h>
-#include <linux/virtio_pci.h>
-#include <linux/virtio_ring.h>
+#include <vnet/devices/virtio/virtio_std.h>
+#include <vnet/devices/virtio/vhost_std.h>
+#include <vnet/devices/virtio/virtio_buffering.h>
 #include <vnet/gso/gro.h>
-
-#define foreach_virtio_net_features      \
-  _ (VIRTIO_NET_F_CSUM, 0)	/* Host handles pkts w/ partial csum */ \
-  _ (VIRTIO_NET_F_GUEST_CSUM, 1) /* Guest handles pkts w/ partial csum */ \
-  _ (VIRTIO_NET_F_CTRL_GUEST_OFFLOADS, 2) /* Dynamic offload configuration. */ \
-  _ (VIRTIO_NET_F_MTU, 3)       /* Initial MTU advice. */ \
-  _ (VIRTIO_NET_F_MAC, 5)	/* Host has given MAC address. */ \
-  _ (VIRTIO_NET_F_GSO, 6)	/* Host handles pkts w/ any GSO. */ \
-  _ (VIRTIO_NET_F_GUEST_TSO4, 7)	/* Guest can handle TSOv4 in. */ \
-  _ (VIRTIO_NET_F_GUEST_TSO6, 8)	/* Guest can handle TSOv6 in. */ \
-  _ (VIRTIO_NET_F_GUEST_ECN, 9)	/* Guest can handle TSO[6] w/ ECN in. */ \
-  _ (VIRTIO_NET_F_GUEST_UFO, 10)	/* Guest can handle UFO in. */ \
-  _ (VIRTIO_NET_F_HOST_TSO4, 11)	/* Host can handle TSOv4 in. */ \
-  _ (VIRTIO_NET_F_HOST_TSO6, 12)	/* Host can handle TSOv6 in. */ \
-  _ (VIRTIO_NET_F_HOST_ECN, 13)	/* Host can handle TSO[6] w/ ECN in. */ \
-  _ (VIRTIO_NET_F_HOST_UFO, 14)	/* Host can handle UFO in. */ \
-  _ (VIRTIO_NET_F_MRG_RXBUF, 15)	/* Host can merge receive buffers. */ \
-  _ (VIRTIO_NET_F_STATUS, 16)	/* virtio_net_config.status available */ \
-  _ (VIRTIO_NET_F_CTRL_VQ, 17)	/* Control channel available */ \
-  _ (VIRTIO_NET_F_CTRL_RX, 18)	/* Control channel RX mode support */ \
-  _ (VIRTIO_NET_F_CTRL_VLAN, 19)	/* Control channel VLAN filtering */ \
-  _ (VIRTIO_NET_F_CTRL_RX_EXTRA, 20)	/* Extra RX mode control support */ \
-  _ (VIRTIO_NET_F_GUEST_ANNOUNCE, 21)	/* Guest can announce device on the network */ \
-  _ (VIRTIO_NET_F_MQ, 22)	        /* Device supports Receive Flow Steering */ \
-  _ (VIRTIO_NET_F_CTRL_MAC_ADDR, 23)	/* Set MAC address */ \
-  _ (VIRTIO_F_NOTIFY_ON_EMPTY, 24) \
-  _ (VHOST_F_LOG_ALL, 26)      /* Log all write descriptors */ \
-  _ (VIRTIO_F_ANY_LAYOUT, 27)  /* Can the device handle any descriptor layout */ \
-  _ (VIRTIO_RING_F_INDIRECT_DESC, 28)   /* Support indirect buffer descriptors */ \
-  _ (VIRTIO_RING_F_EVENT_IDX, 29)       /* The Guest publishes the used index for which it expects an interrupt \
- * at the end of the avail ring. Host should ignore the avail->flags field. */ \
-/* The Host publishes the avail index for which it expects a kick \
- * at the end of the used ring. Guest should ignore the used->flags field. */ \
-  _ (VHOST_USER_F_PROTOCOL_FEATURES, 30) \
-  _ (VIRTIO_F_VERSION_1, 32)  /* v1.0 compliant. */           \
 
 #define foreach_virtio_if_flag		\
   _(0, ADMIN_UP, "admin-up")		\
@@ -69,8 +33,6 @@ typedef enum
   foreach_virtio_if_flag
 #undef _
 } virtio_if_flag_t;
-
-#define VIRTIO_FEATURE(X) (1ULL << X)
 
 #define TX_QUEUE(X) ((X*2) + 1)
 #define RX_QUEUE(X) (X*2)
@@ -95,26 +57,55 @@ typedef enum
 
 #define VIRTIO_RING_FLAG_MASK_INT 1
 
+#define VIRTIO_EVENT_START_TIMER 1
+#define VIRTIO_EVENT_STOP_TIMER 2
+
 typedef struct
 {
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
   clib_spinlock_t lockp;
-  struct vring_desc *desc;
-  struct vring_used *used;
-  struct vring_avail *avail;
-  u16 desc_in_use;
-  u16 desc_next;
-  int kick_fd;
-  int call_fd;
-  u8 buffer_pool_index;
+  union
+  {
+    struct
+    {
+      vring_desc_t *desc;
+      vring_used_t *used;
+      vring_avail_t *avail;
+    };
+    struct
+    {
+      vring_packed_desc_t *packed_desc;
+      vring_desc_event_t *driver_event;
+      vring_desc_event_t *device_event;
+    };
+  };
+  u32 *buffers;
   u16 size;
   u16 queue_id;
-#define VRING_TX_OUT_OF_ORDER 1
-  u16 flags;
-  u32 *buffers;
+  u16 desc_in_use;
+  u16 desc_next;
   u16 last_used_idx;
   u16 last_kick_avail_idx;
-  u32 call_file_index;
+  union
+  {
+    struct
+    {
+      int kick_fd;
+      int call_fd;
+      u32 call_file_index;
+    };
+    struct
+    {
+      u16 avail_wrap_counter;
+      u16 used_wrap_counter;
+      u16 queue_notify_offset;
+    };
+  };
+#define VRING_TX_OUT_OF_ORDER 1
+  u16 flags;
+  u8 buffer_pool_index;
+  vnet_hw_if_rx_mode mode;
+  virtio_vring_buffering_t *buffering;
   gro_flow_table_t *flow_table;
 } virtio_vring_t;
 
@@ -162,13 +153,22 @@ typedef struct
 
     CLIB_CACHE_LINE_ALIGN_MARK (cacheline1);
   int packet_coalesce;
+  int packet_buffering;
   u32 dev_instance;
   u32 numa_node;
   u64 remote_features;
 
   /* error */
   clib_error_t *error;
-  u8 mac_addr[6];
+  union
+  {
+    struct
+    {
+      u32 mac_addr32;
+      u16 mac_addr16;
+    };
+    u8 mac_addr[6];
+  };
   union
   {
     struct			/* tun/tap interface */
@@ -186,6 +186,7 @@ typedef struct
       ip4_address_t host_ip4_addr;
       u8 host_ip4_prefix_len;
       u8 host_ip6_prefix_len;
+      u8 host_carrier_up;	/* host tun/tap driver link carrier state */
     };
     struct			/* native virtio */
     {
@@ -206,10 +207,12 @@ typedef struct
     };
   };
   const virtio_pci_func_t *virtio_pci_func;
+  int is_packed;
 } virtio_if_t;
 
 typedef struct
 {
+  u32 interrupt_queues_count;
   /* logging */
   vlib_log_class_t log_default;
 
@@ -219,6 +222,7 @@ typedef struct
 extern virtio_main_t virtio_main;
 extern vnet_device_class_t virtio_device_class;
 extern vlib_node_registration_t virtio_input_node;
+extern vlib_node_registration_t virtio_send_interrupt_node;
 
 clib_error_t *virtio_vring_init (vlib_main_t * vm, virtio_if_t * vif, u16 idx,
 				 u16 sz);
@@ -228,16 +232,18 @@ clib_error_t *virtio_vring_free_tx (vlib_main_t * vm, virtio_if_t * vif,
 				    u32 idx);
 void virtio_vring_set_numa_node (vlib_main_t * vm, virtio_if_t * vif,
 				 u32 idx);
-extern void virtio_free_used_desc (vlib_main_t * vm, virtio_vring_t * vring);
-extern void virtio_free_rx_buffers (vlib_main_t * vm, virtio_vring_t * vring);
+extern void virtio_free_buffers (vlib_main_t * vm, virtio_vring_t * vring);
 extern void virtio_set_net_hdr_size (virtio_if_t * vif);
 extern void virtio_show (vlib_main_t * vm, u32 * hw_if_indices, u8 show_descr,
 			 u32 type);
 extern void virtio_set_packet_coalesce (virtio_if_t * vif);
+clib_error_t *virtio_set_packet_buffering (virtio_if_t * vif, u16 size);
 extern void virtio_pci_legacy_notify_queue (vlib_main_t * vm,
-					    virtio_if_t * vif, u16 queue_id);
+					    virtio_if_t * vif, u16 queue_id,
+					    u16 queue_notify_offset);
 extern void virtio_pci_modern_notify_queue (vlib_main_t * vm,
-					    virtio_if_t * vif, u16 queue_id);
+					    virtio_if_t * vif, u16 queue_id,
+					    u16 queue_notify_offset);
 format_function_t format_virtio_device_name;
 format_function_t format_virtio_log_name;
 
@@ -247,9 +253,11 @@ virtio_kick (vlib_main_t * vm, virtio_vring_t * vring, virtio_if_t * vif)
   if (vif->type == VIRTIO_IF_TYPE_PCI)
     {
       if (vif->is_modern)
-	virtio_pci_modern_notify_queue (vm, vif, vring->queue_id);
+	virtio_pci_modern_notify_queue (vm, vif, vring->queue_id,
+					vring->queue_notify_offset);
       else
-	virtio_pci_legacy_notify_queue (vm, vif, vring->queue_id);
+	virtio_pci_legacy_notify_queue (vm, vif, vring->queue_id,
+					vring->queue_notify_offset);
     }
   else
     {

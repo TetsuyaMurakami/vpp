@@ -867,13 +867,13 @@ dhcp_client_process (vlib_main_t * vm,
 	    {
               /* *INDENT-OFF* */
               next_expire_time = 1e70;
-              pool_foreach (c, dcm->clients,
-              ({
+              pool_foreach (c, dcm->clients)
+               {
                 this_next_expire_time = dhcp_client_sm
                   (now, timeout, (uword) (c - dcm->clients));
                 next_expire_time = this_next_expire_time < next_expire_time ?
                   this_next_expire_time : next_expire_time;
-              }));
+              }
               if (next_expire_time > now)
                 timeout = next_expire_time - now;
               else
@@ -939,12 +939,12 @@ show_dhcp_client_command_fn (vlib_main_t * vm,
     }
 
   /* *INDENT-OFF* */
-  pool_foreach (c, dcm->clients,
-  ({
+  pool_foreach (c, dcm->clients)
+   {
     vlib_cli_output (vm, "%U",
                      format_dhcp_client, dcm,
                      c, verbose);
-  }));
+  }
   /* *INDENT-ON* */
 
   return 0;
@@ -1114,11 +1114,11 @@ dhcp_client_walk (dhcp_client_walk_cb_t cb, void *ctx)
   dhcp_client_t *c;
 
   /* *INDENT-OFF* */
-  pool_foreach (c, dcm->clients,
-  ({
+  pool_foreach (c, dcm->clients)
+   {
     if (!cb(c, ctx))
       break;
-  }));
+  }
   /* *INDENT-ON* */
 
 }
@@ -1250,7 +1250,7 @@ dhcp_client_init (vlib_main_t * vm)
   dcm->seed = (u32) clib_cpu_time_now ();
 
   dhcp_logger = vlib_log_register_class ("dhcp", "client");
-  DHCP_INFO ("plugin initialized");
+  DHCP_DBG ("plugin initialized");
 
   return 0;
 }

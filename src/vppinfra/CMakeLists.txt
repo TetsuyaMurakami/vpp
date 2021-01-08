@@ -36,6 +36,13 @@ install(
   COMPONENT vpp-dev
 )
 
+add_definitions(-fvisibility=hidden)
+
+# Ensure symbols from cJSON are exported
+set_source_files_properties( cJSON.c PROPERTIES
+  COMPILE_DEFINITIONS " CJSON_API_VISIBILITY " )
+
+
 ##############################################################################
 # vppinfra sources
 ##############################################################################
@@ -55,6 +62,8 @@ set(VPPINFRA_SRCS
   longjmp.S
   macros.c
   maplog.c
+  mem.c
+  mem_bulk.c
   mem_dlmalloc.c
   mhash.c
   mpcap.c
@@ -85,6 +94,7 @@ set(VPPINFRA_SRCS
   valloc.c
   vec.c
   vector.c
+  cJSON.c
 )
 
 set(VPPINFRA_HEADERS
@@ -94,6 +104,8 @@ set(VPPINFRA_HEADERS
   bihash_40_8.h
   bihash_48_8.h
   bihash_8_8.h
+  bihash_8_16.h
+  bihash_24_16.h
   bihash_template.c
   bihash_template.h
   bihash_vec8_8.h
@@ -103,6 +115,7 @@ set(VPPINFRA_HEADERS
   cache.h
   callback.h
   callback_data.h
+  cJSON.h
   clib_error.h
   clib.h
   cpu.h
@@ -132,14 +145,12 @@ set(VPPINFRA_HEADERS
   memcpy_sse3.h
   mem.h
   mhash.h
-  mheap.h
   mpcap.h
   os.h
   pcap.h
   pcap_funcs.h
   pmalloc.h
   pool.h
-  pmc.h
   ptclosure.h
   random_buffer.h
   random.h
@@ -194,6 +205,7 @@ add_vpp_library(vppinfra
   LINK_LIBRARIES m
   INSTALL_HEADERS ${VPPINFRA_HEADERS}
   COMPONENT libvppinfra
+  LTO
 )
 
 ##############################################################################

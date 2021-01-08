@@ -28,7 +28,9 @@
   _ (PERSIST, 2)             \
   _ (ATTACH, 3)              \
   _ (TUN, 4)                 \
-  _ (GRO_COALESCE, 5)
+  _ (GRO_COALESCE, 5)        \
+  _ (PACKED, 6)              \
+  _ (IN_ORDER, 7)
 
 typedef enum
 {
@@ -106,6 +108,8 @@ int
 tap_csum_offload_enable_disable (vlib_main_t * vm, u32 sw_if_index,
 				 int enable_disable);
 int tap_dump_ifs (tap_interface_details_t ** out_tapids);
+int tap_set_carrier (u32 hw_if_index, u32 carrier_up);
+int tap_set_speed (u32 hw_if_index, u32 speed);
 
 #endif /* _VNET_DEVICES_VIRTIO_TAP_H_ */
 

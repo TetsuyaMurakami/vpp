@@ -49,6 +49,7 @@ class VCLAppWorker(Worker):
 
 class VCLTestCase(VppTestCase):
     """ VCL Test Class """
+    extra_vpp_punt_config = ["session", "{", "poll-main", "}"]
 
     @classmethod
     def setUpClass(cls):
@@ -80,13 +81,13 @@ class VCLTestCase(VppTestCase):
         super(VCLTestCase, self).setUp()
 
     def cut_thru_setup(self):
-        self.vapi.session_enable_disable(is_enabled=1)
+        self.vapi.session_enable_disable(is_enable=1)
 
     def cut_thru_tear_down(self):
-        self.vapi.session_enable_disable(is_enabled=0)
+        self.vapi.session_enable_disable(is_enable=0)
 
     def cut_thru_test(self, server_app, server_args, client_app, client_args):
-        self.env = {'VCL_API_PREFIX': self.shm_prefix,
+        self.env = {'VCL_VPP_API_SOCKET': self.api_sock,
                     'VCL_APP_SCOPE_LOCAL': "true"}
         worker_server = VCLAppWorker(self.build_dir, server_app, server_args,
                                      self.logger, self.env)
@@ -103,7 +104,7 @@ class VCLTestCase(VppTestCase):
         self.sleep(self.post_test_sleep)
 
     def thru_host_stack_setup(self):
-        self.vapi.session_enable_disable(is_enabled=1)
+        self.vapi.session_enable_disable(is_enable=1)
         self.create_loopback_interfaces(2)
 
         table_id = 1
@@ -145,7 +146,7 @@ class VCLTestCase(VppTestCase):
             i.admin_down()
 
     def thru_host_stack_ipv6_setup(self):
-        self.vapi.session_enable_disable(is_enabled=1)
+        self.vapi.session_enable_disable(is_enable=1)
         self.create_loopback_interfaces(2)
 
         table_id = 1
@@ -186,12 +187,12 @@ class VCLTestCase(VppTestCase):
             i.set_table_ip6(0)
             i.admin_down()
 
-        self.vapi.session_enable_disable(is_enabled=0)
+        self.vapi.session_enable_disable(is_enable=0)
 
     @unittest.skipUnless(_have_iperf3, "'%s' not found, Skipping.")
     def thru_host_stack_test(self, server_app, server_args,
                              client_app, client_args):
-        self.env = {'VCL_API_PREFIX': self.shm_prefix,
+        self.env = {'VCL_VPP_API_SOCKET': self.api_sock,
                     'VCL_APP_SCOPE_GLOBAL': "true",
                     'VCL_APP_NAMESPACE_ID': "1",
                     'VCL_APP_NAMESPACE_SECRET': "1234"}

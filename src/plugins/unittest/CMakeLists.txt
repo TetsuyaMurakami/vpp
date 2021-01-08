@@ -11,6 +11,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set(chacha20_poly1305)
+if (OPENSSL_VERSION VERSION_GREATER_EQUAL 1.1.0)
+    set(chacha20_poly1305 crypto/chacha20_poly1305.c)
+endif()
+
 add_vpp_plugin(unittest
   SOURCES
   api_fuzz_test.c
@@ -20,6 +25,7 @@ add_vpp_plugin(unittest
   crypto/aes_cbc.c
   crypto/aes_ctr.c
   crypto/aes_gcm.c
+  ${chacha20_poly1305}
   crypto/rfc2202_hmac_md5.c
   crypto/rfc2202_hmac_sha1.c
   crypto/rfc4231.c
@@ -27,9 +33,9 @@ add_vpp_plugin(unittest
   fib_test.c
   interface_test.c
   ipsec_test.c
-  lisp_cp_test.c
   llist_test.c
   mactime_test.c
+  mem_bulk_test.c
   mfib_test.c
   mpcap_node.c
   punt_test.c

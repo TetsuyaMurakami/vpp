@@ -163,26 +163,23 @@ typedef struct tcp_configuration_
    * a zero rwnd advertisement */
   u32 rwnd_min_update_ack;
 
-  /** Delayed ack time (disabled) */
-  u16 delack_time;
-
   /** Timer ticks to wait for close from app */
-  u16 closewait_time;
+  u32 closewait_time;
 
   /** Timer ticks to wait in time-wait. Also known as 2MSL */
-  u16 timewait_time;
+  u32 timewait_time;
 
   /** Timer ticks to wait in fin-wait1 to send fin and rcv fin-ack */
-  u16 finwait1_time;
+  u32 finwait1_time;
 
   /** Timer ticks to wait in last ack for ack */
-  u16 lastack_time;
+  u32 lastack_time;
 
   /** Timer ticks to wait in fin-wait2 for fin */
-  u16 finwait2_time;
+  u32 finwait2_time;
 
   /** Timer ticks to wait in closing for fin ack */
-  u16 closing_time;
+  u32 closing_time;
 
   /** Time to wait (sec) before cleaning up the connection */
   f32 cleanup_time;
@@ -192,6 +189,9 @@ typedef struct tcp_configuration_
 
   /** Number of preallocated half-open connections */
   u32 preallocated_half_open_connections;
+
+  /** Maxium allowed GSO packet size */
+  u32 max_gso_size;
 
   /** Vectors of src addresses. Optional unless one needs > 63K active-opens */
   ip4_address_t *ip4_src_addrs;

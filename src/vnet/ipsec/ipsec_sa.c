@@ -15,7 +15,7 @@
 
 #include <vnet/ipsec/ipsec.h>
 #include <vnet/ipsec/esp.h>
-#include <vnet/udp/udp.h>
+#include <vnet/udp/udp_local.h>
 #include <vnet/fib/fib_table.h>
 #include <vnet/fib/fib_entry_track.h>
 #include <vnet/ipsec/ipsec_tun.h>
@@ -99,12 +99,12 @@ ipsec_sa_set_crypto_alg (ipsec_sa_t * sa, ipsec_crypto_alg_t crypto_alg)
   ipsec_main_t *im = &ipsec_main;
   sa->crypto_alg = crypto_alg;
   sa->crypto_iv_size = im->crypto_algs[crypto_alg].iv_size;
-  sa->crypto_block_size = im->crypto_algs[crypto_alg].block_size;
+  sa->esp_block_align = clib_max (4, im->crypto_algs[crypto_alg].block_align);
   sa->sync_op_data.crypto_enc_op_id = im->crypto_algs[crypto_alg].enc_op_id;
   sa->sync_op_data.crypto_dec_op_id = im->crypto_algs[crypto_alg].dec_op_id;
   sa->crypto_calg = im->crypto_algs[crypto_alg].alg;
   ASSERT (sa->crypto_iv_size <= ESP_MAX_IV_SIZE);
-  ASSERT (sa->crypto_block_size <= ESP_MAX_BLOCK_SIZE);
+  ASSERT (sa->esp_block_align <= ESP_MAX_BLOCK_SIZE);
   if (IPSEC_CRYPTO_ALG_IS_GCM (crypto_alg))
     {
       sa->integ_icv_size = im->crypto_algs[crypto_alg].icv_size;
@@ -178,8 +178,10 @@ ipsec_sa_add_and_lock (u32 id,
 		       u32 tx_table_id,
 		       u32 salt,
 		       const ip46_address_t * tun_src,
-		       const ip46_address_t * tun_dst, u32 * sa_out_index,
-		       u16 src_port, u16 dst_port)
+		       const ip46_address_t * tun_dst,
+		       tunnel_encap_decap_flags_t tunnel_flags,
+		       ip_dscp_t dscp,
+		       u32 * sa_out_index, u16 src_port, u16 dst_port)
 {
   vlib_main_t *vm = vlib_get_main ();
   ipsec_main_t *im = &ipsec_main;
@@ -206,6 +208,8 @@ ipsec_sa_add_and_lock (u32 id,
   sa->stat_index = sa_index;
   sa->protocol = proto;
   sa->flags = flags;
+  sa->tunnel_flags = tunnel_flags;
+  sa->dscp = dscp;
   sa->salt = salt;
   sa->encrypt_thread_index = (vlib_num_workers ())? ~0 : 0;
   sa->decrypt_thread_index = (vlib_num_workers ())? ~0 : 0;
@@ -297,6 +301,8 @@ ipsec_sa_add_and_lock (u32 id,
       if (ipsec_sa_is_set_IS_TUNNEL_V6 (sa))
 	{
 	  sa->ip6_hdr.ip_version_traffic_class_and_flow_label = 0x60;
+	  ip6_set_dscp_network_order (&sa->ip6_hdr, sa->dscp);
+
 	  sa->ip6_hdr.hop_limit = 254;
 	  sa->ip6_hdr.src_address.as_u64[0] =
 	    sa->tunnel_src_addr.ip6.as_u64[0];
@@ -317,6 +323,7 @@ ipsec_sa_add_and_lock (u32 id,
 	  sa->ip4_hdr.ttl = 254;
 	  sa->ip4_hdr.src_address.as_u32 = sa->tunnel_src_addr.ip4.as_u32;
 	  sa->ip4_hdr.dst_address.as_u32 = sa->tunnel_dst_addr.ip4.as_u32;
+	  sa->ip4_hdr.tos = sa->dscp << 2;
 
 	  if (ipsec_sa_is_set_UDP_ENCAP (sa))
 	    sa->ip4_hdr.protocol = IP_PROTOCOL_UDP;
@@ -453,11 +460,11 @@ ipsec_sa_walk (ipsec_sa_walk_cb_t cb, void *ctx)
   ipsec_sa_t *sa;
 
   /* *INDENT-OFF* */
-  pool_foreach (sa, im->sad,
-  ({
+  pool_foreach (sa, im->sad)
+   {
     if (WALK_CONTINUE != cb(sa, ctx))
       break;
-  }));
+  }
   /* *INDENT-ON* */
 }
 

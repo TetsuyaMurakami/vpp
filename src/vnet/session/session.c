@@ -78,7 +78,7 @@ session_send_evt_to_thread (void *data, void *args, u32 thread_index,
 int
 session_send_io_evt_to_thread (svm_fifo_t * f, session_evt_type_t evt_type)
 {
-  return session_send_evt_to_thread (&f->master_session_index, 0,
+  return session_send_evt_to_thread (&f->shr->master_session_index, 0,
 				     f->master_thread_index, evt_type);
 }
 
@@ -436,8 +436,8 @@ session_fifo_tuning (session_t * s, svm_fifo_t * f,
 	{
 	  segment_manager_t *sm;
 	  sm = segment_manager_get (f->segment_manager);
-	  ASSERT (f->size >= 4096);
-	  ASSERT (f->size <= sm->max_fifo_size);
+	  ASSERT (f->shr->size >= 4096);
+	  ASSERT (f->shr->size <= sm->max_fifo_size);
 	}
     }
 }
@@ -516,22 +516,49 @@ session_enqueue_dgram_connection (session_t * s,
 				  session_dgram_hdr_t * hdr,
 				  vlib_buffer_t * b, u8 proto, u8 queue_event)
 {
-  int enqueued = 0, rv, in_order_off;
+  int rv;
 
   ASSERT (svm_fifo_max_enqueue_prod (s->rx_fifo)
 	  >= b->current_length + sizeof (*hdr));
 
-  svm_fifo_enqueue (s->rx_fifo, sizeof (session_dgram_hdr_t), (u8 *) hdr);
-  enqueued = svm_fifo_enqueue (s->rx_fifo, b->current_length,
-			       vlib_buffer_get_current (b));
-  if (PREDICT_FALSE ((b->flags & VLIB_BUFFER_NEXT_PRESENT) && enqueued >= 0))
+  if (PREDICT_TRUE (!(b->flags & VLIB_BUFFER_NEXT_PRESENT)))
     {
-      in_order_off = enqueued > b->current_length ? enqueued : 0;
-      rv = session_enqueue_chain_tail (s, b, in_order_off, 1);
-      if (rv > 0)
-	enqueued += rv;
+      /* *INDENT-OFF* */
+      svm_fifo_seg_t segs[2] = {
+	  { (u8 *) hdr, sizeof (*hdr) },
+	  { vlib_buffer_get_current (b), b->current_length }
+      };
+      /* *INDENT-ON* */
+
+      rv = svm_fifo_enqueue_segments (s->rx_fifo, segs, 2,
+				      0 /* allow_partial */ );
     }
-  if (queue_event)
+  else
+    {
+      vlib_main_t *vm = vlib_get_main ();
+      svm_fifo_seg_t *segs = 0, *seg;
+      vlib_buffer_t *it = b;
+      u32 n_segs = 1;
+
+      vec_add2 (segs, seg, 1);
+      seg->data = (u8 *) hdr;
+      seg->len = sizeof (*hdr);
+      while (it)
+	{
+	  vec_add2 (segs, seg, 1);
+	  seg->data = vlib_buffer_get_current (it);
+	  seg->len = it->current_length;
+	  n_segs++;
+	  if (!(it->flags & VLIB_BUFFER_NEXT_PRESENT))
+	    break;
+	  it = vlib_get_buffer (vm, it->next_buffer);
+	}
+      rv = svm_fifo_enqueue_segments (s->rx_fifo, segs, n_segs,
+				      0 /* allow partial */ );
+      vec_free (segs);
+    }
+
+  if (queue_event && rv > 0)
     {
       /* Queue RX event on this fifo. Eventually these will need to be flushed
        * by calling stream_server_flush_enqueue_events () */
@@ -546,7 +573,7 @@ session_enqueue_dgram_connection (session_t * s,
 
       session_fifo_tuning (s, s->rx_fifo, SESSION_FT_ACTION_ENQUEUED, 0);
     }
-  return enqueued;
+  return rv > 0 ? rv : 0;
 }
 
 int
@@ -584,9 +611,9 @@ session_notify_subscribers (u32 app_index, session_t * s,
   if (!app)
     return -1;
 
-  for (i = 0; i < f->n_subscribers; i++)
+  for (i = 0; i < f->shr->n_subscribers; i++)
     {
-      app_wrk = application_get_worker (app, f->subscribers[i]);
+      app_wrk = application_get_worker (app, f->shr->subscribers[i]);
       if (!app_wrk)
 	continue;
       if (app_worker_lock_and_send_event (app_wrk, s, evt_type))
@@ -696,7 +723,7 @@ session_dequeue_notify (session_t * s)
 						     SESSION_IO_EVT_TX)))
     return -1;
 
-  if (PREDICT_FALSE (s->tx_fifo->n_subscribers))
+  if (PREDICT_FALSE (s->tx_fifo->shr->n_subscribers))
     return session_notify_subscribers (app_wrk->app_index, s,
 				       s->tx_fifo, SESSION_IO_EVT_TX);
 
@@ -1158,16 +1185,18 @@ session_dgram_accept (transport_connection_t * tc, u32 listener_index,
       return rv;
     }
 
+  session_lookup_add_connection (tc, session_handle (s));
+
   app_wrk = app_worker_get (s->app_wrk_index);
   if ((rv = app_worker_accept_notify (app_wrk, s)))
     {
+      session_lookup_del_session (s);
       segment_manager_dealloc_fifos (s->rx_fifo, s->tx_fifo);
       session_free (s);
       return rv;
     }
 
   s->session_state = SESSION_STATE_READY;
-  session_lookup_add_connection (tc, session_handle (s));
 
   return 0;
 }
@@ -1469,47 +1498,40 @@ session_transport_cleanup (session_t * s)
 /**
  * Allocate event queues in the shared-memory segment
  *
- * That can either be a newly created memfd segment, that will need to be
- * mapped by all stack users, or the binary api's svm region. The latter is
- * assumed to be already mapped. NOTE that this assumption DOES NOT hold if
- * api clients bootstrap shm api over sockets (i.e. use memfd segments) and
- * vpp uses api svm region for event queues.
+ * That can only be a newly created memfd segment, that must be
+ * mapped by all apps/stack users.
  */
 void
 session_vpp_event_queues_allocate (session_main_t * smm)
 {
   u32 evt_q_length = 2048, evt_size = sizeof (session_event_t);
-  ssvm_private_t *eqs = &smm->evt_qs_segment;
+  fifo_segment_t *eqs = &smm->evt_qs_segment;
   uword eqs_size = 64 << 20;
   pid_t vpp_pid = getpid ();
-  void *oldheap;
   int i;
 
   if (smm->configured_event_queue_length)
     evt_q_length = smm->configured_event_queue_length;
 
-  if (smm->evt_qs_use_memfd_seg)
+  if (smm->evt_qs_segment_size)
+    eqs_size = smm->evt_qs_segment_size;
+
+  eqs->ssvm.ssvm_size = eqs_size;
+  eqs->ssvm.my_pid = vpp_pid;
+  eqs->ssvm.name = format (0, "%s%c", "session: evt-qs-segment", 0);
+  /* clib_mem_vm_map_shared consumes first page before requested_va */
+  eqs->ssvm.requested_va = smm->session_baseva + clib_mem_get_page_size ();
+
+  if (ssvm_server_init (&eqs->ssvm, SSVM_SEGMENT_MEMFD))
     {
-      if (smm->evt_qs_segment_size)
-	eqs_size = smm->evt_qs_segment_size;
-
-      eqs->ssvm_size = eqs_size;
-      eqs->i_am_master = 1;
-      eqs->my_pid = vpp_pid;
-      eqs->name = format (0, "%s%c", "evt-qs-segment", 0);
-      eqs->requested_va = smm->session_baseva;
-
-      if (ssvm_master_init (eqs, SSVM_SEGMENT_MEMFD))
-	{
-	  clib_warning ("failed to initialize queue segment");
-	  return;
-	}
+      clib_warning ("failed to initialize queue segment");
+      return;
     }
 
-  if (smm->evt_qs_use_memfd_seg)
-    oldheap = ssvm_push_heap (eqs->sh);
-  else
-    oldheap = vl_msg_push_heap ();
+  fifo_segment_init (eqs);
+
+  /* Special fifo segment that's filled only with mqs */
+  eqs->h->n_mqs = vec_len (smm->wrk);
 
   for (i = 0; i < vec_len (smm->wrk); i++)
     {
@@ -1523,27 +1545,18 @@ session_vpp_event_queues_allocate (session_main_t * smm)
       cfg->n_rings = 2;
       cfg->q_nitems = evt_q_length;
       cfg->ring_cfgs = rc;
-      smm->wrk[i].vpp_event_queue = svm_msg_q_alloc (cfg);
-      if (smm->evt_qs_use_memfd_seg)
-	{
-	  if (svm_msg_q_alloc_consumer_eventfd (smm->wrk[i].vpp_event_queue))
-	    clib_warning ("eventfd returned");
-	}
-    }
 
-  if (smm->evt_qs_use_memfd_seg)
-    ssvm_pop_heap (oldheap);
-  else
-    vl_msg_pop_heap (oldheap);
+      smm->wrk[i].vpp_event_queue = fifo_segment_msg_q_alloc (eqs, i, cfg);
+
+      if (svm_msg_q_alloc_consumer_eventfd (smm->wrk[i].vpp_event_queue))
+	clib_warning ("eventfd returned");
+    }
 }
 
-ssvm_private_t *
+fifo_segment_t *
 session_main_get_evt_q_segment (void)
 {
-  session_main_t *smm = &session_main;
-  if (smm->evt_qs_use_memfd_seg)
-    return &smm->evt_qs_segment;
-  return 0;
+  return &session_main.evt_qs_segment;
 }
 
 u64
@@ -1657,12 +1670,15 @@ session_queue_run_on_main_thread (vlib_main_t * vm)
 static clib_error_t *
 session_manager_main_enable (vlib_main_t * vm)
 {
-  segment_manager_main_init_args_t _sm_args = { 0 }, *sm_args = &_sm_args;
   session_main_t *smm = &session_main;
   vlib_thread_main_t *vtm = vlib_get_thread_main ();
   u32 num_threads, preallocated_sessions_per_worker;
   session_worker_t *wrk;
   int i;
+
+  /* We only initialize once and do not de-initialized on disable */
+  if (smm->is_initialized)
+    goto done;
 
   num_threads = 1 /* main thread */  + vtm->n_threads;
 
@@ -1690,10 +1706,8 @@ session_manager_main_enable (vlib_main_t * vm)
   /* Allocate vpp event queues segment and queue */
   session_vpp_event_queues_allocate (smm);
 
-  /* Initialize fifo segment main baseva and timeout */
-  sm_args->baseva = smm->session_baseva + smm->evt_qs_segment_size;
-  sm_args->size = smm->session_va_space_size;
-  segment_manager_main_init (sm_args);
+  /* Initialize segment manager properties */
+  segment_manager_main_init ();
 
   /* Preallocate sessions */
   if (smm->preallocated_sessions)
@@ -1720,6 +1734,9 @@ session_manager_main_enable (vlib_main_t * vm)
   session_lookup_init ();
   app_namespaces_init ();
   transport_init ();
+  smm->is_initialized = 1;
+
+done:
 
   smm->is_enabled = 1;
 
@@ -1728,6 +1745,12 @@ session_manager_main_enable (vlib_main_t * vm)
   session_debug_init ();
 
   return 0;
+}
+
+static void
+session_manager_main_disable (vlib_main_t * vm)
+{
+  transport_enable_disable (vm, 0 /* is_en */ );
 }
 
 void
@@ -1741,10 +1764,10 @@ session_node_enable_disable (u8 is_en)
   foreach_vlib_main (({
     if (have_workers && ii == 0)
       {
-	vlib_node_set_state (this_vlib_main, session_queue_process_node.index,
-	                     state);
 	if (is_en)
 	  {
+	    vlib_node_set_state (this_vlib_main,
+	                         session_queue_process_node.index, state);
 	    vlib_node_t *n = vlib_get_node (this_vlib_main,
 	                                    session_queue_process_node.index);
 	    vlib_start_process (this_vlib_main, n->runtime_index);
@@ -1755,8 +1778,8 @@ session_node_enable_disable (u8 is_en)
 	                                  session_queue_process_node.index,
 	                                  SESSION_Q_PROCESS_STOP, 0);
 	  }
-
-	continue;
+	if (!session_main.poll_main)
+	  continue;
       }
     vlib_node_set_state (this_vlib_main, session_queue_node.index,
                          state);
@@ -1779,6 +1802,7 @@ vnet_session_enable_disable (vlib_main_t * vm, u8 is_en)
   else
     {
       session_main.is_enabled = 0;
+      session_manager_main_disable (vm);
       session_node_enable_disable (is_en);
     }
 
@@ -1792,6 +1816,7 @@ session_main_init (vlib_main_t * vm)
 
   smm->is_enabled = 0;
   smm->session_enable_asap = 0;
+  smm->poll_main = 0;
   smm->session_baseva = HIGH_SEGMENT_BASEVA;
 
 #if (HIGH_SEGMENT_BASEVA > (4ULL << 30))
@@ -1897,13 +1922,20 @@ session_config_fn (vlib_main_t * vm, unformat_input_t * input)
       else if (unformat (input, "local-endpoints-table-buckets %d",
 			 &smm->local_endpoints_table_buckets))
 	;
+      /* Deprecated but maintained for compatibility */
       else if (unformat (input, "evt_qs_memfd_seg"))
-	smm->evt_qs_use_memfd_seg = 1;
+	;
       else if (unformat (input, "evt_qs_seg_size %U", unformat_memory_size,
 			 &smm->evt_qs_segment_size))
 	;
       else if (unformat (input, "enable"))
 	smm->session_enable_asap = 1;
+      else if (unformat (input, "segment-baseva 0x%lx", &smm->session_baseva))
+	;
+      else if (unformat (input, "use-app-socket-api"))
+	appns_sapi_enable ();
+      else if (unformat (input, "poll-main"))
+	smm->poll_main = 1;
       else
 	return clib_error_return (0, "unknown input `%U'",
 				  format_unformat_error, input);

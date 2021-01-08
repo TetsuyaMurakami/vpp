@@ -20,7 +20,17 @@
 
 #include <avf/virtchnl.h>
 
+#include <vppinfra/types.h>
+#include <vppinfra/error_bootstrap.h>
+#include <vppinfra/lock.h>
+
 #include <vlib/log.h>
+#include <vlib/pci/pci.h>
+
+#include <vnet/interface.h>
+
+#define AVF_QUEUE_SZ_MAX                4096
+#define AVF_QUEUE_SZ_MIN                64
 
 #define AVF_AQ_ENQ_SUSPEND_TIME		50e-6
 #define AVF_AQ_ENQ_MAX_WAIT_TIME	250e-3
@@ -43,22 +53,47 @@
 #define AVF_RXD_ERROR_L4E		(1ULL << (AVF_RXD_ERROR_SHIFT + 4))
 
 #define AVF_TXD_CMD(x)			(1 << (x + 4))
+#define AVF_TXD_CMD_EXT(x, val)         ((u64)val << (x + 4))
 #define AVF_TXD_CMD_EOP			AVF_TXD_CMD(0)
 #define AVF_TXD_CMD_RS			AVF_TXD_CMD(1)
 #define AVF_TXD_CMD_RSV			AVF_TXD_CMD(2)
 
+#define AVF_TXD_CMD_IIPT_NONE           AVF_TXD_CMD_EXT(5, 0)
+#define AVF_TXD_CMD_IIPT_IPV6           AVF_TXD_CMD_EXT(5, 1)
+#define AVF_TXD_CMD_IIPT_IPV4_NO_CSUM   AVF_TXD_CMD_EXT(5, 2)
+#define AVF_TXD_CMD_IIPT_IPV4           AVF_TXD_CMD_EXT(5, 3)
+
+#define AVF_TXD_CMD_L4T_UNKNOWN         AVF_TXD_CMD_EXT(8, 0)
+#define AVF_TXD_CMD_L4T_TCP             AVF_TXD_CMD_EXT(8, 1)
+#define AVF_TXD_CMD_L4T_SCTP            AVF_TXD_CMD_EXT(8, 2)
+#define AVF_TXD_CMD_L4T_UDP             AVF_TXD_CMD_EXT(8, 3)
+
+#define AVF_TXD_OFFSET(x,factor,val)    (((u64)val/(u64)factor) << (16 + x))
+#define AVF_TXD_OFFSET_MACLEN(val)      AVF_TXD_OFFSET( 0, 2, val)
+#define AVF_TXD_OFFSET_IPLEN(val)       AVF_TXD_OFFSET( 7, 4, val)
+#define AVF_TXD_OFFSET_L4LEN(val)       AVF_TXD_OFFSET(14, 4, val)
+
+#define AVF_TXD_DTYP_CTX                0x1ULL
+#define AVF_TXD_CTX_CMD_TSO             AVF_TXD_CMD(0)
+#define AVF_TXD_CTX_SEG(val,x)          (((u64)val) << (30 + x))
+#define AVF_TXD_CTX_SEG_TLEN(val)       AVF_TXD_CTX_SEG(val,0)
+#define AVF_TXD_CTX_SEG_MSS(val)        AVF_TXD_CTX_SEG(val,20)
+
+
+extern vlib_log_class_registration_t avf_log;
+
 #define avf_log_err(dev, f, ...)                        \
-  vlib_log (VLIB_LOG_LEVEL_ERR, avf_main.log_class, "%U: " f, \
+  vlib_log (VLIB_LOG_LEVEL_ERR, avf_log.class, "%U: " f, \
             format_vlib_pci_addr, &dev->pci_addr, \
             ## __VA_ARGS__)
 
 #define avf_log_warn(dev, f, ...)                        \
-  vlib_log (VLIB_LOG_LEVEL_WARNING, avf_main.log_class, "%U: " f, \
+  vlib_log (VLIB_LOG_LEVEL_WARNING, avf_log.class, "%U: " f, \
             format_vlib_pci_addr, &dev->pci_addr, \
             ## __VA_ARGS__)
 
 #define avf_log_debug(dev, f, ...)                        \
-  vlib_log (VLIB_LOG_LEVEL_DEBUG, avf_main.log_class, "%U: " f, \
+  vlib_log (VLIB_LOG_LEVEL_DEBUG, avf_log.class, "%U: " f, \
             format_vlib_pci_addr, &dev->pci_addr, \
             ## __VA_ARGS__)
 
@@ -137,6 +172,7 @@ typedef struct
   volatile u32 *qtx_tail;
   u16 next;
   u16 size;
+  u32 ctx_desc_placeholder_bi;
   clib_spinlock_t lock;
   avf_tx_desc_t *descs;
   u32 *bufs;
@@ -200,9 +236,26 @@ typedef struct
 typedef enum
 {
   AVF_PROCESS_EVENT_START = 1,
-  AVF_PROCESS_EVENT_STOP = 2,
+  AVF_PROCESS_EVENT_DELETE_IF = 2,
   AVF_PROCESS_EVENT_AQ_INT = 3,
+  AVF_PROCESS_EVENT_REQ = 4,
 } avf_process_event_t;
+
+typedef enum
+{
+  AVF_PROCESS_REQ_ADD_DEL_ETH_ADDR = 1,
+  AVF_PROCESS_REQ_CONFIG_PROMISC_MDDE = 2,
+} avf_process_req_type_t;
+
+typedef struct
+{
+  avf_process_req_type_t type;
+  u32 dev_instance;
+  u32 calling_process_index;
+  u8 eth_addr[6];
+  int is_add, is_enable;
+  clib_error_t *error;
+} avf_process_req_t;
 
 typedef struct
 {
@@ -223,10 +276,8 @@ typedef struct
 {
   u16 msg_id_base;
 
-  avf_device_t *devices;
+  avf_device_t **devices;
   avf_per_thread_data_t *per_thread_data;
-
-  vlib_log_class_t log_class;
 } avf_main_t;
 
 extern avf_main_t avf_main;
@@ -246,15 +297,21 @@ typedef struct
 } avf_create_if_args_t;
 
 void avf_create_if (vlib_main_t * vm, avf_create_if_args_t * args);
-void avf_delete_if (vlib_main_t * vm, avf_device_t * ad);
 
 extern vlib_node_registration_t avf_input_node;
+extern vlib_node_registration_t avf_process_node;
 extern vnet_device_class_t avf_device_class;
 
 /* format.c */
 format_function_t format_avf_device;
 format_function_t format_avf_device_name;
 format_function_t format_avf_input_trace;
+
+static_always_inline avf_device_t *
+avf_get_device (u32 dev_instance)
+{
+  return pool_elt_at_index (avf_main.devices, dev_instance)[0];
+}
 
 static inline u32
 avf_get_u32 (void *start, int offset)

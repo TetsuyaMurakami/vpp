@@ -39,6 +39,7 @@
 
 #include <nat/lib/lib.h>
 #include <nat/lib/inlines.h>
+#include <nat/lib/ipfix_logging.h>
 
 /* Session state */
 #define foreach_det44_session_state        \
@@ -78,20 +79,6 @@ typedef struct
   u32 cached_sw_if_index;
   u32 cached_ip4_address;
 } det44_runtime_t;
-
-typedef struct nat_timeouts_s
-{
-  u32 udp;
-
-  struct
-  {
-    u32 transitory;
-    u32 established;
-  } tcp;
-
-  u32 icmp;
-
-} nat_timeouts_t;
 
 /* deterministic session outside key */
 typedef struct
@@ -146,10 +133,8 @@ typedef struct
 
 typedef struct
 {
-
   u32 outside_vrf_id;
   u32 inside_vrf_id;
-
 } det44_config_t;
 
 typedef struct
@@ -294,11 +279,11 @@ snat_det_map_by_user (ip4_address_t * user_addr)
   det44_main_t *dm = &det44_main;
   snat_det_map_t *mp;
   /* *INDENT-OFF* */
-  pool_foreach (mp, dm->det_maps,
-  ({
+  pool_foreach (mp, dm->det_maps)
+   {
     if (is_addr_in_net(user_addr, &mp->in_addr, mp->in_plen))
       return mp;
-  }));
+  }
   /* *INDENT-ON* */
   return 0;
 }
@@ -309,11 +294,11 @@ snat_det_map_by_out (ip4_address_t * out_addr)
   det44_main_t *dm = &det44_main;
   snat_det_map_t *mp;
   /* *INDENT-OFF* */
-  pool_foreach (mp, dm->det_maps,
-  ({
+  pool_foreach (mp, dm->det_maps)
+   {
     if (is_addr_in_net(out_addr, &mp->out_addr, mp->out_plen))
       return mp;
-  }));
+  }
   /* *INDENT-ON* */
   return 0;
 }
@@ -419,10 +404,9 @@ snat_det_ses_create (u32 thread_index, snat_det_map_t * dm,
 	}
     }
 
-  // TODO:
-  /*snat_ipfix_logging_max_entries_per_user (thread_index,
-     DET44_SES_PER_USER,
-     in_addr->as_u32); */
+  nat_ipfix_logging_max_entries_per_user (thread_index,
+					  DET44_SES_PER_USER,
+					  in_addr->as_u32);
   return 0;
 }
 

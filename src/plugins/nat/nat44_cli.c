@@ -18,18 +18,107 @@
  */
 
 #include <nat/nat.h>
-#include <nat/nat_ipfix_logging.h>
-#include <nat/nat64.h>
+#include <nat/lib/ipfix_logging.h>
+#include <nat/lib/nat_inlines.h>
 #include <nat/nat_inlines.h>
 #include <nat/nat44/inlines.h>
 #include <nat/nat_affinity.h>
 #include <vnet/fib/fib_table.h>
-#include <nat/nat_ha.h>
+
+#include <nat/nat44-ei/nat44_ei_ha.h>
+#include <nat/nat44-ei/nat44_ei.h>
 
 #define UNSUPPORTED_IN_ED_MODE_STR \
   "This command is unsupported in endpoint dependent mode"
 #define SUPPORTED_ONLY_IN_ED_MODE_STR \
   "This command is supported only in endpoint dependent mode"
+
+static clib_error_t *
+nat44_enable_command_fn (vlib_main_t * vm,
+			 unformat_input_t * input, vlib_cli_command_t * cmd)
+{
+  snat_main_t *sm = &snat_main;
+  unformat_input_t _line_input, *line_input = &_line_input;
+  clib_error_t *error = 0;
+
+  nat44_config_t c = { 0 };
+  u8 mode_set = 0;
+
+  // TODO: check this also inside the function so it can be
+  //       safely called from anyplace, also sanity checking required
+  if (sm->enabled)
+    return clib_error_return (0, "nat44 already enabled");
+
+  /* Get a line of input. */
+  if (!unformat_user (input, unformat_line_input, line_input))
+    {
+      if (nat44_plugin_enable (c) != 0)
+	return clib_error_return (0, "nat44 enable failed");
+      return 0;
+    }
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (!mode_set && unformat (line_input, "static-mapping-only"))
+	{
+	  mode_set = 1;
+	  c.static_mapping_only = 1;
+	  if (unformat (line_input, "connection-tracking"))
+	    {
+	      c.connection_tracking = 1;
+	    }
+	}
+      else if (!mode_set && unformat (line_input, "out2in-dpo"))
+	{
+	  mode_set = 1;
+	  c.out2in_dpo = 1;
+	}
+      else if (!mode_set && unformat (line_input, "endpoint-dependent"))
+	{
+	  mode_set = 1;
+	  c.endpoint_dependent = 1;
+	}
+      else if (unformat (line_input, "inside-vrf %u", &c.inside_vrf));
+      else if (unformat (line_input, "outside-vrf %u", &c.outside_vrf));
+      else if (unformat (line_input, "users %u", &c.users));
+      else if (unformat (line_input, "sessions %u", &c.sessions));
+      else if (unformat (line_input, "user-sessions %u", &c.user_sessions));
+      else
+	{
+	  error = clib_error_return (0, "unknown input '%U'",
+				     format_unformat_error, line_input);
+	  goto done;
+	}
+    }
+
+  if (!c.sessions)
+    {
+      error = clib_error_return (0, "number of sessions is required");
+      goto done;
+    }
+
+  if (nat44_plugin_enable (c) != 0)
+    error = clib_error_return (0, "nat44 enable failed");
+done:
+  unformat_free (line_input);
+  return error;
+}
+
+static clib_error_t *
+nat44_disable_command_fn (vlib_main_t * vm,
+			  unformat_input_t * input, vlib_cli_command_t * cmd)
+{
+  snat_main_t *sm = &snat_main;
+  clib_error_t *error = 0;
+
+  if (!sm->enabled)
+    return clib_error_return (0, "nat44 already disabled");
+
+  if (nat44_plugin_disable () != 0)
+    error = clib_error_return (0, "nat44 disable failed");
+
+  return error;
+}
 
 static clib_error_t *
 set_workers_command_fn (vlib_main_t * vm,
@@ -156,8 +245,8 @@ snat_ipfix_logging_enable_disable_command_fn (vlib_main_t * vm,
   /* Get a line of input. */
   if (!unformat_user (input, unformat_line_input, line_input))
     {
-      rv = snat_ipfix_logging_enable_disable (enable, domain_id,
-					      (u16) src_port);
+      rv = nat_ipfix_logging_enable_disable (enable, domain_id,
+					     (u16) src_port);
       if (rv)
 	return clib_error_return (0, "ipfix logging enable failed");
       return 0;
@@ -179,7 +268,7 @@ snat_ipfix_logging_enable_disable_command_fn (vlib_main_t * vm,
 	}
     }
 
-  rv = snat_ipfix_logging_enable_disable (enable, domain_id, (u16) src_port);
+  rv = nat_ipfix_logging_enable_disable (enable, domain_id, (u16) src_port);
 
   if (rv)
     {
@@ -240,13 +329,9 @@ nat44_show_hash_command_fn (vlib_main_t * vm, unformat_input_t * input,
 
   vlib_cli_output (vm, "-------- hash table parameters --------\n");
   vlib_cli_output (vm, "translation buckets: %u", sm->translation_buckets);
-  vlib_cli_output (vm, "translation memory size: %U",
-		   format_memory_size, sm->translation_memory_size);
   if (!sm->endpoint_dependent)
     {
       vlib_cli_output (vm, "user buckets: %u", sm->user_buckets);
-      vlib_cli_output (vm, "user memory size: %U",
-		       format_memory_size, sm->user_memory_size);
     }
   return 0;
 }
@@ -259,6 +344,10 @@ nat44_set_alloc_addr_and_port_alg_command_fn (vlib_main_t * vm,
   unformat_input_t _line_input, *line_input = &_line_input;
   clib_error_t *error = 0;
   u32 psid, psid_offset, psid_length, port_start, port_end;
+  snat_main_t *sm = &snat_main;
+
+  if (sm->endpoint_dependent)
+    return clib_error_return (0, UNSUPPORTED_IN_ED_MODE_STR);
 
   /* Get a line of input. */
   if (!unformat_user (input, unformat_line_input, line_input))
@@ -267,13 +356,13 @@ nat44_set_alloc_addr_and_port_alg_command_fn (vlib_main_t * vm,
   while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
       if (unformat (line_input, "default"))
-	nat_set_alloc_addr_and_port_default ();
+	nat44_ei_set_alloc_default ();
       else
 	if (unformat
 	    (line_input, "map-e psid %d psid-offset %d psid-len %d", &psid,
 	     &psid_offset, &psid_length))
-	nat_set_alloc_addr_and_port_mape ((u16) psid, (u16) psid_offset,
-					  (u16) psid_length);
+	nat44_ei_set_alloc_mape ((u16) psid, (u16) psid_offset,
+				 (u16) psid_length);
       else
 	if (unformat
 	    (line_input, "port-range %d - %d", &port_start, &port_end))
@@ -285,8 +374,7 @@ nat44_set_alloc_addr_and_port_alg_command_fn (vlib_main_t * vm,
 				   "The end-port must be greater than start-port");
 	      goto done;
 	    }
-	  nat_set_alloc_addr_and_port_range ((u16) port_start,
-					     (u16) port_end);
+	  nat44_ei_set_alloc_range ((u16) port_start, (u16) port_end);
 	}
       else
 	{
@@ -663,7 +751,7 @@ nat44_show_summary_command_fn (vlib_main_t * vm, unformat_input_t * input,
   u32 count = 0;
 
   u64 now = vlib_time_now (vm);
-  u64 sess_timeout_time;
+  u64 sess_timeout_time = 0;
 
   u32 udp_sessions = 0;
   u32 tcp_sessions = 0;
@@ -686,8 +774,8 @@ nat44_show_summary_command_fn (vlib_main_t * vm, unformat_input_t * input,
       /* *INDENT-OFF* */
       vec_foreach (tsm, sm->per_thread_data)
         {
-          pool_foreach (s, tsm->sessions,
-          ({
+          pool_foreach (s, tsm->sessions)
+           {
             sess_timeout_time = s->last_heard +
 	      (f64) nat44_session_get_timeout (sm, s);
             if (now >= sess_timeout_time)
@@ -723,7 +811,7 @@ nat44_show_summary_command_fn (vlib_main_t * vm, unformat_input_t * input,
                 udp_sessions++;
                 break;
               }
-          }));
+          }
           nat44_show_lru_summary (vm, tsm, now, sess_timeout_time);
           count += pool_elts (tsm->sessions);
         }
@@ -733,8 +821,8 @@ nat44_show_summary_command_fn (vlib_main_t * vm, unformat_input_t * input,
     {
       tsm = vec_elt_at_index (sm->per_thread_data, sm->num_workers);
       /* *INDENT-OFF* */
-      pool_foreach (s, tsm->sessions,
-      ({
+      pool_foreach (s, tsm->sessions)
+       {
         sess_timeout_time = s->last_heard +
 	    (f64) nat44_session_get_timeout (sm, s);
         if (now >= sess_timeout_time)
@@ -770,7 +858,7 @@ nat44_show_summary_command_fn (vlib_main_t * vm, unformat_input_t * input,
             udp_sessions++;
             break;
           }
-      }));
+      }
       /* *INDENT-ON* */
       nat44_show_lru_summary (vm, tsm, now, sess_timeout_time);
       count = pool_elts (tsm->sessions);
@@ -950,24 +1038,24 @@ nat44_show_interfaces_command_fn (vlib_main_t * vm, unformat_input_t * input,
 
   vlib_cli_output (vm, "NAT44 interfaces:");
   /* *INDENT-OFF* */
-  pool_foreach (i, sm->interfaces,
-  ({
+  pool_foreach (i, sm->interfaces)
+   {
     vlib_cli_output (vm, " %U %s", format_vnet_sw_if_index_name, vnm,
                      i->sw_if_index,
                      (nat_interface_is_inside(i) &&
                       nat_interface_is_outside(i)) ? "in out" :
                      (nat_interface_is_inside(i) ? "in" : "out"));
-  }));
+  }
 
-  pool_foreach (i, sm->output_feature_interfaces,
-  ({
+  pool_foreach (i, sm->output_feature_interfaces)
+   {
     vlib_cli_output (vm, " %U output-feature %s",
                      format_vnet_sw_if_index_name, vnm,
                      i->sw_if_index,
                      (nat_interface_is_inside(i) &&
                       nat_interface_is_outside(i)) ? "in out" :
                      (nat_interface_is_inside(i) ? "in" : "out"));
-  }));
+  }
   /* *INDENT-ON* */
 
   return 0;
@@ -980,13 +1068,11 @@ add_static_mapping_command_fn (vlib_main_t * vm,
 {
   unformat_input_t _line_input, *line_input = &_line_input;
   clib_error_t *error = 0;
-  ip4_address_t l_addr, e_addr;
+  ip4_address_t l_addr, e_addr, exact_addr;
   u32 l_port = 0, e_port = 0, vrf_id = ~0;
-  int is_add = 1;
-  int addr_only = 1;
+  int is_add = 1, addr_only = 1, rv, exact = 0;
   u32 sw_if_index = ~0;
   vnet_main_t *vnm = vnet_get_main ();
-  int rv;
   nat_protocol_t proto = NAT_PROTOCOL_OTHER;
   u8 proto_set = 0;
   twice_nat_type_t twice_nat = TWICE_NAT_DISABLED;
@@ -1014,10 +1100,12 @@ add_static_mapping_command_fn (vlib_main_t * vm,
 			 unformat_vnet_sw_interface, vnm, &sw_if_index,
 			 &e_port))
 	addr_only = 0;
-
       else if (unformat (line_input, "external %U",
 			 unformat_vnet_sw_interface, vnm, &sw_if_index))
 	;
+      else if (unformat (line_input, "exact %U", unformat_ip4_address,
+			 &exact_addr))
+	exact = 1;
       else if (unformat (line_input, "vrf %u", &vrf_id))
 	;
       else if (unformat (line_input, "%U", unformat_nat_protocol, &proto))
@@ -1063,7 +1151,8 @@ add_static_mapping_command_fn (vlib_main_t * vm,
   rv = snat_add_static_mapping (l_addr, e_addr, clib_host_to_net_u16 (l_port),
 				clib_host_to_net_u16 (e_port),
 				vrf_id, addr_only, sw_if_index, proto, is_add,
-				twice_nat, out2in_only, 0, 0);
+				twice_nat, out2in_only, 0, 0, exact_addr,
+				exact);
 
   switch (rv)
     {
@@ -1104,7 +1193,7 @@ add_identity_mapping_command_fn (vlib_main_t * vm,
 {
   unformat_input_t _line_input, *line_input = &_line_input;
   clib_error_t *error = 0;
-  ip4_address_t addr;
+  ip4_address_t addr, pool_addr = { 0 };
   u32 port = 0, vrf_id = ~0;
   int is_add = 1;
   int addr_only = 1;
@@ -1144,7 +1233,8 @@ add_identity_mapping_command_fn (vlib_main_t * vm,
   rv =
     snat_add_static_mapping (addr, addr, clib_host_to_net_u16 (port),
 			     clib_host_to_net_u16 (port), vrf_id, addr_only,
-			     sw_if_index, proto, is_add, 0, 0, 0, 1);
+			     sw_if_index, proto, is_add, 0, 0, 0, 1,
+			     pool_addr, 0);
 
   switch (rv)
     {
@@ -1384,10 +1474,10 @@ nat44_show_static_mappings_command_fn (vlib_main_t * vm,
 
   vlib_cli_output (vm, "NAT44 static mappings:");
   /* *INDENT-OFF* */
-  pool_foreach (m, sm->static_mappings,
-  ({
+  pool_foreach (m, sm->static_mappings)
+   {
     vlib_cli_output (vm, " %U", format_snat_static_mapping, m);
-  }));
+  }
   vec_foreach (rp, sm->to_resolve)
     vlib_cli_output (vm, " %U", format_snat_static_map_to_resolve, rp);
   /* *INDENT-ON* */
@@ -1522,18 +1612,18 @@ print:
       if (!sm->endpoint_dependent)
         {
           snat_user_t *u;
-          pool_foreach (u, tsm->users,
-          ({
+          pool_foreach (u, tsm->users)
+           {
             vlib_cli_output (vm, "  %U", format_snat_user, tsm, u, detail);
-          }));
+          }
         }
       else
         {
           snat_session_t *s;
-          pool_foreach (s, tsm->sessions,
-          ({
+          pool_foreach (s, tsm->sessions)
+           {
             vlib_cli_output (vm, "  %U\n", format_snat_session, tsm, s);
-          }));
+          }
         }
     }
   /* *INDENT-ON* */
@@ -1611,11 +1701,11 @@ nat44_del_user_command_fn (vlib_main_t * vm,
 	}
     }
 
-  rv = nat44_user_del (&addr, fib_index);
+  rv = nat44_ei_user_del (&addr, fib_index);
 
   if (!rv)
     {
-      error = clib_error_return (0, "nat44_user_del returned %d", rv);
+      error = clib_error_return (0, "nat44_ei_user_del returned %d", rv);
     }
 
 done:
@@ -1772,56 +1862,14 @@ set_timeout_command_fn (vlib_main_t * vm,
 
   while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
-      if (unformat (line_input, "udp %u", &sm->udp_timeout))
-	{
-	  if (nat64_set_udp_timeout (sm->udp_timeout))
-	    {
-	      error = clib_error_return (0, "Invalid UDP timeout value");
-	      goto done;
-	    }
-	}
+      if (unformat (line_input, "udp %u", &sm->timeouts.udp));
       else if (unformat (line_input, "tcp-established %u",
-			 &sm->tcp_established_timeout))
-	{
-	  if (nat64_set_tcp_timeouts
-	      (sm->tcp_transitory_timeout, sm->tcp_established_timeout))
-	    {
-	      error =
-		clib_error_return (0,
-				   "Invalid TCP established timeouts value");
-	      goto done;
-	    }
-	}
+			 &sm->timeouts.tcp.established));
       else if (unformat (line_input, "tcp-transitory %u",
-			 &sm->tcp_transitory_timeout))
-	{
-	  if (nat64_set_tcp_timeouts
-	      (sm->tcp_transitory_timeout, sm->tcp_established_timeout))
-	    {
-	      error =
-		clib_error_return (0,
-				   "Invalid TCP transitory timeouts value");
-	      goto done;
-	    }
-	}
-      else if (unformat (line_input, "icmp %u", &sm->icmp_timeout))
-	{
-	  if (nat64_set_icmp_timeout (sm->icmp_timeout))
-	    {
-	      error = clib_error_return (0, "Invalid ICMP timeout value");
-	      goto done;
-	    }
-	}
+			 &sm->timeouts.tcp.transitory));
+      else if (unformat (line_input, "icmp %u", &sm->timeouts.icmp));
       else if (unformat (line_input, "reset"))
-	{
-	  sm->udp_timeout = SNAT_UDP_TIMEOUT;
-	  sm->tcp_established_timeout = SNAT_TCP_ESTABLISHED_TIMEOUT;
-	  sm->tcp_transitory_timeout = SNAT_TCP_TRANSITORY_TIMEOUT;
-	  sm->icmp_timeout = SNAT_ICMP_TIMEOUT;
-	  nat64_set_udp_timeout (0);
-	  nat64_set_icmp_timeout (0);
-	  nat64_set_tcp_timeouts (0, 0);
-	}
+	nat_reset_timeouts (&sm->timeouts);
       else
 	{
 	  error = clib_error_return (0, "unknown input '%U'",
@@ -1841,12 +1889,12 @@ nat_show_timeouts_command_fn (vlib_main_t * vm,
 {
   snat_main_t *sm = &snat_main;
 
-  vlib_cli_output (vm, "udp timeout: %dsec", sm->udp_timeout);
+  vlib_cli_output (vm, "udp timeout: %dsec", sm->timeouts.udp);
   vlib_cli_output (vm, "tcp-established timeout: %dsec",
-		   sm->tcp_established_timeout);
+		   sm->timeouts.tcp.established);
   vlib_cli_output (vm, "tcp-transitory timeout: %dsec",
-		   sm->tcp_transitory_timeout);
-  vlib_cli_output (vm, "icmp timeout: %dsec", sm->icmp_timeout);
+		   sm->timeouts.tcp.transitory);
+  vlib_cli_output (vm, "icmp timeout: %dsec", sm->timeouts.icmp);
 
   return 0;
 }
@@ -1922,6 +1970,44 @@ VLIB_CLI_COMMAND (nat44_debug_fib_registration_command, static) = {
   .path = "debug nat44 fib registration",
   .short_help = "debug nat44 fib registration",
   .function = nat44_debug_fib_registration_command_fn,
+};
+
+/*?
+ * @cliexpar
+ * @cliexstart{nat44 enable}
+ * Enable nat44 plugin
+ * To enable nat44, use:
+ *  vpp# nat44 enable sessions <n>
+ * To enable nat44 static mapping only, use:
+ *  vpp# nat44 enable sessions <n> static-mapping
+ * To enable nat44 static mapping with connection tracking, use:
+ *  vpp# nat44 enable sessions <n> static-mapping connection-tracking
+ * To enable nat44 out2in dpo, use:
+ *  vpp# nat44 enable sessions <n> out2in-dpo
+ * To enable nat44 endpoint-dependent, use:
+ *  vpp# nat44 enable sessions <n> endpoint-dependent
+ * To set inside-vrf outside-vrf, use:
+ *  vpp# nat44 enable sessions <n> inside-vrf <id> outside-vrf <id>
+ * @cliexend
+?*/
+VLIB_CLI_COMMAND (nat44_enable_command, static) = {
+  .path = "nat44 enable",
+  .short_help = "nat44 enable sessions <max-number> [users <max-number>] [static-mappig-only [connection-tracking]|out2in-dpo|endpoint-dependent] [inside-vrf <vrf-id>] [outside-vrf <vrf-id>] [user-sessions <max-number>]",
+  .function = nat44_enable_command_fn,
+};
+
+/*?
+ * @cliexpar
+ * @cliexstart{nat44 disable}
+ * Disable nat44 plugin
+ * To disable nat44, use:
+ *  vpp# nat44 disable
+ * @cliexend
+?*/
+VLIB_CLI_COMMAND (nat44_disable_command, static) = {
+  .path = "nat44 disable",
+  .short_help = "nat44 disable",
+  .function = nat44_disable_command_fn,
 };
 
 /*?
@@ -2254,6 +2340,8 @@ VLIB_CLI_COMMAND (nat44_show_interfaces_command, static) = {
  * To create ICMP static mapping between local and external with ICMP echo
  * identifier 10 use:
  *  vpp# nat44 add static mapping icmp local 10.0.0.3 10 external 4.4.4.4 10
+ * To force use of specific pool address, vrf independent
+ *  vpp# nat44 add static mapping local 10.0.0.2 1234 external 10.0.2.2 1234 twice-nat exact 10.0.1.2
  * @cliexend
 ?*/
 VLIB_CLI_COMMAND (add_static_mapping_command, static) = {
@@ -2262,7 +2350,7 @@ VLIB_CLI_COMMAND (add_static_mapping_command, static) = {
   .short_help =
     "nat44 add static mapping tcp|udp|icmp local <addr> [<port|icmp-echo-id>] "
     "external <addr> [<port|icmp-echo-id>] [vrf <table-id>] [twice-nat|self-twice-nat] "
-    "[out2in-only] [del]",
+    "[out2in-only] [exact <pool-addr>] [del]",
 };
 
 /*?

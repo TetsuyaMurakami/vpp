@@ -41,12 +41,12 @@
  */
 #include <vlib/vlib.h>
 #include <vnet/vnet.h>
-#include <vnet/pg/pg.h>
 #include <vppinfra/error.h>
 #include <vnet/ip/ip.h>
 #include <ioam/ip6/ioam_cache.h>
 #include <vnet/ip/ip6_hop_by_hop.h>
 #include <vnet/ip/ip6_hop_by_hop_packet.h>
+#include <vnet/ip/ip6_inlines.h>
 
 typedef struct
 {

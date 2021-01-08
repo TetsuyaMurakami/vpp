@@ -98,8 +98,8 @@ cp_ts (vl_api_ikev2_ts_t * vl_api_ts, ikev2_ts_t * ts, u8 is_local)
   vl_api_ts->protocol_id = ts->protocol_id;
   vl_api_ts->start_port = ts->start_port;
   vl_api_ts->end_port = ts->end_port;
-  ip4_address_encode (&ts->start_addr, vl_api_ts->start_addr);
-  ip4_address_encode (&ts->end_addr, vl_api_ts->end_addr);
+  ip_address_encode2 (&ts->start_addr, &vl_api_ts->start_addr);
+  ip_address_encode2 (&ts->end_addr, &vl_api_ts->end_addr);
 }
 
 static void
@@ -116,7 +116,7 @@ cp_responder (vl_api_ikev2_responder_t * vl_api_responder,
 	      ikev2_responder_t * responder)
 {
   vl_api_responder->sw_if_index = responder->sw_if_index;
-  ip4_address_encode (&responder->ip4, vl_api_responder->ip4);
+  ip_address_encode2 (&responder->addr, &vl_api_responder->addr);
 }
 
 void
@@ -163,7 +163,7 @@ send_profile (ikev2_profile_t * profile, vl_api_registration_t * reg,
 
   rmp->profile.udp_encap = profile->udp_encap;
   rmp->profile.tun_itf = profile->tun_itf;
-
+  rmp->profile.natt_disabled = profile->natt_disabled;
   rmp->profile.ipsec_over_udp_port = profile->ipsec_over_udp_port;
 
   rmp->profile.lifetime = profile->lifetime;
@@ -187,10 +187,10 @@ vl_api_ikev2_profile_dump_t_handler (vl_api_ikev2_profile_dump_t * mp)
     return;
 
   /* *INDENT-OFF* */
-  pool_foreach (profile, im->profiles,
-  ({
+  pool_foreach (profile, im->profiles)
+   {
     send_profile (profile, reg, mp->context);
-  }));
+  }
   /* *INDENT-ON* */
 }
 
@@ -208,8 +208,8 @@ send_sa (ikev2_sa_t * sa, vl_api_ikev2_sa_dump_t * mp, u32 api_sa_index)
     vl_api_ikev2_keys_t* k = &rsa->keys;
     rsa->profile_index = rsa->profile_index;
     rsa->sa_index = api_sa_index;
-    ip4_address_encode (&sa->iaddr, rsa->iaddr);
-    ip4_address_encode (&sa->raddr, rsa->raddr);
+    ip_address_encode2 (&sa->iaddr, &rsa->iaddr);
+    ip_address_encode2 (&sa->raddr, &rsa->raddr);
     rsa->ispi = sa->ispi;
     rsa->rspi = sa->rspi;
     cp_id(&rsa->i_id, &sa->i_id);
@@ -268,12 +268,12 @@ vl_api_ikev2_sa_dump_t_handler (vl_api_ikev2_sa_dump_t * mp)
   vec_foreach (tkm, km->per_thread_data)
   {
     /* *INDENT-OFF* */
-    pool_foreach (sa, tkm->sas,
-    ({
+    pool_foreach (sa, tkm->sas)
+     {
       u32 api_sa_index = ikev2_encode_sa_index (sa - tkm->sas,
                                               tkm - km->per_thread_data);
       send_sa (sa, mp, api_sa_index);
-    }));
+    }
     /* *INDENT-ON* */
   }
 }
@@ -481,7 +481,11 @@ static void
   error = ikev2_set_liveness_params (clib_net_to_host_u32 (mp->period),
 				     clib_net_to_host_u32 (mp->max_retries));
   if (error)
-    rv = VNET_API_ERROR_UNSPECIFIED;
+    {
+      ikev2_log_error ("%U", format_clib_error, error);
+      clib_error_free (error);
+      rv = VNET_API_ERROR_UNSPECIFIED;
+    }
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
 #endif
@@ -502,7 +506,11 @@ vl_api_ikev2_profile_add_del_t_handler (vl_api_ikev2_profile_add_del_t * mp)
   error = ikev2_add_del_profile (vm, tmp, mp->is_add);
   vec_free (tmp);
   if (error)
-    rv = VNET_API_ERROR_UNSPECIFIED;
+    {
+      ikev2_log_error ("%U", format_clib_error, error);
+      clib_error_free (error);
+      rv = VNET_API_ERROR_UNSPECIFIED;
+    }
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
 #endif
@@ -528,7 +536,11 @@ static void
   vec_free (tmp);
   vec_free (data);
   if (error)
-    rv = VNET_API_ERROR_UNSPECIFIED;
+    {
+      ikev2_log_error ("%U", format_clib_error, error);
+      clib_error_free (error);
+      rv = VNET_API_ERROR_UNSPECIFIED;
+    }
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
 #endif
@@ -553,7 +565,11 @@ vl_api_ikev2_profile_set_id_t_handler (vl_api_ikev2_profile_set_id_t * mp)
   vec_free (tmp);
   vec_free (data);
   if (error)
-    rv = VNET_API_ERROR_UNSPECIFIED;
+    {
+      ikev2_log_error ("%U", format_clib_error, error);
+      clib_error_free (error);
+      rv = VNET_API_ERROR_UNSPECIFIED;
+    }
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
 #endif
@@ -575,7 +591,11 @@ static void
   error = ikev2_set_profile_udp_encap (vm, tmp);
   vec_free (tmp);
   if (error)
-    rv = VNET_API_ERROR_UNSPECIFIED;
+    {
+      ikev2_log_error ("%U", format_clib_error, error);
+      clib_error_free (error);
+      rv = VNET_API_ERROR_UNSPECIFIED;
+    }
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
 #endif
@@ -593,9 +613,9 @@ vl_api_ikev2_profile_set_ts_t_handler (vl_api_ikev2_profile_set_ts_t * mp)
   vlib_main_t *vm = vlib_get_main ();
   clib_error_t *error;
   u8 *tmp = format (0, "%s", mp->name);
-  ip4_address_t start_addr, end_addr;
-  ip4_address_decode (mp->ts.start_addr, &start_addr);
-  ip4_address_decode (mp->ts.end_addr, &end_addr);
+  ip_address_t start_addr, end_addr;
+  ip_address_decode2 (&mp->ts.start_addr, &start_addr);
+  ip_address_decode2 (&mp->ts.end_addr, &end_addr);
   error =
     ikev2_set_profile_ts (vm, tmp, mp->ts.protocol_id,
 			  clib_net_to_host_u16 (mp->ts.start_port),
@@ -603,7 +623,11 @@ vl_api_ikev2_profile_set_ts_t_handler (vl_api_ikev2_profile_set_ts_t * mp)
 			  start_addr, end_addr, mp->ts.is_local);
   vec_free (tmp);
   if (error)
-    rv = VNET_API_ERROR_UNSPECIFIED;
+    {
+      ikev2_log_error ("%U", format_clib_error, error);
+      clib_error_free (error);
+      rv = VNET_API_ERROR_UNSPECIFIED;
+    }
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
 #endif
@@ -623,7 +647,11 @@ vl_api_ikev2_set_local_key_t_handler (vl_api_ikev2_set_local_key_t * mp)
 
   error = ikev2_set_local_key (vm, mp->key_file);
   if (error)
-    rv = VNET_API_ERROR_UNSPECIFIED;
+    {
+      ikev2_log_error ("%U", format_clib_error, error);
+      clib_error_free (error);
+      rv = VNET_API_ERROR_UNSPECIFIED;
+    }
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
 #endif
@@ -642,14 +670,18 @@ vl_api_ikev2_set_responder_t_handler (vl_api_ikev2_set_responder_t * mp)
   clib_error_t *error;
 
   u8 *tmp = format (0, "%s", mp->name);
-  ip4_address_t ip4;
-  ip4_address_decode (mp->responder.ip4, &ip4);
+  ip_address_t ip;
+  ip_address_decode2 (&mp->responder.addr, &ip);
   u32 sw_if_index = clib_net_to_host_u32 (mp->responder.sw_if_index);
 
-  error = ikev2_set_profile_responder (vm, tmp, sw_if_index, ip4);
+  error = ikev2_set_profile_responder (vm, tmp, sw_if_index, ip);
   vec_free (tmp);
   if (error)
-    rv = VNET_API_ERROR_UNSPECIFIED;
+    {
+      ikev2_log_error ("%U", format_clib_error, error);
+      clib_error_free (error);
+      rv = VNET_API_ERROR_UNSPECIFIED;
+    }
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
 #endif
@@ -677,7 +709,11 @@ vl_api_ikev2_set_ike_transforms_t_handler (vl_api_ikev2_set_ike_transforms_t *
 				      ntohl (mp->tr.crypto_key_size));
   vec_free (tmp);
   if (error)
-    rv = VNET_API_ERROR_UNSPECIFIED;
+    {
+      ikev2_log_error ("%U", format_clib_error, error);
+      clib_error_free (error);
+      rv = VNET_API_ERROR_UNSPECIFIED;
+    }
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
 #endif
@@ -704,7 +740,11 @@ vl_api_ikev2_set_esp_transforms_t_handler (vl_api_ikev2_set_esp_transforms_t *
 				      ntohl (mp->tr.crypto_key_size));
   vec_free (tmp);
   if (error)
-    rv = VNET_API_ERROR_UNSPECIFIED;
+    {
+      ikev2_log_error ("%U", format_clib_error, error);
+      clib_error_free (error);
+      rv = VNET_API_ERROR_UNSPECIFIED;
+    }
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
 #endif
@@ -733,7 +773,11 @@ vl_api_ikev2_set_sa_lifetime_t_handler (vl_api_ikev2_set_sa_lifetime_t * mp)
 				   (mp->lifetime_maxdata));
   vec_free (tmp);
   if (error)
-    rv = VNET_API_ERROR_UNSPECIFIED;
+    {
+      ikev2_log_error ("%U", format_clib_error, error);
+      clib_error_free (error);
+      rv = VNET_API_ERROR_UNSPECIFIED;
+    }
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
 #endif
@@ -782,7 +826,11 @@ static void
 					      ntohl (mp->sw_if_index));
 
   if (error)
-    rv = VNET_API_ERROR_UNSPECIFIED;
+    {
+      ikev2_log_error ("%U", format_clib_error, error);
+      clib_error_free (error);
+      rv = VNET_API_ERROR_UNSPECIFIED;
+    }
   vec_free (tmp);
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
@@ -807,7 +855,11 @@ vl_api_ikev2_initiate_sa_init_t_handler (vl_api_ikev2_initiate_sa_init_t * mp)
   error = ikev2_initiate_sa_init (vm, tmp);
   vec_free (tmp);
   if (error)
-    rv = VNET_API_ERROR_UNSPECIFIED;
+    {
+      ikev2_log_error ("%U", format_clib_error, error);
+      clib_error_free (error);
+      rv = VNET_API_ERROR_UNSPECIFIED;
+    }
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
 #endif
@@ -828,7 +880,11 @@ vl_api_ikev2_initiate_del_ike_sa_t_handler (vl_api_ikev2_initiate_del_ike_sa_t
 
   error = ikev2_initiate_delete_ike_sa (vm, mp->ispi);
   if (error)
-    rv = VNET_API_ERROR_UNSPECIFIED;
+    {
+      ikev2_log_error ("%U", format_clib_error, error);
+      clib_error_free (error);
+      rv = VNET_API_ERROR_UNSPECIFIED;
+    }
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
 #endif
@@ -849,12 +905,42 @@ static void
 
   error = ikev2_initiate_delete_child_sa (vm, mp->ispi);
   if (error)
-    rv = VNET_API_ERROR_UNSPECIFIED;
+    {
+      ikev2_log_error ("%U", format_clib_error, error);
+      clib_error_free (error);
+      rv = VNET_API_ERROR_UNSPECIFIED;
+    }
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
 #endif
 
   REPLY_MACRO (VL_API_IKEV2_INITIATE_DEL_CHILD_SA_REPLY);
+}
+
+static void
+  vl_api_ikev2_profile_disable_natt_t_handler
+  (vl_api_ikev2_profile_disable_natt_t * mp)
+{
+  vl_api_ikev2_profile_disable_natt_reply_t *rmp;
+  int rv = 0;
+
+#if WITH_LIBSSL > 0
+  clib_error_t *error;
+
+  u8 *tmp = format (0, "%s", mp->name);
+  error = ikev2_profile_natt_disable (tmp);
+  vec_free (tmp);
+  if (error)
+    {
+      ikev2_log_error ("%U", format_clib_error, error);
+      clib_error_free (error);
+      rv = VNET_API_ERROR_UNSPECIFIED;
+    }
+#else
+  rv = VNET_API_ERROR_UNIMPLEMENTED;
+#endif
+
+  REPLY_MACRO (VL_API_IKEV2_PROFILE_DISABLE_NATT_REPLY);
 }
 
 static void
@@ -870,7 +956,11 @@ static void
 
   error = ikev2_initiate_rekey_child_sa (vm, mp->ispi);
   if (error)
-    rv = VNET_API_ERROR_UNSPECIFIED;
+    {
+      ikev2_log_error ("%U", format_clib_error, error);
+      clib_error_free (error);
+      rv = VNET_API_ERROR_UNSPECIFIED;
+    }
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
 #endif

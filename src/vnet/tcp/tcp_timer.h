@@ -23,8 +23,8 @@ tcp_timer_set (tcp_timer_wheel_t * tw, tcp_connection_t * tc, u8 timer_id,
 {
   ASSERT (tc->c_thread_index == vlib_get_thread_index ());
   ASSERT (tc->timers[timer_id] == TCP_TIMER_HANDLE_INVALID);
-  tc->timers[timer_id] = tw_timer_start_16t_2w_512sl (tw, tc->c_c_index,
-						      timer_id, interval);
+  tc->timers[timer_id] = tw_timer_start_tcp_twsl (tw, tc->c_c_index,
+						  timer_id, interval);
 }
 
 always_inline void
@@ -35,7 +35,7 @@ tcp_timer_reset (tcp_timer_wheel_t * tw, tcp_connection_t * tc, u8 timer_id)
   if (tc->timers[timer_id] == TCP_TIMER_HANDLE_INVALID)
     return;
 
-  tw_timer_stop_16t_2w_512sl (tw, tc->timers[timer_id]);
+  tw_timer_stop_tcp_twsl (tw, tc->timers[timer_id]);
   tc->timers[timer_id] = TCP_TIMER_HANDLE_INVALID;
 }
 
@@ -45,16 +45,16 @@ tcp_timer_update (tcp_timer_wheel_t * tw, tcp_connection_t * tc, u8 timer_id,
 {
   ASSERT (tc->c_thread_index == vlib_get_thread_index ());
   if (tc->timers[timer_id] != TCP_TIMER_HANDLE_INVALID)
-    tw_timer_update_16t_2w_512sl (tw, tc->timers[timer_id], interval);
+    tw_timer_update_tcp_twsl (tw, tc->timers[timer_id], interval);
   else
-    tc->timers[timer_id] = tw_timer_start_16t_2w_512sl (tw, tc->c_c_index,
-							timer_id, interval);
+    tc->timers[timer_id] = tw_timer_start_tcp_twsl (tw, tc->c_c_index,
+						    timer_id, interval);
 }
 
 always_inline void
 tcp_retransmit_timer_set (tcp_timer_wheel_t * tw, tcp_connection_t * tc)
 {
-  ASSERT (tc->snd_una != tc->snd_una_max);
+  ASSERT (tc->snd_una != tc->snd_nxt);
   tcp_timer_set (tw, tc, TCP_TIMER_RETRANSMIT,
 		 clib_max (tc->rto * TCP_TO_TIMER_TICK, 1));
 }
@@ -63,14 +63,6 @@ always_inline void
 tcp_retransmit_timer_reset (tcp_timer_wheel_t * tw, tcp_connection_t * tc)
 {
   tcp_timer_reset (tw, tc, TCP_TIMER_RETRANSMIT);
-}
-
-always_inline void
-tcp_retransmit_timer_force_update (tcp_timer_wheel_t * tw,
-				   tcp_connection_t * tc)
-{
-  tcp_timer_update (tw, tc, TCP_TIMER_RETRANSMIT,
-		    clib_max (tc->rto * TCP_TO_TIMER_TICK, 1));
 }
 
 always_inline void
@@ -117,8 +109,18 @@ tcp_retransmit_timer_update (tcp_timer_wheel_t * tw, tcp_connection_t * tc)
 always_inline u8
 tcp_timer_is_active (tcp_connection_t * tc, tcp_timers_e timer)
 {
-  return tc->timers[timer] != TCP_TIMER_HANDLE_INVALID;
+  return tc->timers[timer] != TCP_TIMER_HANDLE_INVALID
+    || (tc->pending_timers & (1 << timer));
 }
+
+always_inline void
+tcp_timer_expire_timers (tcp_timer_wheel_t * tw, f64 now)
+{
+  tw_timer_expire_timers_tcp_twsl (tw, now);
+}
+
+void tcp_timer_initialize_wheel (tcp_timer_wheel_t * tw,
+				 void (*expired_timer_cb) (u32 *), f64 now);
 
 #endif /* __included_tcp_timer_h__ */
 

@@ -92,7 +92,7 @@
 
 /** Maximum depth into a byte stream from which to compile a Telnet
  * protocol message. This is a safety measure. */
-#define UNIX_CLI_MAX_DEPTH_TELNET 24
+#define UNIX_CLI_MAX_DEPTH_TELNET 32
 
 /** Maximum terminal width we will accept */
 #define UNIX_CLI_MAX_TERMINAL_WIDTH 512
@@ -1263,9 +1263,9 @@ unix_cli_file_welcome (unix_cli_main_t * cm, unix_cli_file_t * cf)
    */
   unix_cli_add_pending_output (uf, cf, (u8 *) "\r", 1);
 
-  if (!um->cli_no_banner)
+  if (!um->cli_no_banner && (um->flags & UNIX_FLAG_NOBANNER) == 0)
     {
-      if (cf->ansi_capable)
+      if (cf->ansi_capable && (um->flags & UNIX_FLAG_NOCOLOR) == 0)
 	{
 	  banner = unix_cli_banner_color;
 	  len = ARRAY_LEN (unix_cli_banner_color);
@@ -2520,6 +2520,7 @@ unix_cli_line_edit (unix_cli_main_t * cm, unix_main_t * um,
 	  if (cf->line_mode)
 	    {
 	      vec_delete (cf->input_vector, i, 0);
+	      vec_free (cf->current_command);
 	      cf->current_command = cf->input_vector;
 	      return 0;
 	    }
@@ -2707,6 +2708,7 @@ unix_cli_kill (unix_cli_main_t * cm, uword cli_file_index)
     vec_free (cf->command_history[i]);
 
   vec_free (cf->command_history);
+  vec_free (cf->input_vector);
 
   clib_file_del (fm, uf);
 
@@ -3358,10 +3360,14 @@ unix_cli_exec (vlib_main_t * vm,
   int fd;
   unformat_input_t sub_input;
   clib_error_t *error;
-
+  unix_cli_main_t *cm = &unix_cli_main;
+  unix_cli_file_t *cf;
+  u8 *file_data = 0;
   file_name = 0;
   fd = -1;
   error = 0;
+  struct stat s;
+
 
   if (!unformat (input, "%s", &file_name))
     {
@@ -3378,23 +3384,63 @@ unix_cli_exec (vlib_main_t * vm,
     }
 
   /* Make sure its a regular file. */
-  {
-    struct stat s;
+  if (fstat (fd, &s) < 0)
+    {
+      error = clib_error_return_unix (0, "failed to stat `%s'", file_name);
+      goto done;
+    }
 
-    if (fstat (fd, &s) < 0)
-      {
-	error = clib_error_return_unix (0, "failed to stat `%s'", file_name);
-	goto done;
-      }
+  if (!(S_ISREG (s.st_mode) || S_ISLNK (s.st_mode)))
+    {
+      error = clib_error_return (0, "not a regular file `%s'", file_name);
+      goto done;
+    }
 
-    if (!(S_ISREG (s.st_mode) || S_ISLNK (s.st_mode)))
-      {
-	error = clib_error_return (0, "not a regular file `%s'", file_name);
-	goto done;
-      }
-  }
+  /* Read the file */
+  vec_validate (file_data, s.st_size);
 
-  unformat_init_clib_file (&sub_input, fd);
+  if (read (fd, file_data, s.st_size) != s.st_size)
+    {
+      error = clib_error_return_unix (0, "Failed to read %d bytes from '%s'",
+				      s.st_size, file_name);
+      vec_free (file_data);
+      goto done;
+    }
+
+  /* The macro expander expects a c string... */
+  vec_add1 (file_data, 0);
+
+  unformat_init_vector (&sub_input, file_data);
+
+  /* Run the file contents through the macro processor */
+  if (vec_len (sub_input.buffer) > 1)
+    {
+      u8 *expanded;
+      clib_macro_main_t *mm = 0;
+
+      /* Initial config process? Use the global macro table. */
+      if (pool_is_free_index
+	  (cm->cli_file_pool, cm->current_input_file_index))
+	mm = &cm->macro_main;
+      else
+	{
+	  /* Otherwise, use the per-cli-process macro table */
+	  cf = pool_elt_at_index (cm->cli_file_pool,
+				  cm->current_input_file_index);
+	  mm = &cf->macro_main;
+	}
+
+      expanded = (u8 *) clib_macro_eval (mm,
+					 (i8 *) sub_input.buffer,
+					 1 /* complain */ ,
+					 0 /* level */ ,
+					 8 /* max_level */ );
+      /* Macro processor NULL terminates the return */
+      _vec_len (expanded) -= 1;
+      vec_reset_length (sub_input.buffer);
+      vec_append (sub_input.buffer, expanded);
+      vec_free (expanded);
+    }
 
   vlib_cli_input (vm, &sub_input, 0, 0);
   unformat_free (&sub_input);
@@ -3529,7 +3575,7 @@ unix_show_files (vlib_main_t * vm,
 		   "Read", "Write", "Error", "File Name", "Description");
 
   /* *INDENT-OFF* */
-  pool_foreach (f, fm->file_pool,(
+  pool_foreach (f, fm->file_pool)
    {
       int rv;
       s = format (s, "/proc/self/fd/%d%c", f->file_descriptor, 0);
@@ -3542,7 +3588,7 @@ unix_show_files (vlib_main_t * vm,
 		       f->read_events, f->write_events, f->error_events,
 		       path, f->description);
       vec_reset_length (s);
-    }));
+    }
   /* *INDENT-ON* */
   vec_free (s);
 
@@ -3682,7 +3728,7 @@ unix_cli_show_cli_sessions (vlib_main_t * vm,
 
 #define fl(x, y) ( (x) ? toupper((y)) : tolower((y)) )
   /* *INDENT-OFF* */
-  pool_foreach (cf, cm->cli_file_pool, ({
+  pool_foreach (cf, cm->cli_file_pool)  {
     uf = pool_elt_at_index (fm->file_pool, cf->clib_file_index);
     n = vlib_get_node (vm, cf->process_node_index);
     vlib_cli_output (vm,
@@ -3695,7 +3741,7 @@ unix_cli_show_cli_sessions (vlib_main_t * vm,
 		     fl (cf->line_mode, 'l'),
 		     fl (cf->has_epipe, 'p'),
 		     fl (cf->ansi_capable, 'a'));
-  }));
+  }
   /* *INDENT-ON* */
 #undef fl
 

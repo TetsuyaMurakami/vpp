@@ -22,8 +22,8 @@
 #include <vlib/buffer.h>
 #include <vnet/ip/format.h>
 #include <vnet/ethernet/packet.h>
+#include <vnet/udp/udp_local.h>
 #include <vnet/udp/udp_packet.h>
-#include <vnet/udp/udp.h>
 #include <vnet/ip/lookup.h>
 #include <vnet/ip/icmp46_packet.h>
 #include <vnet/ip/ip4.h>
@@ -1581,17 +1581,19 @@ bfd_udp_sw_if_add_del (vnet_main_t * vnm, u32 sw_if_index, u32 is_create)
   if (!is_create)
     {
       bfd_session_t *bs;
-      pool_foreach (bs, bfd_udp_main.bfd_main->sessions,
-		    {
-		    if (bs->transport != BFD_TRANSPORT_UDP4 &&
-			bs->transport != BFD_TRANSPORT_UDP6)
-		    {
-		    continue;}
-		    if (bs->udp.key.sw_if_index != sw_if_index)
-		    {
-		    continue;}
-		    vec_add1 (to_be_freed, bs);}
-      );
+      pool_foreach (bs, bfd_udp_main.bfd_main->sessions)
+      {
+	if (bs->transport != BFD_TRANSPORT_UDP4 &&
+	    bs->transport != BFD_TRANSPORT_UDP6)
+	  {
+	    continue;
+	  }
+	if (bs->udp.key.sw_if_index != sw_if_index)
+	  {
+	    continue;
+	  }
+	vec_add1 (to_be_freed, bs);
+      }
     }
   bfd_session_t **bs;
   vec_foreach (bs, to_be_freed)

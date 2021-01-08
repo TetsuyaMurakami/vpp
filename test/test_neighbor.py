@@ -7,8 +7,9 @@ from socket import AF_INET, AF_INET6, inet_pton
 from framework import VppTestCase, VppTestRunner
 from vpp_neighbor import VppNeighbor, find_nbr
 from vpp_ip_route import VppIpRoute, VppRoutePath, find_route, \
-    VppIpTable, DpoProto, FibPathType
+    VppIpTable, DpoProto, FibPathType, VppIpInterfaceAddress
 from vpp_papi import VppEnum
+from vpp_ip import VppIpPuntRedirect
 
 import scapy.compat
 from scapy.packet import Raw
@@ -81,6 +82,7 @@ class ARPTestCase(VppTestCase):
         ether = rx[Ether]
         self.assertEqual(ether.dst, "ff:ff:ff:ff:ff:ff")
         self.assertEqual(ether.src, smac)
+        self.assertEqual(ether.type, 0x0806)
 
         arp = rx[ARP]
         self.assertEqual(arp.hwtype, 1)
@@ -97,6 +99,7 @@ class ARPTestCase(VppTestCase):
         ether = rx[Ether]
         self.assertEqual(ether.dst, dmac)
         self.assertEqual(ether.src, smac)
+        self.assertEqual(ether.type, 0x0806)
 
         arp = rx[ARP]
         self.assertEqual(arp.hwtype, 1)
@@ -131,6 +134,7 @@ class ARPTestCase(VppTestCase):
         ether = rx[Ether]
         self.assertEqual(ether.dst, dmac)
         self.assertEqual(ether.src, smac)
+        self.assertEqual(ether.type, 0x0800)
 
         ip = rx[IP]
         self.assertEqual(ip.src, sip)
@@ -140,6 +144,7 @@ class ARPTestCase(VppTestCase):
         ether = rx[Ether]
         self.assertEqual(ether.dst, dmac)
         self.assertEqual(ether.src, smac)
+        self.assertEqual(ether.type, 0x8847)
 
         mpls = rx[MPLS]
         self.assertTrue(mpls.label, label)
@@ -203,6 +208,8 @@ class ARPTestCase(VppTestCase):
                               self.pg1.remote_hosts[1].ip4)
         dyn_arp.add_vpp_config()
         self.assertTrue(dyn_arp.query_vpp_config())
+
+        self.logger.info(self.vapi.cli("show ip neighbor-watcher"))
 
         # this matches all of the listnerers
         es = [self.vapi.wait_for_event(1, "ip_neighbor_event")
@@ -761,8 +768,10 @@ class ARPTestCase(VppTestCase):
         #
         # Configure Proxy ARP for the subnet on PG0addresses on pg0
         #
-        self.vapi.proxy_arp_add_del(self.pg0._local_ip4_subnet,
-                                    self.pg0._local_ip4_bcast)
+        self.vapi.proxy_arp_add_del(proxy={'table_id': 0,
+                                           'low': self.pg0._local_ip4_subnet,
+                                           'hi': self.pg0._local_ip4_bcast},
+                                    is_add=1)
 
         # Make pg2 un-numbered to pg0
         #
@@ -794,9 +803,9 @@ class ARPTestCase(VppTestCase):
         #
         # setup a punt redirect so packets from the uplink go to the tap
         #
-        self.vapi.ip_punt_redirect(self.pg0.sw_if_index,
-                                   self.pg2.sw_if_index,
-                                   self.pg0.local_ip4)
+        redirect = VppIpPuntRedirect(self, self.pg0.sw_if_index,
+                                     self.pg2.sw_if_index, self.pg0.local_ip4)
+        redirect.add_vpp_config()
 
         p_tcp = (Ether(src=self.pg0.remote_mac,
                        dst=self.pg0.local_mac,) /
@@ -836,10 +845,11 @@ class ARPTestCase(VppTestCase):
         #
         # cleanup
         #
-        self.pg2.set_proxy_arp(0)
-        self.vapi.proxy_arp_add_del(self.pg0._local_ip4_subnet,
-                                    self.pg0._local_ip4_bcast,
+        self.vapi.proxy_arp_add_del(proxy={'table_id': 0,
+                                           'low': self.pg0._local_ip4_subnet,
+                                           'hi': self.pg0._local_ip4_bcast},
                                     is_add=0)
+        redirect.remove_vpp_config()
 
     def test_proxy_arp(self):
         """ Proxy ARP """
@@ -884,8 +894,10 @@ class ARPTestCase(VppTestCase):
         #
         # Configure Proxy ARP for 10.10.10.0 -> 10.10.10.124
         #
-        self.vapi.proxy_arp_add_del(inet_pton(AF_INET, "10.10.10.2"),
-                                    inet_pton(AF_INET, "10.10.10.124"))
+        self.vapi.proxy_arp_add_del(proxy={'table_id': 0,
+                                           'low': "10.10.10.2",
+                                           'hi': "10.10.10.124"},
+                                    is_add=1)
 
         #
         # No responses are sent when the interfaces are not enabled for proxy
@@ -1394,13 +1406,8 @@ class ARPTestCase(VppTestCase):
         #
         # change the interface's MAC
         #
-        mac = [scapy.compat.chb(0x00), scapy.compat.chb(0x00),
-               scapy.compat.chb(0x00), scapy.compat.chb(0x33),
-               scapy.compat.chb(0x33), scapy.compat.chb(0x33)]
-        mac_string = ''.join(mac)
-
         self.vapi.sw_interface_set_mac_address(self.pg1.sw_if_index,
-                                               mac_string)
+                                               "00:00:00:33:33:33")
 
         #
         # now ARP requests come from the new source mac
@@ -1426,7 +1433,7 @@ class ARPTestCase(VppTestCase):
         # configured subnet and thus no glean
         #
         self.vapi.sw_interface_set_mac_address(self.pg2.sw_if_index,
-                                               mac_string)
+                                               "00:00:00:33:33:33")
 
     def test_garp(self):
         """ GARP """
@@ -1435,6 +1442,7 @@ class ARPTestCase(VppTestCase):
         # Generate some hosts on the LAN
         #
         self.pg1.generate_remote_hosts(4)
+        self.pg2.generate_remote_hosts(4)
 
         #
         # And an ARP entry
@@ -1526,7 +1534,37 @@ class ARPTestCase(VppTestCase):
                                   self.pg1.sw_if_index,
                                   self.pg1.remote_hosts[2].ip4))
 
-    def test_arp_incomplete(self):
+        #
+        # IP address in different subnets are not learnt
+        #
+        self.pg2.configure_ipv4_neighbors()
+
+        for op in ["is-at", "who-has"]:
+            p1 = [(Ether(dst="ff:ff:ff:ff:ff:ff",
+                         src=self.pg2.remote_hosts[1].mac) /
+                   ARP(op=op,
+                       hwdst=self.pg2.local_mac,
+                       hwsrc=self.pg2.remote_hosts[1].mac,
+                       pdst=self.pg2.remote_hosts[1].ip4,
+                       psrc=self.pg2.remote_hosts[1].ip4)),
+                  (Ether(dst="ff:ff:ff:ff:ff:ff",
+                         src=self.pg2.remote_hosts[1].mac) /
+                   ARP(op=op,
+                       hwdst="ff:ff:ff:ff:ff:ff",
+                       hwsrc=self.pg2.remote_hosts[1].mac,
+                       pdst=self.pg2.remote_hosts[1].ip4,
+                       psrc=self.pg2.remote_hosts[1].ip4))]
+
+            self.send_and_assert_no_replies(self.pg1, p1)
+            self.assertFalse(find_nbr(self,
+                                      self.pg1.sw_if_index,
+                                      self.pg2.remote_hosts[1].ip4))
+
+        # they are all dropped because the subnet's don't match
+        self.assertEqual(4, self.statistics.get_err_counter(
+            "/err/arp-reply/IP4 destination address not local to subnet"))
+
+    def test_arp_incomplete2(self):
         """ Incomplete Entries """
 
         #
@@ -1686,6 +1724,95 @@ class ARPTestCase(VppTestCase):
 
         self.pg1.unconfig_ip4()
         self.pg1.set_table_ip4(0)
+
+    def test_glean_src_select(self):
+        """ Multi Connecteds """
+
+        #
+        # configure multiple connected subnets on an interface
+        # and ensure that ARP requests for hosts on those subnets
+        # pick up the correct source address
+        #
+        conn1 = VppIpInterfaceAddress(self, self.pg1,
+                                      "10.0.0.1", 24).add_vpp_config()
+        conn2 = VppIpInterfaceAddress(self, self.pg1,
+                                      "10.0.1.1", 24).add_vpp_config()
+
+        p1 = (Ether(src=self.pg0.remote_mac,
+                    dst=self.pg0.local_mac) /
+              IP(src=self.pg1.remote_ip4,
+                 dst="10.0.0.128") /
+              Raw(b'0x5' * 100))
+
+        rxs = self.send_and_expect(self.pg0, [p1], self.pg1)
+        for rx in rxs:
+            self.verify_arp_req(rx,
+                                self.pg1.local_mac,
+                                "10.0.0.1",
+                                "10.0.0.128")
+
+        p2 = (Ether(src=self.pg0.remote_mac,
+                    dst=self.pg0.local_mac) /
+              IP(src=self.pg1.remote_ip4,
+                 dst="10.0.1.128") /
+              Raw(b'0x5' * 100))
+
+        rxs = self.send_and_expect(self.pg0, [p2], self.pg1)
+        for rx in rxs:
+            self.verify_arp_req(rx,
+                                self.pg1.local_mac,
+                                "10.0.1.1",
+                                "10.0.1.128")
+
+        #
+        # add a local address in the same subnet
+        #  the source addresses are equivalent. VPP happens to
+        #  choose the last one that was added
+        conn3 = VppIpInterfaceAddress(self, self.pg1,
+                                      "10.0.1.2", 24).add_vpp_config()
+
+        rxs = self.send_and_expect(self.pg0, [p2], self.pg1)
+        for rx in rxs:
+            self.verify_arp_req(rx,
+                                self.pg1.local_mac,
+                                "10.0.1.2",
+                                "10.0.1.128")
+
+        #
+        # remove
+        #
+        conn3.remove_vpp_config()
+        rxs = self.send_and_expect(self.pg0, [p2], self.pg1)
+        for rx in rxs:
+            self.verify_arp_req(rx,
+                                self.pg1.local_mac,
+                                "10.0.1.1",
+                                "10.0.1.128")
+
+        #
+        # add back, this time remove the first one
+        #
+        conn3 = VppIpInterfaceAddress(self, self.pg1,
+                                      "10.0.1.2", 24).add_vpp_config()
+
+        rxs = self.send_and_expect(self.pg0, [p2], self.pg1)
+        for rx in rxs:
+            self.verify_arp_req(rx,
+                                self.pg1.local_mac,
+                                "10.0.1.2",
+                                "10.0.1.128")
+
+        conn1.remove_vpp_config()
+        rxs = self.send_and_expect(self.pg0, [p2], self.pg1)
+        for rx in rxs:
+            self.verify_arp_req(rx,
+                                self.pg1.local_mac,
+                                "10.0.1.2",
+                                "10.0.1.128")
+
+        # cleanup
+        conn3.remove_vpp_config()
+        conn2.remove_vpp_config()
 
 
 class NeighborStatsTestCase(VppTestCase):
@@ -1959,15 +2086,50 @@ class NeighborAgeTestCase(VppTestCase):
         #
         # load up some neighbours again with 2s aging enabled
         # they should be removed after 10s (2s age + 4s for probes + gap)
+        # check for the add and remove events
         #
+        enum = VppEnum.vl_api_ip_neighbor_event_flags_t
+
+        self.vapi.want_ip_neighbor_events_v2(enable=1)
         for ii in range(10):
             VppNeighbor(self,
                         self.pg0.sw_if_index,
                         self.pg0.remote_hosts[ii].mac,
                         self.pg0.remote_hosts[ii].ip4).add_vpp_config()
+
+            e = self.vapi.wait_for_event(1, "ip_neighbor_event_v2")
+            self.assertEqual(e.flags,
+                             enum.IP_NEIGHBOR_API_EVENT_FLAG_ADDED)
+            self.assertEqual(str(e.neighbor.ip_address),
+                             self.pg0.remote_hosts[ii].ip4)
+            self.assertEqual(e.neighbor.mac_address,
+                             self.pg0.remote_hosts[ii].mac)
+
         self.sleep(10)
         self.assertFalse(self.vapi.ip_neighbor_dump(sw_if_index=0xffffffff,
                                                     af=vaf.ADDRESS_IP4))
+
+        evs = []
+        for ii in range(10):
+            e = self.vapi.wait_for_event(1, "ip_neighbor_event_v2")
+            self.assertEqual(e.flags,
+                             enum.IP_NEIGHBOR_API_EVENT_FLAG_REMOVED)
+            evs.append(e)
+
+        # check we got the correct mac/ip pairs - done separately
+        # because we don't care about the order the remove notifications
+        # arrive
+        for ii in range(10):
+            found = False
+            mac = self.pg0.remote_hosts[ii].mac
+            ip = self.pg0.remote_hosts[ii].ip4
+
+            for e in evs:
+                if (e.neighbor.mac_address == mac and
+                   str(e.neighbor.ip_address) == ip):
+                    found = True
+                    break
+            self.assertTrue(found)
 
         #
         # check if we can set age and recycle with empty neighbor list

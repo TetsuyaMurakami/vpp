@@ -228,6 +228,13 @@ ip6_sv_reass_add_trace (vlib_main_t * vm, vlib_node_runtime_t * node,
 			u32 ip_proto, u16 l4_src_port, u16 l4_dst_port)
 {
   vlib_buffer_t *b = vlib_get_buffer (vm, bi);
+  if (pool_is_free_index
+      (vm->trace_main.trace_buffer_pool, vlib_buffer_get_trace_index (b)))
+    {
+      // this buffer's trace is gone
+      b->flags &= ~VLIB_BUFFER_IS_TRACED;
+      return;
+    }
   ip6_sv_reass_trace_t *t = vlib_add_trace (vm, node, b, sizeof (t[0]));
   if (reass)
     {
@@ -976,8 +983,6 @@ ip6_sv_reass_init_function (vlib_main_t * vm)
 
   if ((error = vlib_call_init_function (vm, ip_main_init)))
     return error;
-  ip6_register_protocol (IP_PROTOCOL_IPV6_FRAGMENTATION,
-			 ip6_sv_reass_node.index);
 
   rm->fq_index = vlib_frame_queue_main_init (ip6_sv_reass_node.index, 0);
   rm->fq_feature_index =
@@ -1031,13 +1036,13 @@ ip6_sv_reass_walk_expired (vlib_main_t * vm,
 
 	  vec_reset_length (pool_indexes_to_free);
           /* *INDENT-OFF* */
-          pool_foreach_index (index, rt->pool, ({
+          pool_foreach_index (index, rt->pool)  {
                                 reass = pool_elt_at_index (rt->pool, index);
                                 if (now > reass->last_heard + rm->timeout)
                                   {
                                     vec_add1 (pool_indexes_to_free, index);
                                   }
-                              }));
+                              }
           /* *INDENT-ON* */
 	  int *i;
           /* *INDENT-OFF* */
@@ -1138,9 +1143,9 @@ show_ip6_sv_reass (vlib_main_t * vm, unformat_input_t * input,
       if (details)
 	{
           /* *INDENT-OFF* */
-          pool_foreach (reass, rt->pool, {
+          pool_foreach (reass, rt->pool) {
             vlib_cli_output (vm, "%U", format_ip6_sv_reass, vm, reass);
-          });
+          }
           /* *INDENT-ON* */
 	}
       sum_reass_n += rt->reass_n;

@@ -100,6 +100,7 @@
 #define __clib_aligned(x) __attribute__ ((aligned(x)))
 #define __clib_section(s) __attribute__ ((section(s)))
 #define __clib_warn_unused_result __attribute__ ((warn_unused_result))
+#define __clib_export __attribute__ ((visibility("default")))
 
 #define never_inline __attribute__ ((__noinline__))
 
@@ -329,6 +330,14 @@ extract_bits (uword x, int start, int count)
   __typeof__ (x) _x = (x);			\
   __typeof__ (y) _y = (y);			\
   _x < _y ? _x : _y;				\
+})
+
+#define clib_clamp(x,lo,hi)			\
+({						\
+  __typeof__ (x) _x = (x);			\
+  __typeof__ (lo) _lo = (lo);			\
+  __typeof__ (hi) _hi = (hi);			\
+  _x < _lo ? _lo : (_x > _hi ? _hi : _x);	\
 })
 
 #define clib_abs(x)				\

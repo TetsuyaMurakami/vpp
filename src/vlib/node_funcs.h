@@ -455,6 +455,13 @@ vlib_current_process (vlib_main_t * vm)
   return vlib_get_current_process (vm)->node_runtime.node_index;
 }
 
+always_inline u32
+vlib_get_current_process_node_index (vlib_main_t * vm)
+{
+  vlib_process_t *process = vlib_get_current_process (vm);
+  return process->node_runtime.node_index;
+}
+
 /** Returns TRUE if a process suspend time is less than 10us
     @param dt - remaining poll time in seconds
     @returns 1 if dt < 10e-6, 0 otherwise
@@ -1239,6 +1246,15 @@ vlib_node_increment_counter (vlib_main_t * vm, u32 node_index,
  */
 u32 vlib_process_create (vlib_main_t * vm, char *name,
 			 vlib_node_function_t * f, u32 log2_n_stack_bytes);
+
+always_inline int
+vlib_node_set_dispatch_wrapper (vlib_main_t *vm, vlib_node_function_t *fn)
+{
+  if (fn && vm->dispatch_wrapper_fn)
+    return 1;
+  vm->dispatch_wrapper_fn = fn;
+  return 0;
+}
 
 #endif /* included_vlib_node_funcs_h */
 

@@ -396,7 +396,7 @@ af_packet_create_if (vlib_main_t * vm, u8 * host_if_name, u8 * hw_addr_set,
 			       VNET_HW_INTERFACE_FLAG_LINK_UP);
 
   vnet_hw_interface_set_rx_mode (vnm, apif->hw_if_index, 0,
-				 VNET_HW_INTERFACE_RX_MODE_INTERRUPT);
+				 VNET_HW_IF_RX_MODE_INTERRUPT);
 
   mhash_set_mem (&apm->if_index_by_host_if_name, host_if_name_dup, &if_index,
 		 0);
@@ -506,8 +506,8 @@ af_packet_dump_ifs (af_packet_if_detail_t ** out_af_packet_ifs)
   af_packet_if_detail_t *af_packet_if = NULL;
 
   /* *INDENT-OFF* */
-  pool_foreach (apif, apm->interfaces,
-    ({
+  pool_foreach (apif, apm->interfaces)
+     {
       vec_add2 (r_af_packet_ifs, af_packet_if, 1);
       af_packet_if->sw_if_index = apif->sw_if_index;
       if (apif->host_if_name)
@@ -516,7 +516,7 @@ af_packet_dump_ifs (af_packet_if_detail_t ** out_af_packet_ifs)
 		       MIN (ARRAY_LEN (af_packet_if->host_if_name) - 1,
 		       strlen ((const char *) apif->host_if_name)));
 	}
-    }));
+    }
   /* *INDENT-ON* */
 
   *out_af_packet_ifs = r_af_packet_ifs;

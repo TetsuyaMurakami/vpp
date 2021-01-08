@@ -17,6 +17,21 @@
 
 #include <vnet/ip-neighbor/ip_neighbor_types.h>
 
+void
+ip_neighbor_clone (const ip_neighbor_t * ipn, ip_neighbor_t * clone)
+{
+  clib_memcpy (clone, ipn, sizeof (*ipn));
+
+  clone->ipn_key = clib_mem_alloc (sizeof (ip_neighbor_key_t));
+  clib_memcpy (clone->ipn_key, ipn->ipn_key, sizeof (ip_neighbor_key_t));
+}
+
+void
+ip_neighbor_free (ip_neighbor_t * ipn)
+{
+  clib_mem_free (ipn->ipn_key);
+}
+
 u8 *
 format_ip_neighbor_flags (u8 * s, va_list * args)
 {
@@ -37,8 +52,7 @@ format_ip_neighbor_key (u8 * s, va_list * va)
 
   return (format (s, "[%U, %U]",
 		  format_vnet_sw_if_index_name, vnet_get_main (),
-		  key->ipnk_sw_if_index,
-		  format_ip46_address, &key->ipnk_ip, key->ipnk_type));
+		  key->ipnk_sw_if_index, format_ip_address, &key->ipnk_ip));
 }
 
 u8 *
@@ -62,7 +76,7 @@ format_ip_neighbor (u8 * s, va_list * va)
   return (format (s, "%=12U%=40U%=6U%=20U%U",
 		  format_vlib_time, vlib_get_main (),
 		  ipn->ipn_time_last_updated,
-		  format_ip46_address, &ipn->ipn_key->ipnk_ip, IP46_TYPE_ANY,
+		  format_ip_address, &ipn->ipn_key->ipnk_ip,
 		  format_ip_neighbor_flags, ipn->ipn_flags,
 		  format_mac_address_t, &ipn->ipn_mac,
 		  format_vnet_sw_if_index_name, vnet_get_main (),

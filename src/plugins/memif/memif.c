@@ -194,6 +194,17 @@ memif_disconnect (memif_if_t * mif, clib_error_t * err)
 }
 
 static clib_error_t *
+memif_int_fd_write_ready (clib_file_t * uf)
+{
+  memif_main_t *mm = &memif_main;
+  u16 qid = uf->private_data & 0xFFFF;
+  memif_if_t *mif = vec_elt_at_index (mm->interfaces, uf->private_data >> 16);
+
+  memif_log_warn (mif, "unexpected EPOLLOUT on RX for queue %u", qid);
+  return 0;
+}
+
+static clib_error_t *
 memif_int_fd_read_ready (clib_file_t * uf)
 {
   memif_main_t *mm = &memif_main;
@@ -207,7 +218,7 @@ memif_int_fd_read_ready (clib_file_t * uf)
   size = read (uf->file_descriptor, &b, sizeof (b));
   if (size < 0)
     {
-      memif_log_debug (mif, "Failed to read form socket");
+      memif_log_debug (mif, "Failed to read from socket");
       return 0;
     }
 
@@ -255,6 +266,7 @@ memif_connect (memif_if_t * mif)
   /* *INDENT-ON* */
 
   template.read_function = memif_int_fd_read_ready;
+  template.write_function = memif_int_fd_write_ready;
 
   /* *INDENT-OFF* */
   vec_foreach_index (i, mif->tx_queues)
@@ -296,17 +308,17 @@ memif_connect (memif_if_t * mif)
       mq->buffer_pool_index =
 	vlib_buffer_pool_get_default_for_numa (vm, vlib_mains[ti]->numa_node);
       rv = vnet_hw_interface_set_rx_mode (vnm, mif->hw_if_index, i,
-					  VNET_HW_INTERFACE_RX_MODE_DEFAULT);
+					  VNET_HW_IF_RX_MODE_DEFAULT);
       if (rv)
 	memif_log_err
 	  (mif, "Warning: unable to set rx mode for interface %d queue %d: "
 	   "rc=%d", mif->hw_if_index, i, rv);
       else
 	{
-	  vnet_hw_interface_rx_mode rxmode;
+	  vnet_hw_if_rx_mode rxmode;
 	  vnet_hw_interface_get_rx_mode (vnm, mif->hw_if_index, i, &rxmode);
 
-	  if (rxmode == VNET_HW_INTERFACE_RX_MODE_POLLING)
+	  if (rxmode == VNET_HW_IF_RX_MODE_POLLING)
 	    mq->ring->flags |= MEMIF_RING_FLAG_MASK_INT;
 	  else
 	    vnet_device_input_set_interrupt_pending (vnm, mif->hw_if_index, i);
@@ -344,11 +356,11 @@ clib_error_t *
 memif_init_regions_and_queues (memif_if_t * mif)
 {
   vlib_main_t *vm = vlib_get_main ();
+  memif_socket_file_t *msf;
   memif_ring_t *ring = NULL;
-  int i, j;
+  int fd, i, j;
   u64 buffer_offset;
   memif_region_t *r;
-  clib_mem_vm_alloc_t alloc = { 0 };
   clib_error_t *err;
 
   ASSERT (vec_len (mif->regions) == 0);
@@ -364,16 +376,31 @@ memif_init_regions_and_queues (memif_if_t * mif)
     r->region_size += mif->run.buffer_size * (1 << mif->run.log2_ring_size) *
       (mif->run.num_s2m_rings + mif->run.num_m2s_rings);
 
-  alloc.name = "memif region";
-  alloc.size = r->region_size;
-  alloc.flags = CLIB_MEM_VM_F_SHARED;
+  if ((fd = clib_mem_vm_create_fd (CLIB_MEM_PAGE_SZ_DEFAULT, "%U region 0",
+				   format_memif_device_name,
+				   mif->dev_instance)) == -1)
+    {
+      err = clib_mem_get_last_error ();
+      goto error;
+    }
 
-  err = clib_mem_vm_ext_alloc (&alloc);
-  if (err)
-    goto error;
+  if ((ftruncate (fd, r->region_size)) == -1)
+    {
+      err = clib_error_return_unix (0, "ftruncate");
+      goto error;
+    }
 
-  r->fd = alloc.fd;
-  r->shm = alloc.addr;
+  msf = pool_elt_at_index (memif_main.socket_files, mif->socket_file_index);
+  r->shm = clib_mem_vm_map_shared (0, r->region_size, fd, 0, "memif%lu/%lu:0",
+				   msf->socket_id, mif->id);
+
+  if (r->shm == CLIB_MEM_VM_MAP_FAILED)
+    {
+      err = clib_error_return_unix (0, "memif shared region map failed");
+      goto error;
+    }
+
+  r->fd = fd;
 
   if (mif->flags & MEMIF_IF_FLAG_ZERO_COPY)
     {
@@ -530,8 +557,8 @@ memif_process (vlib_main_t * vm, vlib_node_runtime_t * rt, vlib_frame_t * f)
 
       last_run_duration = start_time = vlib_time_now (vm);
       /* *INDENT-OFF* */
-      pool_foreach (mif, mm->interfaces,
-        ({
+      pool_foreach (mif, mm->interfaces)
+         {
 	  memif_socket_file_t * msf = vec_elt_at_index (mm->socket_files, mif->socket_file_index);
 	  /* Allow no more than 10us without a pause */
 	  now = vlib_time_now (vm);
@@ -580,7 +607,7 @@ memif_process (vlib_main_t * vm, vlib_node_runtime_t * rt, vlib_frame_t * f)
                   sock = clib_mem_alloc (sizeof(clib_socket_t));
 	        }
 	    }
-        }));
+        }
       /* *INDENT-ON* */
       last_run_duration = vlib_time_now (vm) - last_run_duration;
     }

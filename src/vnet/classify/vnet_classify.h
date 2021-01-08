@@ -21,6 +21,7 @@
 #include <vppinfra/error.h>
 #include <vppinfra/hash.h>
 #include <vppinfra/cache.h>
+#include <vppinfra/crc32.h>
 #include <vppinfra/xxhash.h>
 
 extern vlib_node_registration_t ip4_classify_node;
@@ -179,12 +180,6 @@ typedef struct
 
 } vnet_classify_table_t;
 
-typedef struct
-{
-  int refcnt;
-  u32 *table_indices;
-} vnet_classify_filter_set_t;
-
 struct _vnet_classify_main
 {
   /* Table pool */
@@ -197,11 +192,8 @@ struct _vnet_classify_main
   unformat_function_t **unformat_policer_next_index_fns;
   unformat_function_t **unformat_opaque_index_fns;
 
-  /* Pool of filter sets */
-  vnet_classify_filter_set_t *filter_sets;
-
-  /* Per-interface filter set map. [0] is used for pcap */
-  u32 *filter_set_by_sw_if_index;
+  /* Per-interface filter table.  [0] is used for pcap */
+  u32 *classify_table_index_by_sw_if_index;
 
   /* convenience variables */
   vlib_main_t *vlib_main;
@@ -280,7 +272,11 @@ vnet_classify_hash_packet_inline (vnet_classify_table_t * t, u8 * h)
     }
 #endif /* CLIB_HAVE_VEC128 */
 
+#ifdef clib_crc32c_uses_intrinsics
+  return clib_crc32c ((u8 *) & xor_sum, sizeof (xor_sum));
+#else
   return clib_xxhash (xor_sum.as_u64[0] ^ xor_sum.as_u64[1]);
+#endif
 }
 
 static inline void
@@ -298,7 +294,7 @@ vnet_classify_prefetch_bucket (vnet_classify_table_t * t, u64 hash)
 static inline vnet_classify_entry_t *
 vnet_classify_get_entry (vnet_classify_table_t * t, uword offset)
 {
-  u8 *hp = t->mheap;
+  u8 *hp = clib_mem_get_heap_base (t->mheap);
   u8 *vp = hp + offset;
 
   return (void *) vp;
@@ -310,7 +306,7 @@ vnet_classify_get_offset (vnet_classify_table_t * t,
 {
   u8 *hp, *vp;
 
-  hp = (u8 *) t->mheap;
+  hp = (u8 *) clib_mem_get_heap_base (t->mheap);
   vp = (u8 *) v;
 
   ASSERT ((vp - hp) < 0x100000000ULL);
@@ -548,6 +544,17 @@ void vnet_classify_register_unformat_policer_next_index_fn
 
 void vnet_classify_register_unformat_opaque_index_fn (unformat_function_t *
 						      fn);
+
+u32 classify_get_pcap_chain (vnet_classify_main_t * cm, u32 sw_if_index);
+void classify_set_pcap_chain (vnet_classify_main_t * cm,
+			      u32 sw_if_index, u32 table_index);
+
+u32 classify_get_trace_chain (void);
+void classify_set_trace_chain (vnet_classify_main_t * cm, u32 table_index);
+
+u32 classify_sort_table_chain (vnet_classify_main_t * cm, u32 table_index);
+u32 classify_lookup_chain (u32 table_index,
+			   u8 * mask, u32 n_skip, u32 n_match);
 
 #endif /* __included_vnet_classify_h__ */
 

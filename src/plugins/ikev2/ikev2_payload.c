@@ -38,13 +38,22 @@ typedef CLIB_PACKED (struct {
 
 /* *INDENT-OFF* */
 typedef CLIB_PACKED (struct {
+  ip4_address_t start_addr;
+  ip4_address_t end_addr;
+}) ikev2_ip4_addr_pair_t;
+
+typedef CLIB_PACKED (struct {
+  ip6_address_t start_addr;
+  ip6_address_t end_addr;
+}) ikev2_ip6_addr_pair_t;
+
+typedef CLIB_PACKED (struct {
   u8 ts_type;
   u8 protocol_id;
   u16 selector_len;
   u16 start_port;
   u16 end_port;
-  ip4_address_t start_addr;
-  ip4_address_t end_addr;
+  u8 addr_pair[0];
 }) ikev2_ts_payload_entry_t;
 /* *INDENT-OFF* */
 
@@ -286,12 +295,46 @@ ikev2_payload_add_auth (ikev2_payload_chain_t * c, ikev2_auth_t * auth)
   ikev2_payload_add_data (c, auth->data);
 }
 
+static void
+ikev2_payload_add_ts_entry (u8 ** data, ikev2_ts_t * ts)
+{
+  u8 * tmp;
+  ikev2_ts_payload_entry_t *entry;
+  int len = sizeof (*entry);
+
+  if (ts->ts_type == TS_IPV4_ADDR_RANGE)
+    len += sizeof (ikev2_ip4_addr_pair_t);
+  else
+    len += sizeof (ikev2_ip6_addr_pair_t);
+
+  vec_add2 (data[0], tmp, len);
+  entry = (ikev2_ts_payload_entry_t *) tmp;
+  entry->ts_type = ts->ts_type;
+  entry->protocol_id = ts->protocol_id;
+  entry->selector_len = clib_host_to_net_u16 (len);
+  entry->start_port = clib_host_to_net_u16 (ts->start_port);
+  entry->end_port = clib_host_to_net_u16 (ts->end_port);
+
+  if (ts->ts_type == TS_IPV4_ADDR_RANGE)
+  {
+    ikev2_ip4_addr_pair_t *pair = (ikev2_ip4_addr_pair_t*) entry->addr_pair;
+    ip_address_copy_addr (&pair->start_addr, &ts->start_addr);
+    ip_address_copy_addr (&pair->end_addr, &ts->end_addr);
+  }
+  else
+  {
+    ikev2_ip6_addr_pair_t *pair = (ikev2_ip6_addr_pair_t*) entry->addr_pair;
+    ip_address_copy_addr (&pair->start_addr, &ts->start_addr);
+    ip_address_copy_addr (&pair->end_addr, &ts->end_addr);
+  }
+}
+
 void
 ikev2_payload_add_ts (ikev2_payload_chain_t * c, ikev2_ts_t * ts, u8 type)
 {
   ike_ts_payload_header_t *tsh;
   ikev2_ts_t *ts2;
-  u8 *data = 0, *tmp;
+  u8 *data = 0;
 
   tsh =
     (ike_ts_payload_header_t *) ikev2_payload_add_hdr (c, type,
@@ -300,17 +343,9 @@ ikev2_payload_add_ts (ikev2_payload_chain_t * c, ikev2_ts_t * ts, u8 type)
 
   vec_foreach (ts2, ts)
   {
-    ASSERT (ts2->ts_type == 7);	/*TS_IPV4_ADDR_RANGE */
-    ikev2_ts_payload_entry_t *entry;
-    vec_add2 (data, tmp, sizeof (*entry));
-    entry = (ikev2_ts_payload_entry_t *) tmp;
-    entry->ts_type = ts2->ts_type;
-    entry->protocol_id = ts2->protocol_id;
-    entry->selector_len = clib_host_to_net_u16 (16);
-    entry->start_port = clib_host_to_net_u16 (ts2->start_port);
-    entry->end_port = clib_host_to_net_u16 (ts2->end_port);
-    entry->start_addr.as_u32 = ts2->start_addr.as_u32;
-    entry->end_addr.as_u32 = ts2->end_addr.as_u32;
+    ASSERT (ts2->ts_type == TS_IPV4_ADDR_RANGE ||
+        ts2->ts_type == TS_IPV6_ADDR_RANGE);
+    ikev2_payload_add_ts_entry (&data, ts2);
   }
 
   ikev2_payload_add_data (c, data);
@@ -327,22 +362,27 @@ ikev2_payload_chain_add_padding (ikev2_payload_chain_t * c, int bs)
 }
 
 ikev2_sa_proposal_t *
-ikev2_parse_sa_payload (ike_payload_header_t * ikep)
+ikev2_parse_sa_payload (ike_payload_header_t * ikep, u32 rlen)
 {
   ikev2_sa_proposal_t *v = 0;
   ikev2_sa_proposal_t *proposal;
   ikev2_sa_transform_t *transform;
 
   u32 plen = clib_net_to_host_u16 (ikep->length);
-
   ike_sa_proposal_data_t *sap;
   int proposal_ptr = 0;
 
+  if (sizeof (*ikep) > rlen)
+    return 0;
+
+  rlen -= sizeof (*ikep);
   do
     {
+      if (proposal_ptr + sizeof (*sap) > rlen)
+        goto data_corrupted;
+
       sap = (ike_sa_proposal_data_t *) & ikep->payload[proposal_ptr];
-      int i;
-      int transform_ptr;
+      int i, transform_ptr;
 
       /* IKE proposal should not have SPI */
       if (sap->protocol_id == IKEV2_PROTOCOL_IKE && sap->spi_size != 0)
@@ -353,6 +393,8 @@ ikev2_parse_sa_payload (ike_payload_header_t * ikep)
 	goto data_corrupted;
 
       transform_ptr = proposal_ptr + sizeof (*sap) + sap->spi_size;
+      if (transform_ptr > rlen)
+        goto data_corrupted;
 
       vec_add2 (v, proposal, 1);
       proposal->proposal_num = sap->proposal_num;
@@ -366,7 +408,9 @@ ikev2_parse_sa_payload (ike_payload_header_t * ikep)
       for (i = 0; i < sap->num_transforms; i++)
 	{
 	  ike_sa_transform_data_t *tr =
-	    (ike_sa_transform_data_t *) & ikep->payload[transform_ptr];
+            (ike_sa_transform_data_t *) & ikep->payload[transform_ptr];
+          if (transform_ptr + sizeof (*tr) > rlen)
+            goto data_corrupted;
 	  u16 tlen = clib_net_to_host_u16 (tr->transform_len);
 
 	  if (tlen < sizeof (*tr))
@@ -376,9 +420,11 @@ ikev2_parse_sa_payload (ike_payload_header_t * ikep)
 
 	  transform->type = tr->transform_type;
 	  transform->transform_id = clib_net_to_host_u16 (tr->transform_id);
+          if (transform_ptr + tlen > rlen)
+            goto data_corrupted;
 	  if (tlen > sizeof (*tr))
 	    vec_add (transform->attrs, tr->attributes, tlen - sizeof (*tr));
-	  transform_ptr += tlen;
+          transform_ptr += tlen;
 	}
 
       proposal_ptr += clib_net_to_host_u16 (sap->proposal_len);
@@ -398,39 +444,73 @@ data_corrupted:
 }
 
 ikev2_ts_t *
-ikev2_parse_ts_payload (ike_payload_header_t * ikep)
+ikev2_parse_ts_payload (ike_payload_header_t * ikep, u32 rlen)
 {
   ike_ts_payload_header_t *tsp = (ike_ts_payload_header_t *) ikep;
   ikev2_ts_t *r = 0, *ts;
-  u8 i;
+  ikev2_ip4_addr_pair_t *pair4;
+  ikev2_ip6_addr_pair_t *pair6;
+  int p = 0, n_left;
+  ikev2_ts_payload_entry_t *pe;
 
-  for (i = 0; i < tsp->num_ts; i++)
+  if (sizeof (*tsp) > rlen)
+    return 0;
+
+  rlen -= sizeof (*tsp);
+  n_left = tsp->num_ts;
+
+  while (n_left && p + sizeof (*pe) < rlen)
     {
-      if (tsp->ts[i].ts_type != 7)	/*  TS_IPV4_ADDR_RANGE */
+      pe = (ikev2_ts_payload_entry_t *) (((u8 *)tsp->ts) + p);
+      p += sizeof (*pe);
+
+      if (pe->ts_type != TS_IPV4_ADDR_RANGE &&
+          pe->ts_type != TS_IPV6_ADDR_RANGE)
         {
           ikev2_elog_uint (IKEV2_LOG_ERROR,
-              "unsupported TS type received (%u)", tsp->ts[i].ts_type);
-          continue;
+              "unsupported TS type received (%u)", pe->ts_type);
+          return 0;
         }
 
       vec_add2 (r, ts, 1);
-      ts->ts_type = tsp->ts[i].ts_type;
-      ts->protocol_id = tsp->ts[i].protocol_id;
-      ts->start_port = tsp->ts[i].start_port;
-      ts->end_port = tsp->ts[i].end_port;
-      ts->start_addr.as_u32 = tsp->ts[i].start_addr.as_u32;
-      ts->end_addr.as_u32 = tsp->ts[i].end_addr.as_u32;
+      ts->ts_type = pe->ts_type;
+      ts->protocol_id = pe->protocol_id;
+      ts->start_port = pe->start_port;
+      ts->end_port = pe->end_port;
+
+      if (pe->ts_type == TS_IPV4_ADDR_RANGE)
+        {
+          pair4 = (ikev2_ip4_addr_pair_t*) pe->addr_pair;
+          ip_address_set (&ts->start_addr, &pair4->start_addr, AF_IP4);
+          ip_address_set (&ts->end_addr, &pair4->end_addr, AF_IP4);
+          p += sizeof (*pair4);
+        }
+      else
+        {
+          pair6 = (ikev2_ip6_addr_pair_t*) pe->addr_pair;
+          ip_address_set (&ts->start_addr, &pair6->start_addr, AF_IP6);
+          ip_address_set (&ts->end_addr, &pair6->end_addr, AF_IP6);
+          p += sizeof (*pair6);
+        }
+      n_left--;
     }
+
+  if (n_left)
+    return 0;
+
   return r;
 }
 
 ikev2_notify_t *
-ikev2_parse_notify_payload (ike_payload_header_t * ikep)
+ikev2_parse_notify_payload (ike_payload_header_t * ikep, u32 rlen)
 {
   ike_notify_payload_header_t *n = (ike_notify_payload_header_t *) ikep;
-  u32 plen = clib_net_to_host_u16 (ikep->length);
+  u32 plen = clib_net_to_host_u16 (n->length);
   ikev2_notify_t *r = 0;
   u32 spi;
+
+  if (sizeof (*n) > rlen)
+    return 0;
 
   r = vec_new (ikev2_notify_t, 1);
   r->msg_type = clib_net_to_host_u16 (n->msg_type);
@@ -438,6 +518,9 @@ ikev2_parse_notify_payload (ike_payload_header_t * ikep)
 
   if (n->spi_size == 4)
     {
+      if (sizeof (spi) + sizeof (*n) > rlen)
+        goto cleanup;
+
       clib_memcpy (&spi, n->payload, n->spi_size);
       r->spi = clib_net_to_host_u32 (spi);
     }
@@ -448,15 +531,22 @@ ikev2_parse_notify_payload (ike_payload_header_t * ikep)
   else
     {
       clib_warning ("invalid SPI Size %d", n->spi_size);
+      goto cleanup;
     }
 
   if (plen > (sizeof (*n) + n->spi_size))
     {
-      vec_add (r->data, n->payload + n->spi_size,
-	       plen - sizeof (*n) - n->spi_size);
-    }
+      if (plen <= sizeof (*n) + n->spi_size)
+        goto cleanup;
 
+      u32 data_len = plen - sizeof (*n) - n->spi_size;
+      vec_add (r->data, n->payload + n->spi_size, data_len);
+    }
   return r;
+
+cleanup:
+  vec_free (r);
+  return 0;
 }
 
 void
@@ -467,13 +557,16 @@ ikev2_parse_vendor_payload (ike_payload_header_t * ikep)
 }
 
 ikev2_delete_t *
-ikev2_parse_delete_payload (ike_payload_header_t * ikep)
+ikev2_parse_delete_payload (ike_payload_header_t * ikep, u32 rlen)
 {
-  ike_delete_payload_header_t *d = (ike_delete_payload_header_t *) ikep;
+  ike_delete_payload_header_t * d = (ike_delete_payload_header_t *) ikep;
   ikev2_delete_t *r = 0, *del;
-  u16 num_of_spi = clib_net_to_host_u16 (d->num_of_spi);
-  u16 i = 0;
+  u16 i, num_of_spi;
 
+  if (rlen < sizeof (*d))
+    return 0;
+
+  num_of_spi = clib_net_to_host_u16 (d->num_of_spi);
   if (d->protocol_id == IKEV2_PROTOCOL_IKE)
     {
       r = vec_new (ikev2_delete_t, 1);
@@ -481,15 +574,42 @@ ikev2_parse_delete_payload (ike_payload_header_t * ikep)
     }
   else
     {
-      r = vec_new (ikev2_delete_t, num_of_spi);
-      vec_foreach (del, r)
+      if (sizeof (*d) + num_of_spi * sizeof (u32) > rlen)
+        return 0;
+
+      for (i = 0; i < num_of_spi; i++)
       {
-	del->protocol_id = d->protocol_id;
-	del->spi = clib_net_to_host_u32 (d->spi[i++]);
+        vec_add2 (r, del, 1);
+        del->protocol_id = d->protocol_id;
+	del->spi = clib_net_to_host_u32 (d->spi[i]);
       }
     }
 
   return r;
+}
+
+u8 *
+ikev2_find_ike_notify_payload (ike_header_t * ike, u32 msg_type)
+{
+  int p = 0;
+  ike_notify_payload_header_t *n;
+  ike_payload_header_t *ikep;
+  u32 payload = ike->nextpayload;
+
+  while (payload != IKEV2_PAYLOAD_NONE)
+    {
+      ikep = (ike_payload_header_t *) & ike->payload[p];
+      if (payload == IKEV2_PAYLOAD_NOTIFY)
+      {
+        n = (ike_notify_payload_header_t *)ikep;
+        if (n->msg_type == clib_net_to_host_u16 (msg_type))
+          return n->payload;
+      }
+      u16 plen = clib_net_to_host_u16 (ikep->length);
+      payload = ikep->nextpayload;
+      p += plen;
+    }
+  return 0;
 }
 
 /*

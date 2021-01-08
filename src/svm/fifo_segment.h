@@ -17,6 +17,7 @@
 
 #include <svm/ssvm.h>
 #include <svm/fifo_types.h>
+#include <svm/message_queue.h>
 #include <svm/svm_fifo.h>
 
 typedef enum
@@ -29,7 +30,7 @@ typedef enum
 
 #define FIFO_SEGMENT_MIN_LOG2_FIFO_SIZE 12	/**< 4kB min fifo size */
 #define FIFO_SEGMENT_MIN_FIFO_SIZE 4096		/**< 4kB min fifo size */
-#define FIFO_SEGMENT_MAX_FIFO_SIZE (2 << 30)	/**< 2GB max fifo size */
+#define FIFO_SEGMENT_MAX_FIFO_SIZE (2ULL << 30)	/**< 2GB max fifo size */
 #define FIFO_SEGMENT_ALLOC_BATCH_SIZE 32	/* Allocation quantum */
 
 typedef enum fifo_segment_flags_
@@ -67,7 +68,10 @@ typedef struct
 {
   ssvm_private_t ssvm;		/**< ssvm segment data */
   fifo_segment_header_t *h;	/**< fifo segment data */
+  uword max_byte_index;
   u8 n_slices;			/**< number of fifo segment slices */
+  fifo_slice_private_t *slices; /**< private slice information */
+  svm_msg_q_t *mqs;		/**< private vec of attached mqs */
 } fifo_segment_t;
 
 typedef struct
@@ -94,10 +98,23 @@ int fifo_segment_create (fifo_segment_main_t * sm,
 int fifo_segment_attach (fifo_segment_main_t * sm,
 			 fifo_segment_create_args_t * a);
 void fifo_segment_delete (fifo_segment_main_t * sm, fifo_segment_t * fs);
+void fifo_segment_cleanup (fifo_segment_t *fs);
 fifo_segment_t *fifo_segment_get_segment (fifo_segment_main_t * sm,
 					  u32 fs_index);
 u32 fifo_segment_index (fifo_segment_main_t * sm, fifo_segment_t * fs);
 void fifo_segment_info (fifo_segment_t * seg, char **address, size_t * size);
+
+always_inline void *
+fifo_segment_ptr (fifo_segment_t *fs, uword offset)
+{
+  return (void *) ((u8 *) fs->h + offset);
+}
+
+always_inline uword
+fifo_segment_offset (fifo_segment_t *fs, void *p)
+{
+  return (uword) ((u8 *) p - (u8 *) fs->h);
+}
 
 /**
  * Allocate fifo in fifo segment
@@ -111,6 +128,8 @@ svm_fifo_t *fifo_segment_alloc_fifo_w_slice (fifo_segment_t * fs,
 					     u32 slice_index,
 					     u32 data_bytes,
 					     fifo_segment_ftype_t ftype);
+svm_fifo_t *fifo_segment_alloc_fifo_w_offset (fifo_segment_t *fs,
+					      uword offset);
 
 /**
  * Free fifo allocated in fifo segment
@@ -123,6 +142,38 @@ void fifo_segment_free_fifo (fifo_segment_t * fs, svm_fifo_t * f);
 void fifo_segment_detach_fifo (fifo_segment_t * fs, svm_fifo_t * f);
 void fifo_segment_attach_fifo (fifo_segment_t * fs, svm_fifo_t * f,
 			       u32 slice_index);
+uword fifo_segment_fifo_offset (svm_fifo_t *f);
+
+/**
+ * Allocate message queue on segment
+ *
+ * @param fs		fifo segment for mq
+ * @param mq_index	index in private mqs vector to use to attach
+ * @param cfg		configuration for mq
+ * @return		attached message queue
+ */
+svm_msg_q_t *fifo_segment_msg_q_alloc (fifo_segment_t *fs, u32 mq_index,
+				       svm_msg_q_cfg_t *cfg);
+
+/**
+ *  Attach message queue at fifo segment offset
+ *
+ *  @param fs		fifo segment for mq
+ *  @param offset	offset for shared mq on the segment
+ *  @param mq_index	index in private mqs vector to use to attach
+ *  @return		attached message queue
+ */
+svm_msg_q_t *fifo_segment_msg_q_attach (fifo_segment_t *fs, uword offset,
+					u32 mq_index);
+
+/**
+ * Message queue offset on segment
+ *
+ * @param fs		fifo segment for mq
+ * @param mq_index	index of mq in private mqs vector
+ * @return		offset of the shared mq the private mq is attached to
+ */
+uword fifo_segment_msg_q_offset (fifo_segment_t *fs, u32 mq_index);
 
 /**
  * Try to preallocate fifo headers
@@ -206,6 +257,14 @@ u8 fsh_has_reached_mem_limit (fifo_segment_header_t * fsh);
 void fsh_reset_mem_limit (fifo_segment_header_t * fsh);
 
 /**
+ * Fifo segment reset mem limit flag
+ *
+ * @param fs            fifo segment
+ * @param size		size requested
+ * @return		pointer to memory allocated or 0
+ */
+void *fifo_segment_alloc (fifo_segment_t *fs, uword size);
+/**
  * Fifo segment allocated size
  *
  * Returns fifo segment's allocated size
@@ -226,16 +285,6 @@ uword fifo_segment_size (fifo_segment_t * fs);
  * @return		free bytes estimate
  */
 uword fifo_segment_free_bytes (fifo_segment_t * fs);
-
-/**
- * Update fifo segment free bytes estimate
- *
- * Forces fifo segment free bytes estimate synchronization with underlying
- * memory allocator.
- *
- * @param fs		fifo segment
- */
-void fifo_segment_update_free_bytes (fifo_segment_t * fs);
 
 /**
  * Fifo segment number of cached bytes

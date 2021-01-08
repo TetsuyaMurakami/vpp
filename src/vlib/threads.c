@@ -320,13 +320,13 @@ vlib_thread_init (vlib_main_t * vm)
 	{
 	  uword c;
           /* *INDENT-OFF* */
-          clib_bitmap_foreach (c, tr->coremask, ({
+          clib_bitmap_foreach (c, tr->coremask)  {
             if (clib_bitmap_get(avail_cpu, c) == 0)
               return clib_error_return (0, "cpu %u is not available to be used"
                                         " for the '%s' thread",c, tr->name);
 
             avail_cpu = clib_bitmap_set(avail_cpu, c, 0);
-          }));
+          }
           /* *INDENT-ON* */
 	}
       else
@@ -606,14 +606,14 @@ vlib_get_thread_core_numa (vlib_worker_thread_t * w, unsigned cpu_id)
   /* *INDENT-OFF* */
   clib_sysfs_read ("/sys/devices/system/node/online", "%U",
         unformat_bitmap_list, &nbmp);
-  clib_bitmap_foreach (node, nbmp, ({
+  clib_bitmap_foreach (node, nbmp)  {
     p = format (p, "%s%u/cpulist%c", sys_node_path, node, 0);
     clib_sysfs_read ((char *) p, "%U", unformat_bitmap_list, &cbmp);
     if (clib_bitmap_get (cbmp, cpu_id))
       numa_id = node;
     vec_reset_length (cbmp);
     vec_reset_length (p);
-  }));
+  }
   /* *INDENT-ON* */
   vec_free (nbmp);
   vec_free (cbmp);
@@ -626,6 +626,7 @@ vlib_get_thread_core_numa (vlib_worker_thread_t * w, unsigned cpu_id)
 static clib_error_t *
 vlib_launch_thread_int (void *fp, vlib_worker_thread_t * w, unsigned cpu_id)
 {
+  clib_mem_main_t *mm = &clib_mem_main;
   vlib_thread_main_t *tm = &vlib_thread_main;
   void *(*fp_arg) (void *) = fp;
   void *numa_heap;
@@ -634,19 +635,22 @@ vlib_launch_thread_int (void *fp, vlib_worker_thread_t * w, unsigned cpu_id)
   vlib_get_thread_core_numa (w, cpu_id);
 
   /* Set up NUMA-bound heap if indicated */
-  if (clib_per_numa_mheaps[w->numa_id] == 0)
+  if (mm->per_numa_mheaps[w->numa_id] == 0)
     {
       /* If the user requested a NUMA heap, create it... */
       if (tm->numa_heap_size)
 	{
-	  numa_heap = clib_mem_init_thread_safe_numa
-	    (0 /* DIY */ , tm->numa_heap_size, w->numa_id);
-	  clib_per_numa_mheaps[w->numa_id] = numa_heap;
+	  clib_mem_set_numa_affinity (w->numa_id, 1 /* force */ );
+	  numa_heap = clib_mem_create_heap (0 /* DIY */ , tm->numa_heap_size,
+					    1 /* is_locked */ ,
+					    "numa %u heap", w->numa_id);
+	  clib_mem_set_default_numa_affinity ();
+	  mm->per_numa_mheaps[w->numa_id] = numa_heap;
 	}
       else
 	{
 	  /* Or, use the main heap */
-	  clib_per_numa_mheaps[w->numa_id] = w->thread_mheap;
+	  mm->per_numa_mheaps[w->numa_id] = w->thread_mheap;
 	}
     }
 
@@ -681,7 +685,7 @@ start_workers (vlib_main_t * vm)
   vlib_node_runtime_t *rt;
   u32 n_vlib_mains = tm->n_vlib_mains;
   u32 worker_thread_index;
-  u8 *main_heap = clib_mem_get_per_cpu_heap ();
+  clib_mem_heap_t *main_heap = clib_mem_get_per_cpu_heap ();
 
   vec_reset_length (vlib_worker_threads);
 
@@ -703,16 +707,15 @@ start_workers (vlib_main_t * vm)
   clib_callback_data_init (&vm->vlib_node_runtime_perf_callbacks,
 			   &vm->worker_thread_main_loop_callback_lock);
 
+  /* Replace hand-crafted length-1 vector with a real vector */
+  vlib_mains = 0;
+
+  vec_validate_aligned (vlib_mains, n_vlib_mains - 1, CLIB_CACHE_LINE_BYTES);
+  _vec_len (vlib_mains) = 0;
+  vec_add1_aligned (vlib_mains, vm, CLIB_CACHE_LINE_BYTES);
+
   if (n_vlib_mains > 1)
     {
-      /* Replace hand-crafted length-1 vector with a real vector */
-      vlib_mains = 0;
-
-      vec_validate_aligned (vlib_mains, tm->n_vlib_mains - 1,
-			    CLIB_CACHE_LINE_BYTES);
-      _vec_len (vlib_mains) = 0;
-      vec_add1_aligned (vlib_mains, vm, CLIB_CACHE_LINE_BYTES);
-
       vlib_worker_threads->wait_at_barrier =
 	clib_mem_alloc_aligned (sizeof (u32), CLIB_CACHE_LINE_BYTES);
       vlib_worker_threads->workers_at_barrier =
@@ -756,8 +759,10 @@ start_workers (vlib_main_t * vm)
 	      vec_add2 (vlib_worker_threads, w, 1);
 	      /* Currently unused, may not really work */
 	      if (tr->mheap_size)
-		w->thread_mheap = create_mspace (tr->mheap_size,
-						 0 /* unlocked */ );
+		w->thread_mheap = clib_mem_create_heap (0, tr->mheap_size,
+							/* unlocked */ 0,
+							"%s%d heap",
+							tr->name, k);
 	      else
 		w->thread_mheap = main_heap;
 
@@ -926,8 +931,10 @@ start_workers (vlib_main_t * vm)
 	      vec_add2 (vlib_worker_threads, w, 1);
 	      if (tr->mheap_size)
 		{
-		  w->thread_mheap =
-		    create_mspace (tr->mheap_size, 0 /* locked */ );
+		  w->thread_mheap = clib_mem_create_heap (0, tr->mheap_size,
+							  /* locked */ 0,
+							  "%s%d heap",
+							  tr->name, j);
 		}
 	      else
 		w->thread_mheap = main_heap;
@@ -969,13 +976,13 @@ start_workers (vlib_main_t * vm)
 	{
 	  uword c;
           /* *INDENT-OFF* */
-          clib_bitmap_foreach (c, tr->coremask, ({
+          clib_bitmap_foreach (c, tr->coremask)  {
             w = vlib_worker_threads + worker_thread_index++;
 	    err = vlib_launch_thread_int (vlib_worker_thread_bootstrap_fn,
 					  w, c);
 	    if (err)
 	      clib_error_report (err);
-          }));
+          }
           /* *INDENT-ON* */
 	}
     }
@@ -1444,6 +1451,18 @@ vlib_worker_thread_initial_barrier_sync_and_release (vlib_main_t * vm)
   *vlib_worker_threads->wait_at_barrier = 0;
 }
 
+/**
+ * Return true if the wroker thread barrier is held
+ */
+u8
+vlib_worker_thread_barrier_held (void)
+{
+  if (vec_len (vlib_mains) < 2)
+    return (1);
+
+  return (*vlib_worker_threads->wait_at_barrier == 1);
+}
+
 void
 vlib_worker_thread_barrier_sync_int (vlib_main_t * vm, const char *func_name)
 {
@@ -1645,6 +1664,41 @@ vlib_worker_thread_barrier_release (vlib_main_t * vm)
   if (PREDICT_FALSE (vec_len (vm->barrier_perf_callbacks) != 0))
     clib_call_callbacks (vm->barrier_perf_callbacks, vm,
 			 vm->clib_time.last_cpu_time, 1 /* leave */ );
+}
+
+/**
+ * Wait until each of the workers has been once around the track
+ */
+void
+vlib_worker_wait_one_loop (void)
+{
+  ASSERT (vlib_get_thread_index () == 0);
+
+  if (vec_len (vlib_mains) < 2)
+    return;
+
+  if (vlib_worker_thread_barrier_held ())
+    return;
+
+  u32 *counts = 0;
+  u32 ii;
+
+  vec_validate (counts, vec_len (vlib_mains) - 1);
+
+  /* record the current loop counts */
+  vec_foreach_index (ii, vlib_mains)
+    counts[ii] = vlib_mains[ii]->main_loop_count;
+
+  /* spin until each changes, apart from the main thread, or we'd be
+   * a while */
+  for (ii = 1; ii < vec_len (counts); ii++)
+    {
+      while (counts[ii] == vlib_mains[ii]->main_loop_count)
+	CLIB_PAUSE ();
+    }
+
+  vec_free (counts);
+  return;
 }
 
 /*
@@ -1955,6 +2009,12 @@ VLIB_CLI_COMMAND (f_command, static) =
   .function = show_clock_command_fn,
 };
 /* *INDENT-ON* */
+
+vlib_thread_main_t *
+vlib_get_thread_main_not_inline (void)
+{
+  return vlib_get_thread_main ();
+}
 
 /*
  * fd.io coding-style-patch-verification: ON

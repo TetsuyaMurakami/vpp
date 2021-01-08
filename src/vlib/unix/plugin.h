@@ -67,6 +67,33 @@ typedef CLIB_PACKED(struct {
 }) vlib_plugin_registration_t;
 /* *INDENT-ON* */
 
+/*
+ * Plugins may also use this registration format, which is
+ * easy enough to emit from e.g. a golang compiler.
+ */
+typedef struct
+{
+  uword data_segment_offset;
+  uword length;
+} vlib_r2_string_t;
+
+typedef struct
+{
+  int default_disabled;
+  vlib_r2_string_t version;
+  vlib_r2_string_t version_required;
+  vlib_r2_string_t overrides;
+  vlib_r2_string_t early_init;
+  vlib_r2_string_t description;
+} vlib_plugin_r2_t;
+
+#define foreach_r2_string_field                 \
+_(version)                                      \
+_(version_required)                             \
+_(overrides)                                    \
+_(early_init)                                   \
+_(description)
+
 typedef struct
 {
   u8 *name;
@@ -123,7 +150,7 @@ u8 *vlib_get_vat_plugin_path (void);
 #define VLIB_PLUGIN_REGISTER() \
   vlib_plugin_registration_t vlib_plugin_registration \
   CLIB_NOSANITIZE_PLUGIN_REG_SECTION \
-  __attribute__((__section__(".vlib_plugin_registration")))
+  __clib_export __clib_section(".vlib_plugin_registration")
 
 /* Call a plugin init function: used for init function dependencies. */
 #define vlib_call_plugin_init_function(vm,p,x)                  \

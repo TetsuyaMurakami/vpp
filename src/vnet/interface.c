@@ -39,11 +39,18 @@
 
 #include <vnet/vnet.h>
 #include <vnet/plugin/plugin.h>
-#include <vnet/fib/ip6_fib.h>
 #include <vnet/adj/adj.h>
 #include <vnet/adj/adj_mcast.h>
-#include <vnet/l2/l2_input.h>
+#include <vnet/ip/ip.h>
 
+/* *INDENT-OFF* */
+VLIB_REGISTER_LOG_CLASS (if_default_log, static) = {
+  .class_name = "interface",
+};
+/* *INDENT-ON* */
+
+#define log_debug(fmt,...) vlib_log_debug(if_default_log.class, fmt, __VA_ARGS__)
+#define log_err(fmt,...) vlib_log_err(if_default_log.class, fmt, __VA_ARGS__)
 typedef enum vnet_interface_helper_flags_t_
 {
   VNET_INTERFACE_SET_FLAGS_HELPER_IS_CREATE = (1 << 0),
@@ -132,22 +139,22 @@ serialize_vnet_interface_state (serialize_main_t * m, va_list * va)
   /* Serialize hardware interface classes since they may have changed.
      Must do this before sending up/down flags. */
   /* *INDENT-OFF* */
-  pool_foreach (hif, im->hw_interfaces, ({
+  pool_foreach (hif, im->hw_interfaces)  {
     vnet_hw_interface_class_t * hw_class = vnet_get_hw_interface_class (vnm, hif->hw_class_index);
     serialize_cstring (m, hw_class->name);
-  }));
+  }
   /* *INDENT-ON* */
 
   /* Send sw/hw interface state when non-zero. */
   /* *INDENT-OFF* */
-  pool_foreach (sif, im->sw_interfaces, ({
+  pool_foreach (sif, im->sw_interfaces)  {
     if (sif->flags != 0)
       {
 	vec_add2 (sts, st, 1);
 	st->sw_hw_if_index = sif->sw_if_index;
 	st->flags = sif->flags;
       }
-  }));
+  }
   /* *INDENT-ON* */
 
   vec_serialize (m, sts, serialize_vec_vnet_sw_hw_interface_state);
@@ -156,14 +163,14 @@ serialize_vnet_interface_state (serialize_main_t * m, va_list * va)
     _vec_len (sts) = 0;
 
   /* *INDENT-OFF* */
-  pool_foreach (hif, im->hw_interfaces, ({
+  pool_foreach (hif, im->hw_interfaces)  {
     if (hif->flags != 0)
       {
 	vec_add2 (sts, st, 1);
 	st->sw_hw_if_index = hif->hw_if_index;
 	st->flags = vnet_hw_interface_flags_to_sw(hif->flags);
       }
-  }));
+  }
   /* *INDENT-ON* */
 
   vec_serialize (m, sts, serialize_vec_vnet_sw_hw_interface_state);
@@ -197,7 +204,7 @@ unserialize_vnet_interface_state (serialize_main_t * m, va_list * va)
     clib_error_t *error;
 
     /* *INDENT-OFF* */
-    pool_foreach (hif, im->hw_interfaces, ({
+    pool_foreach (hif, im->hw_interfaces)  {
       unserialize_cstring (m, &class_name);
       p = hash_get_mem (im->hw_interface_class_by_name, class_name);
       if (p)
@@ -211,7 +218,7 @@ unserialize_vnet_interface_state (serialize_main_t * m, va_list * va)
       if (error)
 	clib_error_report (error);
       vec_free (class_name);
-    }));
+    }
     /* *INDENT-ON* */
   }
 
@@ -339,6 +346,8 @@ vnet_hw_interface_set_flags_helper (vnet_main_t * vnm, u32 hw_if_index,
   hi->flags |= flags;
 
 done:
+  if (error)
+    log_err ("hw_set_flags_helper: %U", format_clib_error, error);
   return error;
 }
 
@@ -491,6 +500,8 @@ vnet_sw_interface_set_flags_helper (vnet_main_t * vnm, u32 sw_if_index,
   si->flags |= flags;
 
 done:
+  if (error)
+    log_err ("sw_set_flags_helper: %U", format_clib_error, error);
   return error;
 }
 
@@ -498,6 +509,7 @@ clib_error_t *
 vnet_hw_interface_set_flags (vnet_main_t * vnm, u32 hw_if_index,
 			     vnet_hw_interface_flags_t flags)
 {
+  log_debug ("hw_set_flags: hw_if_index %u flags 0x%x", hw_if_index, flags);
   return vnet_hw_interface_set_flags_helper
     (vnm, hw_if_index, flags,
      VNET_INTERFACE_SET_FLAGS_HELPER_WANT_REDISTRIBUTE);
@@ -507,6 +519,7 @@ clib_error_t *
 vnet_sw_interface_set_flags (vnet_main_t * vnm, u32 sw_if_index,
 			     vnet_sw_interface_flags_t flags)
 {
+  log_debug ("sw_set_flags: sw_if_index %u flags 0x%x", sw_if_index, flags);
   return vnet_sw_interface_set_flags_helper
     (vnm, sw_if_index, flags,
      VNET_INTERFACE_SET_FLAGS_HELPER_WANT_REDISTRIBUTE);
@@ -516,6 +529,7 @@ void
 vnet_sw_interface_admin_up (vnet_main_t * vnm, u32 sw_if_index)
 {
   u32 flags = vnet_sw_interface_get_flags (vnm, sw_if_index);
+  log_debug ("sw_admin_up: sw_if_index %u", sw_if_index);
 
   if (!(flags & VNET_SW_INTERFACE_FLAG_ADMIN_UP))
     {
@@ -528,6 +542,7 @@ void
 vnet_sw_interface_admin_down (vnet_main_t * vnm, u32 sw_if_index)
 {
   u32 flags = vnet_sw_interface_get_flags (vnm, sw_if_index);
+  log_debug ("sw_admin_down: sw_if_index %u", sw_if_index);
 
   if (flags & VNET_SW_INTERFACE_FLAG_ADMIN_UP)
     {
@@ -584,6 +599,7 @@ clib_error_t *
 vnet_create_sw_interface (vnet_main_t * vnm, vnet_sw_interface_t * template,
 			  u32 * sw_if_index)
 {
+  vnet_interface_main_t *im = &vnm->interface_main;
   clib_error_t *error;
   vnet_hw_interface_t *hi;
   vnet_device_class_t *dev_class;
@@ -593,8 +609,9 @@ vnet_create_sw_interface (vnet_main_t * vnm, vnet_sw_interface_t * template,
       && (template->sub.eth.flags.inner_vlan_id_any == 1
 	  || template->sub.eth.flags.outer_vlan_id_any == 1))
     {
-      error = clib_error_return (0,
-				 "inner-dot1q any exact-match is unsupported");
+      char *str = "inner-dot1q any exact-match is unsupported";
+      error = clib_error_return (0, str);
+      log_err ("create_sw_interface: %s", str);
       return error;
     }
 
@@ -619,10 +636,18 @@ vnet_create_sw_interface (vnet_main_t * vnm, vnet_sw_interface_t * template,
   if (error)
     {
       /* undo the work done by vnet_create_sw_interface_no_callbacks() */
-      vnet_interface_main_t *im = &vnm->interface_main;
+      log_err ("create_sw_interface: set flags failed\n  %U",
+	       format_clib_error, error);
       vnet_sw_interface_t *sw =
 	pool_elt_at_index (im->sw_interfaces, *sw_if_index);
       pool_put (im->sw_interfaces, sw);
+    }
+  else
+    {
+      vnet_sw_interface_t *sw =
+	pool_elt_at_index (im->sw_interfaces, *sw_if_index);
+      log_debug ("create_sw_interface: interface %U (sw_if_index %u) created",
+		 format_vnet_sw_interface_name, vnm, sw, *sw_if_index);
     }
 
   return error;
@@ -635,19 +660,10 @@ vnet_delete_sw_interface (vnet_main_t * vnm, u32 sw_if_index)
   vnet_sw_interface_t *sw =
     pool_elt_at_index (im->sw_interfaces, sw_if_index);
 
+  log_debug ("delete_sw_interface: sw_if_index %u, name '%U'",
+	     sw_if_index, format_vnet_sw_if_index_name, vnm, sw_if_index);
+
   /* Check if the interface has config and is removed from L2 BD or XConnect */
-  vlib_main_t *vm = vlib_get_main ();
-  l2_input_config_t *config;
-  if (sw_if_index < vec_len (l2input_main.configs))
-    {
-      config = vec_elt_at_index (l2input_main.configs, sw_if_index);
-      if (config->xconnect)
-	set_int_l2_mode (vm, vnm, MODE_L3, config->output_sw_if_index, 0,
-			 L2_BD_PORT_TYPE_NORMAL, 0, 0);
-      if (config->xconnect || config->bridge)
-	set_int_l2_mode (vm, vnm, MODE_L3, sw_if_index, 0,
-			 L2_BD_PORT_TYPE_NORMAL, 0, 0);
-    }
   vnet_clear_sw_interface_tag (vnm, sw_if_index);
 
   /* Bring down interface in case it is up. */
@@ -674,6 +690,9 @@ vnet_sw_interface_set_mtu (vnet_main_t * vnm, u32 sw_if_index, u32 mtu)
   if (si->mtu[VNET_MTU_L3] != mtu)
     {
       si->mtu[VNET_MTU_L3] = mtu;
+      log_debug ("set_mtu: interface %U, new mtu %u",
+		 format_vnet_sw_if_index_name, vnm, sw_if_index, mtu);
+
       call_sw_interface_mtu_change_callbacks (vnm, sw_if_index);
     }
 }
@@ -696,7 +715,13 @@ vnet_sw_interface_set_protocol_mtu (vnet_main_t * vnm, u32 sw_if_index,
     }
   /* Notify interested parties */
   if (changed)
-    call_sw_interface_mtu_change_callbacks (vnm, sw_if_index);
+    {
+      log_debug ("set_protocol_mtu: interface %U l3 %u ip4 %u ip6 %u mpls %u",
+		 format_vnet_sw_if_index_name, vnm, sw_if_index,
+		 mtu[VNET_MTU_L3], mtu[VNET_MTU_IP4], mtu[VNET_MTU_IP6],
+		 mtu[VNET_MTU_MPLS]);
+      call_sw_interface_mtu_change_callbacks (vnm, sw_if_index);
+    }
 }
 
 void
@@ -749,9 +774,10 @@ setup_tx_node (vlib_main_t * vm,
   n->function = dev_class->tx_function;
   n->format_trace = dev_class->format_tx_trace;
 
+  /// XXX: Update this to use counter structure
   vlib_register_errors (vm, node_index,
 			dev_class->tx_function_n_errors,
-			dev_class->tx_function_error_strings);
+			dev_class->tx_function_error_strings, 0);
 }
 
 static void
@@ -781,6 +807,7 @@ vnet_register_interface (vnet_main_t * vnm,
   vnet_config_main_t *cm;
   u32 hw_index, i;
   char *tx_node_name = NULL, *output_node_name = NULL;
+  vlib_node_function_t *output_node = vnet_interface_output_node_get ();
 
   pool_get (im->hw_interfaces, hw);
   clib_memset (hw, 0, sizeof (*hw));
@@ -788,7 +815,7 @@ vnet_register_interface (vnet_main_t * vnm,
 
   hw_index = hw - im->hw_interfaces;
   hw->hw_if_index = hw_index;
-  hw->default_rx_mode = VNET_HW_INTERFACE_RX_MODE_POLLING;
+  hw->default_rx_mode = VNET_HW_IF_RX_MODE_POLLING;
 
   if (dev_class->format_device_name)
     hw->name = format (0, "%U", dev_class->format_device_name, dev_instance);
@@ -866,7 +893,7 @@ vnet_register_interface (vnet_main_t * vnm,
       /* The new class may differ from the old one.
        * Functions have to be updated. */
       node = vlib_get_node (vm, hw->output_node_index);
-      node->function = vnet_interface_output_node;
+      node->function = output_node;
       node->format_trace = format_vnet_interface_output_trace;
       /* *INDENT-OFF* */
       foreach_vlib_main ({
@@ -920,7 +947,7 @@ vnet_register_interface (vnet_main_t * vnm,
 
       r.flags = 0;
       r.name = output_node_name;
-      r.function = vnet_interface_output_node;
+      r.function = output_node;
       r.format_trace = format_vnet_interface_output_trace;
 
       {
@@ -1082,11 +1109,11 @@ vnet_hw_interface_walk (vnet_main_t * vnm,
   im = &vnm->interface_main;
 
   /* *INDENT-OFF* */
-  pool_foreach (hi, im->hw_interfaces,
-  ({
+  pool_foreach (hi, im->hw_interfaces)
+   {
     if (WALK_STOP == fn(vnm, hi->hw_if_index, ctx))
       break;
-  }));
+  }
   /* *INDENT-ON* */
 }
 
@@ -1100,11 +1127,11 @@ vnet_sw_interface_walk (vnet_main_t * vnm,
   im = &vnm->interface_main;
 
   /* *INDENT-OFF* */
-  pool_foreach (si, im->sw_interfaces,
+  pool_foreach (si, im->sw_interfaces)
   {
     if (WALK_STOP == fn (vnm, si, ctx))
       break;
-  });
+  }
   /* *INDENT-ON* */
 }
 
@@ -1495,6 +1522,8 @@ vnet_hw_interface_add_del_mac_address (vnet_main_t * vnm,
 					mac_address, is_add);
 
 done:
+  if (error)
+    log_err ("hw_add_del_mac_address: %U", format_clib_error, error);
   return error;
 }
 
@@ -1690,6 +1719,44 @@ default_update_adjacency (vnet_main_t * vnm, u32 sw_if_index, u32 ai)
       ASSERT (0);
       break;
     }
+}
+
+clib_error_t *
+vnet_hw_interface_set_rss_queues (vnet_main_t * vnm,
+				  vnet_hw_interface_t * hi,
+				  clib_bitmap_t * bitmap)
+{
+  clib_error_t *error = 0;
+  vnet_device_class_t *dev_class =
+    vnet_get_device_class (vnm, hi->dev_class_index);
+
+  if (dev_class->set_rss_queues_function)
+    {
+      if (clib_bitmap_count_set_bits (bitmap) == 0)
+	{
+	  error = clib_error_return (0,
+				     "must assign at least one valid rss queue");
+	  goto done;
+	}
+
+      error = dev_class->set_rss_queues_function (vnm, hi, bitmap);
+    }
+  else
+    {
+      error = clib_error_return (0,
+				 "setting rss queues is not supported on this interface");
+    }
+
+  if (!error)
+    {
+      clib_bitmap_free (hi->rss_queues);
+      hi->rss_queues = clib_bitmap_dup (bitmap);
+    }
+
+done:
+  if (error)
+    log_err ("hw_set_rss_queues: %U", format_clib_error, error);
+  return error;
 }
 
 int collect_detailed_interface_stats_flag = 0;

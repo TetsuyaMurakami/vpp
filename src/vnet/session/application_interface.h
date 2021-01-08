@@ -81,6 +81,7 @@ typedef struct session_cb_vft_
   _(u8 *, namespace_id)				\
   _(session_cb_vft_t *, session_cb_vft)		\
   _(u32, app_index)				\
+  _(u8, use_sock_api)				\
 
 typedef struct _vnet_app_attach_args_t
 {
@@ -177,6 +178,8 @@ typedef struct _vnet_app_add_cert_key_pair_args_
 {
   u8 *cert;
   u8 *key;
+  u32 cert_len;
+  u32 key_len;
   u32 index;
 } vnet_app_add_cert_key_pair_args_t;
 
@@ -270,8 +273,6 @@ int vnet_connect (vnet_connect_args_t * a);
 int vnet_unlisten (vnet_unlisten_args_t * a);
 int vnet_disconnect_session (vnet_disconnect_args_t * a);
 
-clib_error_t *vnet_app_add_tls_cert (vnet_app_add_tls_cert_args_t * a);
-clib_error_t *vnet_app_add_tls_key (vnet_app_add_tls_key_args_t * a);
 int vnet_app_add_cert_key_pair (vnet_app_add_cert_key_pair_args_t * a);
 int vnet_app_del_cert_key_pair (u32 index);
 /** Ask for app cb on pair deletion */
@@ -342,9 +343,7 @@ typedef struct session_bound_msg_
   uword rx_fifo;
   uword tx_fifo;
   uword vpp_evt_q;
-  u32 segment_size;
-  u8 segment_name_length;
-  u8 segment_name[128];
+  u64 segment_handle;
 } __clib_packed session_bound_msg_t;
 
 typedef struct session_unlisten_msg_
@@ -371,6 +370,7 @@ typedef struct session_accepted_msg_
   uword server_tx_fifo;
   u64 segment_handle;
   uword vpp_event_queue_address;
+  u32 mq_index;
   transport_endpoint_t rmt;
   u8 flags;
 } __clib_packed session_accepted_msg_t;
@@ -518,6 +518,7 @@ typedef struct session_migrate_msg_
   uword vpp_evt_q;
   session_handle_t handle;
   session_handle_t new_handle;
+  u64 segment_handle;
   u32 vpp_thread_index;
 } __clib_packed session_migrated_msg_t;
 
@@ -581,7 +582,8 @@ app_send_io_evt_to_vpp (svm_msg_q_t * mq, u32 session_index, u8 evt_type,
     {
       if (svm_msg_q_try_lock (mq))
 	return -1;
-      if (PREDICT_FALSE (svm_msg_q_ring_is_full (mq, SESSION_MQ_IO_EVT_RING)))
+      if (PREDICT_FALSE (svm_msg_q_ring_is_full (mq, SESSION_MQ_IO_EVT_RING)
+			 || svm_msg_q_is_full (mq)))
 	{
 	  svm_msg_q_unlock (mq);
 	  return -2;
@@ -613,35 +615,35 @@ app_send_dgram_raw (svm_fifo_t * f, app_session_transport_t * at,
 		    svm_msg_q_t * vpp_evt_q, u8 * data, u32 len, u8 evt_type,
 		    u8 do_evt, u8 noblock)
 {
-  u32 max_enqueue, actual_write;
   session_dgram_hdr_t hdr;
   int rv;
 
-  max_enqueue = svm_fifo_max_enqueue_prod (f);
-  if (max_enqueue < (sizeof (session_dgram_hdr_t) + len))
+  if (svm_fifo_max_enqueue_prod (f) < (sizeof (session_dgram_hdr_t) + len))
     return 0;
 
-  max_enqueue -= sizeof (session_dgram_hdr_t);
-  actual_write = clib_min (len, max_enqueue);
-  hdr.data_length = actual_write;
+  hdr.data_length = len;
   hdr.data_offset = 0;
   clib_memcpy_fast (&hdr.rmt_ip, &at->rmt_ip, sizeof (ip46_address_t));
   hdr.is_ip4 = at->is_ip4;
   hdr.rmt_port = at->rmt_port;
   clib_memcpy_fast (&hdr.lcl_ip, &at->lcl_ip, sizeof (ip46_address_t));
   hdr.lcl_port = at->lcl_port;
-  rv = svm_fifo_enqueue (f, sizeof (hdr), (u8 *) & hdr);
-  ASSERT (rv == sizeof (hdr));
 
-  rv = svm_fifo_enqueue (f, actual_write, data);
+  /* *INDENT-OFF* */
+  svm_fifo_seg_t segs[2] = {{ (u8 *) &hdr, sizeof (hdr) }, { data, len }};
+  /* *INDENT-ON* */
+
+  rv = svm_fifo_enqueue_segments (f, segs, 2, 0 /* allow partial */ );
+  if (PREDICT_FALSE (rv < 0))
+    return 0;
+
   if (do_evt)
     {
-      if (rv > 0 && svm_fifo_set_event (f))
-	app_send_io_evt_to_vpp (vpp_evt_q, f->master_session_index, evt_type,
-				noblock);
+      if (svm_fifo_set_event (f))
+	app_send_io_evt_to_vpp (vpp_evt_q, f->shr->master_session_index,
+				evt_type, noblock);
     }
-  ASSERT (rv);
-  return rv;
+  return len;
 }
 
 always_inline int
@@ -662,8 +664,8 @@ app_send_stream_raw (svm_fifo_t * f, svm_msg_q_t * vpp_evt_q, u8 * data,
   if (do_evt)
     {
       if (rv > 0 && svm_fifo_set_event (f))
-	app_send_io_evt_to_vpp (vpp_evt_q, f->master_session_index, evt_type,
-				noblock);
+	app_send_io_evt_to_vpp (vpp_evt_q, f->shr->master_session_index,
+				evt_type, noblock);
     }
   return rv;
 }
@@ -772,6 +774,75 @@ format_session_error (u8 * s, va_list * args)
     s = format (s, "invalid session err %u", -error);
   return s;
 }
+
+/*
+ * Socket API messages
+ */
+
+typedef enum app_sapi_msg_type
+{
+  APP_SAPI_MSG_TYPE_NONE,
+  APP_SAPI_MSG_TYPE_ATTACH,
+  APP_SAPI_MSG_TYPE_ATTACH_REPLY,
+  APP_SAPI_MSG_TYPE_ADD_DEL_WORKER,
+  APP_SAPI_MSG_TYPE_ADD_DEL_WORKER_REPLY,
+  APP_SAPI_MSG_TYPE_SEND_FDS,
+} __clib_packed app_sapi_msg_type_e;
+
+typedef struct app_sapi_attach_msg_
+{
+  u8 name[64];
+  u64 options[18];
+} __clib_packed app_sapi_attach_msg_t;
+
+STATIC_ASSERT (sizeof (u64) * APP_OPTIONS_N_OPTIONS <=
+	       sizeof (((app_sapi_attach_msg_t *) 0)->options),
+	       "Out of options, fix message definition");
+
+typedef struct app_sapi_attach_reply_msg_
+{
+  i32 retval;
+  u32 app_index;
+  u64 app_mq;
+  u64 vpp_ctrl_mq;
+  u64 segment_handle;
+  u32 api_client_handle;
+  u8 vpp_ctrl_mq_thread;
+  u8 n_fds;
+  u8 fd_flags;
+} __clib_packed app_sapi_attach_reply_msg_t;
+
+typedef struct app_sapi_worker_add_del_msg_
+{
+  u32 app_index;
+  u32 wrk_index;
+  u8 is_add;
+} __clib_packed app_sapi_worker_add_del_msg_t;
+
+typedef struct app_sapi_worker_add_del_reply_msg_
+{
+  i32 retval;
+  u32 wrk_index;
+  u64 app_event_queue_address;
+  u64 segment_handle;
+  u32 api_client_handle;
+  u8 n_fds;
+  u8 fd_flags;
+  u8 is_add;
+} __clib_packed app_sapi_worker_add_del_reply_msg_t;
+
+typedef struct app_sapi_msg_
+{
+  app_sapi_msg_type_e type;
+  union
+  {
+    app_sapi_attach_msg_t attach;
+    app_sapi_attach_reply_msg_t attach_reply;
+    app_sapi_worker_add_del_msg_t worker_add_del;
+    app_sapi_worker_add_del_reply_msg_t worker_add_del_reply;
+  };
+} __clib_packed app_sapi_msg_t;
+
 #endif /* __included_uri_h__ */
 
 /*

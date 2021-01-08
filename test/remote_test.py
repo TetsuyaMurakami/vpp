@@ -2,21 +2,17 @@
 
 import inspect
 import os
+import reprlib
 import unittest
 from framework import VppTestCase
 from multiprocessing import Process, Pipe
 from pickle import dumps
-import six
-from six import moves
 import sys
 
-if sys.version_info < (3,):
-    from aenum import IntEnum, IntFlag
-else:
-    from enum import IntEnum, IntFlag
+from enum import IntEnum, IntFlag
 
 
-class SerializableClassCopy(object):
+class SerializableClassCopy:
     """
     Empty class used as a basis for a serializable copy of another class.
     """
@@ -26,7 +22,7 @@ class SerializableClassCopy(object):
         return '<SerializableClassCopy dict=%s>' % self.__dict__
 
 
-class RemoteClassAttr(object):
+class RemoteClassAttr:
     """
     Wrapper around attribute of a remotely executed class.
     """
@@ -113,7 +109,7 @@ class RemoteClass(Process):
         self._pipe = Pipe()  # pipe for input/output arguments
 
     def __repr__(self):
-        return moves.reprlib.repr(RemoteClassAttr(self, None))
+        return reprlib.repr(RemoteClassAttr(self, None))
 
     def __str__(self):
         return str(RemoteClassAttr(self, None))
@@ -147,7 +143,7 @@ class RemoteClass(Process):
                     isinstance(val, RemoteClassAttr):
                 mutable_args[i] = val.get_remote_value()
         args = tuple(mutable_args)
-        for key, val in six.iteritems(kwargs):
+        for key, val in kwargs.items():
             if isinstance(val, RemoteClass) or \
                     isinstance(val, RemoteClassAttr):
                 kwargs[key] = val.get_remote_value()
@@ -204,7 +200,7 @@ class RemoteClass(Process):
     def _get_local_repr(self, path):
         try:
             obj = self._get_local_object(path)
-            return moves.reprlib.repr(obj)
+            return reprlib.repr(obj)
         except AttributeError:
             return None
 

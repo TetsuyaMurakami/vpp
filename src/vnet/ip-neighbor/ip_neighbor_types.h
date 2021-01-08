@@ -18,24 +18,9 @@
 #ifndef __INCLUDE_IP_NEIGHBOR_TYPES_H__
 #define __INCLUDE_IP_NEIGHBOR_TYPES_H__
 
-#include <vnet/ip/ip6_packet.h>
+#include <vnet/ip/ip_types.h>
 #include <vnet/ethernet/mac_address.h>
 #include <vnet/fib/fib_types.h>
-
-#define IP_SCAN_DISABLED	0
-#define IP_SCAN_V4_NEIGHBORS	(1 << 0)
-#define IP_SCAN_V6_NEIGHBORS	(1 << 1)
-#define IP_SCAN_V46_NEIGHBORS	(IP_SCAN_V4_NEIGHBORS | IP_SCAN_V6_NEIGHBORS)
-
-typedef struct
-{
-  u8 mode;			/* 0: disable, 1: ip4, 2: ip6, 3: both */
-  u8 scan_interval;		/* neighbor scan interval in minutes */
-  u8 max_proc_time;		/* max processing time per run, in usecs */
-  u8 max_update;		/* max probe/delete operations per run */
-  u8 scan_int_delay;		/* delay in msecs, to resume scan on max */
-  u8 stale_threshold;		/* Threshold in minutes to delete nei entry */
-} ip_neighbor_scan_arg_t;
 
 #define foreach_ip_neighbor_flag                 \
   _(STATIC, 1 << 0, "static", "S")               \
@@ -50,22 +35,23 @@ typedef enum ip_neighbor_flags_t_
 #define _(a,b,c,d) IP_NEIGHBOR_FLAG_##a = b,
   foreach_ip_neighbor_flag
 #undef _
-} __attribute__ ((packed)) ip_neighbor_flags_t;
+} __clib_packed ip_neighbor_flags_t;
 
 typedef struct ip_neighbor_watcher_t_
 {
   u32 ipw_pid;
   u32 ipw_client;
+  int ipw_api_version;
 } ip_neighbor_watcher_t;
 
 extern u8 *format_ip_neighbor_watcher (u8 * s, va_list * args);
 
 typedef struct ip_neighbor_key_t_
 {
-  ip46_address_t ipnk_ip;
-  ip46_type_t ipnk_type;
+  ip_address_t ipnk_ip;
+  u8 __pad[3];
   u32 ipnk_sw_if_index;
-} ip_neighbor_key_t;
+} __clib_packed ip_neighbor_key_t;
 
 /**
  * A representation of an IP neighbour/peer
@@ -110,17 +96,31 @@ extern ip_neighbor_t *ip_neighbor_get (index_t ipni);
 
 typedef struct ip_neighbor_learn_t_
 {
-  ip46_address_t ip;
-  ip46_type_t type;
+  ip_address_t ip;
   mac_address_t mac;
   u32 sw_if_index;
 } ip_neighbor_learn_t;
 
+
+typedef enum ip_neighbor_event_flags_t_
+{
+  IP_NEIGHBOR_EVENT_ADDED = (1 << 0),
+  IP_NEIGHBOR_EVENT_REMOVED = (1 << 1),
+} ip_neighbor_event_flags_t;
+
 typedef struct ip_neighbor_event_t_
 {
   ip_neighbor_watcher_t ipne_watch;
-  index_t ipne_index;
+  ip_neighbor_event_flags_t ipne_flags;
+  ip_neighbor_t ipne_nbr;
 } ip_neighbor_event_t;
+
+extern void ip_neighbor_clone (const ip_neighbor_t * ipn,
+			       ip_neighbor_t * clone);
+
+extern void ip_neighbor_free (ip_neighbor_t * ipn);
+
+
 
 #endif /* __INCLUDE_IP_NEIGHBOR_H__ */
 

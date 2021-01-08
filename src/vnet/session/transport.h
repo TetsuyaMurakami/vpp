@@ -23,6 +23,7 @@
 #define TRANSPORT_PACER_MIN_BURST 	TRANSPORT_PACER_MIN_MSS
 #define TRANSPORT_PACER_MAX_BURST	(43 * TRANSPORT_PACER_MIN_MSS)
 #define TRANSPORT_PACER_MAX_BURST_PKTS	43
+#define TRANSPORT_PACER_BURSTS_PER_RTT	20
 #define TRANSPORT_PACER_MIN_IDLE	100
 #define TRANSPORT_PACER_IDLE_FACTOR	0.05
 
@@ -217,6 +218,7 @@ transport_connection_is_cless (transport_connection_t * tc)
 }
 
 void transport_connection_reschedule (transport_connection_t * tc);
+void transport_fifos_init_ooo (transport_connection_t * tc);
 
 /**
  * Register transport virtual function table.

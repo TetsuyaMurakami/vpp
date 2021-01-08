@@ -24,8 +24,8 @@
 /*
  * The size of the hash table
  */
-#define L2FIB_NUM_BUCKETS (64 * 1024)
-#define L2FIB_MEMORY_SIZE (512<<20)
+#define L2FIB_NUM_BUCKETS (256 * 1024)
+#define L2FIB_MEMORY_SIZE (128<<20)
 
 /* Ager scan interval is 1 minute for aging */
 #define L2FIB_AGE_SCAN_INTERVAL		(60.0)
@@ -45,8 +45,14 @@ typedef struct
   /* hash table */
   BVT (clib_bihash) mac_table;
 
-  /* per swif vector of sequence number for interface based flush of MACs */
-  u8 *swif_seq_num;
+  /* number of buckets in the hash table */
+  uword mac_table_n_buckets;
+
+  /* hash table memory size */
+  uword mac_table_memory_size;
+
+  /* hash table initialized */
+  u8 mac_table_initialized;
 
   /* last event or ager scan duration */
   f64 evt_scan_duration;
@@ -88,19 +94,36 @@ typedef struct
 
 STATIC_ASSERT_SIZEOF (l2fib_entry_key_t, 8);
 
+/**
+ * A combined representation of the sequence number associated
+ * with the interface and the BD.
+ * The BD is in higher bits, the interface in the lower bits, but
+ * the order is not important.
+ *
+ * It's convenient to represent this as an union of two u8s,
+ * but then in the DP one is forced to do short writes, followed
+ * by long reads, which is a sure thing for a stall
+ */
+typedef u16 l2fib_seq_num_t;
 
-typedef struct
+static_always_inline l2fib_seq_num_t
+l2_fib_mk_seq_num (u8 bd_sn, u8 if_sn)
 {
-  union
-  {
-    struct
-    {
-      u8 swif;
-      u8 bd;
-    };
-    u16 as_u16;
-  };
-} l2fib_seq_num_t;
+  return (((u16) bd_sn) << 8) | if_sn;
+}
+
+static_always_inline l2fib_seq_num_t
+l2_fib_update_seq_num (l2fib_seq_num_t sn, u8 if_sn)
+{
+  sn &= 0xff00;
+  sn |= if_sn;
+
+  return (sn);
+}
+
+extern void l2_fib_extract_seq_num (l2fib_seq_num_t sn, u8 * bd_sn,
+				    u8 * if_sn);
+extern u8 *format_l2_fib_seq_num (u8 * s, va_list * a);
 
 /**
  * Flags associated with an L2 Fib Entry
@@ -419,6 +442,8 @@ l2fib_lookup_4 (BVT (clib_bihash) * mac_table,
 
 void l2fib_clear_table (void);
 
+void l2fib_table_init (void);
+
 void
 l2fib_add_entry (const u8 * mac,
 		 u32 bd_index,
@@ -447,21 +472,6 @@ l2fib_table_dump (u32 bd_index, l2fib_entry_key_t ** l2fe_key,
 		  l2fib_entry_result_t ** l2fe_res);
 
 u8 *format_vnet_sw_if_index_name_with_NA (u8 * s, va_list * args);
-
-static_always_inline u8 *
-l2fib_swif_seq_num (u32 sw_if_index)
-{
-  l2fib_main_t *mp = &l2fib_main;
-  return vec_elt_at_index (mp->swif_seq_num, sw_if_index);
-}
-
-static_always_inline u8 *
-l2fib_valid_swif_seq_num (u32 sw_if_index)
-{
-  l2fib_main_t *mp = &l2fib_main;
-  vec_validate (mp->swif_seq_num, sw_if_index);
-  return l2fib_swif_seq_num (sw_if_index);
-}
 
 BVT (clib_bihash) * get_mac_table (void);
 

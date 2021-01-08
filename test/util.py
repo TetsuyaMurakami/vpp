@@ -5,7 +5,6 @@ import ipaddress
 import logging
 import socket
 from socket import AF_INET6
-import six
 import sys
 import os.path
 
@@ -113,7 +112,7 @@ def check_core_path(logger, core_path):
             "   current core pattern is: %s" % corefmt)
 
 
-class NumericConstant(object):
+class NumericConstant:
 
     desc_dict = {}
 
@@ -132,7 +131,7 @@ class NumericConstant(object):
         return ""
 
 
-class Host(object):
+class Host:
     """ Generic test host "connected" to VPPs interface. """
 
     @property
@@ -202,19 +201,6 @@ class Host(object):
         self._ip4 = ip4
         self._ip6 = ip6
         self._ip6_ll = ip6_ll
-
-
-class ForeignAddressFactory(object):
-    count = 0
-    prefix_len = 24
-    net_template = '10.10.10.{}'
-    net = net_template.format(0) + '/' + str(prefix_len)
-
-    def get_ip4(self):
-        if self.count > 255:
-            raise Exception("Network host address exhaustion")
-        self.count += 1
-        return self.net_template.format(self.count)
 
 
 class L4_Conn():

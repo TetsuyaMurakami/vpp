@@ -306,6 +306,7 @@ tcp_bt_track_tx (tcp_connection_t * tc, u32 len)
 
   tail = bt_get_sample (bt, bt->tail);
   if (tail && tail->max_seq == tc->snd_nxt
+      && !(tail->flags & TCP_BTS_IS_SACKED)
       && tail->tx_time == tcp_time_now_us (tc->c_thread_index))
     {
       tail->max_seq += len;
@@ -504,7 +505,10 @@ tcp_bt_walk_samples (tcp_connection_t * tc, tcp_rate_sample_t * rs)
     }
 
   if (cur && seq_lt (cur->min_seq, tc->snd_una))
-    tcp_bt_sample_to_rate_sample (tc, cur, rs);
+    {
+      bt_update_sample (bt, cur, tc->snd_una);
+      tcp_bt_sample_to_rate_sample (tc, cur, rs);
+    }
 }
 
 static void
@@ -599,11 +603,12 @@ tcp_bt_sample_delivery_rate (tcp_connection_t * tc, tcp_rate_sample_t * rs)
   tc->lost += tc->sack_sb.last_lost_bytes;
 
   delivered = tc->bytes_acked + tc->sack_sb.last_sacked_bytes;
+  /* Do not count bytes that were previously sacked again */
+  delivered -= tc->sack_sb.last_bytes_delivered;
   if (!delivered || tc->bt->head == TCP_BTS_INVALID_INDEX)
     return;
 
-  /* Do not count bytes that were previously sacked again */
-  tc->delivered += delivered - tc->sack_sb.last_bytes_delivered;
+  tc->delivered += delivered;
   tc->delivered_time = tcp_time_now_us (tc->c_thread_index);
 
   if (tc->app_limited && tc->delivered > tc->app_limited)
@@ -634,9 +639,9 @@ tcp_bt_flush_samples (tcp_connection_t * tc)
   vec_reset_length (samples);
 
   /* *INDENT-OFF* */
-  pool_foreach (bts, bt->samples, ({
+  pool_foreach (bts, bt->samples)  {
     vec_add1 (samples, bts - bt->samples);
-  }));
+  }
   /* *INDENT-ON* */
 
   vec_foreach (si, samples)

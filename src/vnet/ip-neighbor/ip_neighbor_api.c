@@ -37,13 +37,6 @@ static u16 msg_id_base;
 
 #include <vnet/format_fns.h>
 
-
-static ip46_type_t
-ip46_type_from_af (ip_address_family_t af)
-{
-  return (AF_IP4 == af ? IP46_TYPE_IP4 : IP46_TYPE_IP6);
-}
-
 static vl_api_ip_neighbor_flags_t
 ip_neighbor_flags_encode (ip_neighbor_flags_t f)
 {
@@ -63,19 +56,17 @@ ip_neighbor_encode (vl_api_ip_neighbor_t * api, const ip_neighbor_t * ipn)
   api->sw_if_index = htonl (ipn->ipn_key->ipnk_sw_if_index);
   api->flags = ip_neighbor_flags_encode (ipn->ipn_flags);
 
-  ip_address_encode (&ipn->ipn_key->ipnk_ip,
-		     ipn->ipn_key->ipnk_type, &api->ip_address);
+  ip_address_encode2 (&ipn->ipn_key->ipnk_ip, &api->ip_address);
   mac_address_encode (&ipn->ipn_mac, api->mac_address);
 }
 
 void
-ip_neighbor_handle_event (const ip_neighbor_event_t * ipne)
+ip_neighbor_handle_event (ip_neighbor_event_t * ipne)
 {
-  vl_api_ip_neighbor_event_t *mp;
   vl_api_registration_t *reg;
-  const ip_neighbor_t *ipn;
+  ip_neighbor_t *ipn;
 
-  ipn = ip_neighbor_get (ipne->ipne_index);
+  ipn = &ipne->ipne_nbr;
 
   if (NULL == ipn)
     /* Client can cancel, die, etc. */
@@ -88,15 +79,37 @@ ip_neighbor_handle_event (const ip_neighbor_event_t * ipne)
 
   if (vl_api_can_send_msg (reg))
     {
-      mp = vl_msg_api_alloc (sizeof (*mp));
-      clib_memset (mp, 0, sizeof (*mp));
-      mp->_vl_msg_id = ntohs (VL_API_IP_NEIGHBOR_EVENT + REPLY_MSG_ID_BASE);
-      mp->client_index = ipne->ipne_watch.ipw_client;
-      mp->pid = ipne->ipne_watch.ipw_pid;
+      if (1 == ipne->ipne_watch.ipw_api_version)
+	{
+	  vl_api_ip_neighbor_event_t *mp;
 
-      ip_neighbor_encode (&mp->neighbor, ipn);
+	  mp = vl_msg_api_alloc (sizeof (*mp));
+	  clib_memset (mp, 0, sizeof (*mp));
+	  mp->_vl_msg_id =
+	    ntohs (VL_API_IP_NEIGHBOR_EVENT + REPLY_MSG_ID_BASE);
+	  mp->client_index = ipne->ipne_watch.ipw_client;
+	  mp->pid = ipne->ipne_watch.ipw_pid;
 
-      vl_api_send_msg (reg, (u8 *) mp);
+	  ip_neighbor_encode (&mp->neighbor, ipn);
+
+	  vl_api_send_msg (reg, (u8 *) mp);
+	}
+      else if (2 == ipne->ipne_watch.ipw_api_version)
+	{
+	  vl_api_ip_neighbor_event_v2_t *mp;
+
+	  mp = vl_msg_api_alloc (sizeof (*mp));
+	  clib_memset (mp, 0, sizeof (*mp));
+	  mp->_vl_msg_id =
+	    ntohs (VL_API_IP_NEIGHBOR_EVENT_V2 + REPLY_MSG_ID_BASE);
+	  mp->client_index = ipne->ipne_watch.ipw_client;
+	  mp->pid = ipne->ipne_watch.ipw_pid;
+	  mp->flags = clib_host_to_net_u32 (ipne->ipne_flags);
+
+	  ip_neighbor_encode (&mp->neighbor, ipn);
+
+	  vl_api_send_msg (reg, (u8 *) mp);
+	}
     }
   else
     {
@@ -107,12 +120,14 @@ ip_neighbor_handle_event (const ip_neighbor_event_t * ipne)
        */
       if (vlib_time_now (vlib_get_main ()) > last_time + 10.0)
 	{
-	  clib_warning ("ip6 nd event for %U to pid %d: queue stuffed!",
-			format_ip46_address, &ipn->ipn_key->ipnk_ip,
-			IP46_TYPE_ANY, ipne->ipne_watch.ipw_pid);
+	  clib_warning ("neighbor event for %U to pid %d: queue stuffed!",
+			format_ip_address, &ipn->ipn_key->ipnk_ip,
+			ipne->ipne_watch.ipw_pid);
 	  last_time = vlib_time_now (vlib_get_main ());
 	}
     }
+
+  ip_neighbor_free (ipn);
 }
 
 typedef struct ip_neighbor_dump_ctx_t_
@@ -167,10 +182,7 @@ vl_api_ip_neighbor_dump_t_handler (vl_api_ip_neighbor_dump_t * mp)
   };
 
   // walk all neighbours on all interfaces
-  ip_neighbor_walk ((af == AF_IP4 ?
-		     IP46_TYPE_IP4 :
-		     IP46_TYPE_IP6),
-		    sw_if_index, send_ip_neighbor_details, &ctx);
+  ip_neighbor_walk (af, sw_if_index, send_ip_neighbor_details, &ctx);
 }
 
 static ip_neighbor_flags_t
@@ -193,15 +205,14 @@ vl_api_ip_neighbor_add_del_t_handler (vl_api_ip_neighbor_add_del_t * mp,
   vl_api_ip_neighbor_add_del_reply_t *rmp;
   ip_neighbor_flags_t flags;
   u32 stats_index = ~0;
-  ip46_address_t ip = ip46_address_initializer;
+  ip_address_t ip = ip_address_initializer;
   mac_address_t mac;
-  ip46_type_t type;
   int rv;
 
   VALIDATE_SW_IF_INDEX ((&mp->neighbor));
 
   flags = ip_neighbor_flags_decode (mp->neighbor.flags);
-  type = ip_address_decode (&mp->neighbor.ip_address, &ip);
+  ip_address_decode2 (&mp->neighbor.ip_address, &ip);
   mac_address_decode (mp->neighbor.mac_address, &mac);
 
   /* must be static or dynamic, default to dynamic */
@@ -215,11 +226,11 @@ vl_api_ip_neighbor_add_del_t_handler (vl_api_ip_neighbor_add_del_t * mp,
    * will come of adding bogus entries.
    */
   if (mp->is_add)
-    rv = ip_neighbor_add (&ip, type, &mac,
+    rv = ip_neighbor_add (&ip, &mac,
 			  ntohl (mp->neighbor.sw_if_index),
 			  flags, &stats_index);
   else
-    rv = ip_neighbor_del (&ip, type, ntohl (mp->neighbor.sw_if_index));
+    rv = ip_neighbor_del (&ip, ntohl (mp->neighbor.sw_if_index));
 
   BAD_SW_IF_INDEX_LABEL;
 
@@ -236,26 +247,53 @@ vl_api_want_ip_neighbor_events_t_handler (vl_api_want_ip_neighbor_events_t *
 					  mp)
 {
   vl_api_want_ip_neighbor_events_reply_t *rmp;
-  ip46_address_t ip;
-  ip46_type_t itype;
+  ip_address_t ip;
   int rv = 0;
 
   if (mp->sw_if_index != ~0)
     VALIDATE_SW_IF_INDEX (mp);
-  itype = ip_address_decode (&mp->ip, &ip);
+  ip_address_decode2 (&mp->ip, &ip);
 
   ip_neighbor_watcher_t watch = {
     .ipw_client = mp->client_index,
     .ipw_pid = mp->pid,
+    .ipw_api_version = 1,
   };
 
   if (mp->enable)
-    ip_neighbor_watch (&ip, itype, ntohl (mp->sw_if_index), &watch);
+    ip_neighbor_watch (&ip, ntohl (mp->sw_if_index), &watch);
   else
-    ip_neighbor_unwatch (&ip, itype, ntohl (mp->sw_if_index), &watch);
+    ip_neighbor_unwatch (&ip, ntohl (mp->sw_if_index), &watch);
 
   BAD_SW_IF_INDEX_LABEL;
   REPLY_MACRO (VL_API_WANT_IP_NEIGHBOR_EVENTS_REPLY);
+}
+
+static void
+  vl_api_want_ip_neighbor_events_v2_t_handler
+  (vl_api_want_ip_neighbor_events_v2_t * mp)
+{
+  vl_api_want_ip_neighbor_events_reply_t *rmp;
+  ip_address_t ip;
+  int rv = 0;
+
+  if (mp->sw_if_index != ~0)
+    VALIDATE_SW_IF_INDEX (mp);
+  ip_address_decode2 (&mp->ip, &ip);
+
+  ip_neighbor_watcher_t watch = {
+    .ipw_client = mp->client_index,
+    .ipw_pid = mp->pid,
+    .ipw_api_version = 2,
+  };
+
+  if (mp->enable)
+    ip_neighbor_watch (&ip, ntohl (mp->sw_if_index), &watch);
+  else
+    ip_neighbor_unwatch (&ip, ntohl (mp->sw_if_index), &watch);
+
+  BAD_SW_IF_INDEX_LABEL;
+  REPLY_MACRO (VL_API_WANT_IP_NEIGHBOR_EVENTS_V2_REPLY);
 }
 
 static void
@@ -268,7 +306,7 @@ vl_api_ip_neighbor_config_t_handler (vl_api_ip_neighbor_config_t * mp)
   rv = ip_address_family_decode (mp->af, &af);
 
   if (!rv)
-    rv = ip_neighbor_config (ip46_type_from_af (af),
+    rv = ip_neighbor_config (af,
 			     ntohl (mp->max_number),
 			     ntohl (mp->max_age), mp->recycle);
 
@@ -282,8 +320,8 @@ vl_api_ip_neighbor_replace_begin_t_handler (vl_api_ip_neighbor_replace_begin_t
   vl_api_ip_neighbor_replace_begin_reply_t *rmp;
   int rv = 0;
 
-  ip_neighbor_mark (IP46_TYPE_IP4);
-  ip_neighbor_mark (IP46_TYPE_IP6);
+  ip_neighbor_mark (AF_IP4);
+  ip_neighbor_mark (AF_IP6);
 
   REPLY_MACRO (VL_API_IP_NEIGHBOR_REPLACE_BEGIN_REPLY);
 }
@@ -295,8 +333,8 @@ vl_api_ip_neighbor_replace_end_t_handler (vl_api_ip_neighbor_replace_end_t *
   vl_api_ip_neighbor_replace_end_reply_t *rmp;
   int rv = 0;
 
-  ip_neighbor_sweep (IP46_TYPE_IP4);
-  ip_neighbor_sweep (IP46_TYPE_IP6);
+  ip_neighbor_sweep (AF_IP4);
+  ip_neighbor_sweep (AF_IP6);
 
   REPLY_MACRO (VL_API_IP_NEIGHBOR_REPLACE_END_REPLY);
 }
@@ -314,7 +352,7 @@ vl_api_ip_neighbor_flush_t_handler (vl_api_ip_neighbor_flush_t * mp)
   rv = ip_address_family_decode (mp->af, &af);
 
   if (!rv)
-    ip_neighbor_del_all (ip46_type_from_af (af), ntohl (mp->sw_if_index));
+    ip_neighbor_del_all (af, ntohl (mp->sw_if_index));
 
   BAD_SW_IF_INDEX_LABEL;
   REPLY_MACRO (VL_API_IP_NEIGHBOR_FLUSH_REPLY);

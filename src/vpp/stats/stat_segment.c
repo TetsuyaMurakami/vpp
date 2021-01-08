@@ -22,7 +22,6 @@
 #undef HAVE_MEMFD_CREATE
 #include <vppinfra/linux/syscall.h>
 #include <vpp-api/client/stat_client.h>
-#include <vppinfra/mheap.h>
 
 stat_segment_main_t stat_segment_main;
 
@@ -282,7 +281,8 @@ stat_set_simple_counter (stat_segment_directory_entry_t * ep,
 			 u32 thread_index, u32 index, u64 value)
 {
   ASSERT (ep->data);
-  counter_t *cb = ep->data;
+  counter_t **counters = ep->data;
+  counter_t *cb = counters[thread_index];
   cb[index] = value;
 }
 
@@ -316,33 +316,37 @@ vlib_map_stat_segment_init (void)
   stat_segment_main_t *sm = &stat_segment_main;
   stat_segment_shared_header_t *shared_header;
   void *oldheap;
-  ssize_t memory_size;
+  uword memory_size, sys_page_sz;
   int mfd;
-  char *mem_name = "stat_segment_test";
-  void *memaddr;
+  char *mem_name = "stat segment";
+  void *heap, *memaddr;
 
   memory_size = sm->memory_size;
   if (memory_size == 0)
     memory_size = STAT_SEGMENT_DEFAULT_SIZE;
 
-  /* Create shared memory segment */
-  if ((mfd = memfd_create (mem_name, 0)) < 0)
-    return clib_error_return (0, "stat segment memfd_create failure");
+  if (sm->log2_page_sz == CLIB_MEM_PAGE_SZ_UNKNOWN)
+    sm->log2_page_sz = CLIB_MEM_PAGE_SZ_DEFAULT;
 
+  mfd = clib_mem_vm_create_fd (sm->log2_page_sz, mem_name);
+
+  if (mfd == -1)
+    return clib_error_return (0, "stat segment memory fd failure: %U",
+			      format_clib_error, clib_mem_get_last_error ());
   /* Set size */
   if ((ftruncate (mfd, memory_size)) == -1)
     return clib_error_return (0, "stat segment ftruncate failure");
 
-  if ((memaddr =
-       mmap (NULL, memory_size, PROT_READ | PROT_WRITE, MAP_SHARED, mfd,
-	     0)) == MAP_FAILED)
+  memaddr = clib_mem_vm_map_shared (0, memory_size, mfd, 0, mem_name);
+
+  if (memaddr == CLIB_MEM_VM_MAP_FAILED)
     return clib_error_return (0, "stat segment mmap failure");
 
-  void *heap;
-  heap =
-    create_mspace_with_base (((u8 *) memaddr) + getpagesize (),
-			     memory_size - getpagesize (), 1 /* locked */ );
-  mspace_disable_expand (heap);
+  sys_page_sz = clib_mem_get_page_size ();
+
+  heap = clib_mem_create_heap (((u8 *) memaddr) + sys_page_sz, memory_size
+			       - sys_page_sz, 1 /* locked */ ,
+			       "stat segment");
   sm->heap = heap;
   sm->memfd = mfd;
 
@@ -376,7 +380,7 @@ vlib_map_stat_segment_init (void)
 
   /* Total shared memory size */
   clib_mem_usage_t usage;
-  mheap_usage (sm->heap, &usage);
+  clib_mem_get_heap_usage (sm->heap, &usage);
   sm->directory_vector[STAT_COUNTER_MEM_STATSEG_TOTAL].value =
     usage.bytes_total;
 
@@ -470,7 +474,8 @@ show_stat_segment_command_fn (vlib_main_t * vm,
   if (verbose)
     {
       ASSERT (sm->heap);
-      vlib_cli_output (vm, "%U", format_mheap, sm->heap, 0 /* verbose */ );
+      vlib_cli_output (vm, "%U", format_clib_mem_heap, sm->heap,
+		       0 /* verbose */ );
     }
 
   return 0;
@@ -653,7 +658,7 @@ do_stat_segment_updates (stat_segment_main_t * sm)
 
   /* Stats segment memory heap counter */
   clib_mem_usage_t usage;
-  mheap_usage (sm->heap, &usage);
+  clib_mem_get_heap_usage (sm->heap, &usage);
   sm->directory_vector[STAT_COUNTER_MEM_STATSEG_USED].value =
     usage.bytes_used;
 
@@ -662,10 +667,10 @@ do_stat_segment_updates (stat_segment_main_t * sm)
 
   /* *INDENT-OFF* */
   stat_segment_gauges_pool_t *g;
-  pool_foreach(g, sm->gauges,
-  ({
+  pool_foreach (g, sm->gauges)
+   {
     g->fn(&sm->directory_vector[g->directory_index], g->caller_index);
-  }));
+  }
   /* *INDENT-ON* */
 
   /* Heartbeat, so clients detect we're still here */
@@ -903,6 +908,9 @@ statseg_config (vlib_main_t * vm, unformat_input_t * input)
 	;
       else if (unformat (input, "size %U",
 			 unformat_memory_size, &sm->memory_size))
+	;
+      else if (unformat (input, "page-size %U",
+			 unformat_log2_page_size, &sm->log2_page_sz))
 	;
       else if (unformat (input, "per-node-counters on"))
 	sm->node_counters_enabled = 1;

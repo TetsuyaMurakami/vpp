@@ -1454,15 +1454,16 @@ format_pg_input_trace (u8 * s, va_list * va)
   return s;
 }
 
-static void
+static int
 pg_input_trace (pg_main_t * pg,
 		vlib_node_runtime_t * node, u32 stream_index, u32 next_index,
-		u32 * buffers, u32 n_buffers)
+		u32 * buffers, const u32 n_buffers, const u32 n_trace)
 {
   vlib_main_t *vm = vlib_get_main ();
   u32 *b, n_left;
+  u32 n_trace0 = 0, n_trace1 = 0;
 
-  n_left = n_buffers;
+  n_left = clib_min (n_buffers, n_trace);
   b = buffers;
 
   while (n_left >= 2)
@@ -1479,8 +1480,10 @@ pg_input_trace (pg_main_t * pg,
       b0 = vlib_get_buffer (vm, bi0);
       b1 = vlib_get_buffer (vm, bi1);
 
-      vlib_trace_buffer (vm, node, next_index, b0, /* follow_chain */ 1);
-      vlib_trace_buffer (vm, node, next_index, b1, /* follow_chain */ 1);
+      n_trace0 +=
+	vlib_trace_buffer (vm, node, next_index, b0, /* follow_chain */ 1);
+      n_trace1 +=
+	vlib_trace_buffer (vm, node, next_index, b1, /* follow_chain */ 1);
 
       t0 = vlib_add_trace (vm, node, b0, sizeof (t0[0]));
       t1 = vlib_add_trace (vm, node, b1, sizeof (t1[0]));
@@ -1517,7 +1520,8 @@ pg_input_trace (pg_main_t * pg,
 
       b0 = vlib_get_buffer (vm, bi0);
 
-      vlib_trace_buffer (vm, node, next_index, b0, /* follow_chain */ 1);
+      n_trace0 +=
+	vlib_trace_buffer (vm, node, next_index, b0, /* follow_chain */ 1);
       t0 = vlib_add_trace (vm, node, b0, sizeof (t0[0]));
 
       t0->stream_index = stream_index;
@@ -1528,6 +1532,8 @@ pg_input_trace (pg_main_t * pg,
       clib_memcpy_fast (t0->buffer.pre_data, b0->data,
 			sizeof (t0->buffer.pre_data));
     }
+
+  return n_trace - n_trace0 - n_trace1;
 }
 
 static_always_inline void
@@ -1623,9 +1629,11 @@ pg_generate_packets (vlib_node_runtime_t * node,
   u8 feature_arc_index = fm->device_input_feature_arc_index;
   cm = &fm->feature_config_mains[feature_arc_index];
   u32 current_config_index = ~(u32) 0;
-  pg_interface_t *pi = pool_elt_at_index (pg->interfaces, s->pg_if_index);
+  pg_interface_t *pi;
   int i;
 
+  pi = pool_elt_at_index (pg->interfaces,
+			  pg->if_id_by_sw_if_index[s->sw_if_index[VLIB_RX]]);
   bi0 = s->buffer_indices;
 
   n_packets_in_fifo = pg_stream_fill (pg, s, n_packets_to_generate);
@@ -1712,11 +1720,12 @@ pg_generate_packets (vlib_node_runtime_t * node,
 	}
 
       n_trace = vlib_get_trace_count (vm, node);
-      if (n_trace > 0)
+      if (PREDICT_FALSE (n_trace > 0))
 	{
-	  u32 n = clib_min (n_trace, n_this_frame);
-	  pg_input_trace (pg, node, s - pg->streams, next_index, to_next, n);
-	  vlib_set_trace_count (vm, node, n_trace - n);
+	  n_trace =
+	    pg_input_trace (pg, node, s - pg->streams, next_index, to_next,
+			    n_this_frame, n_trace);
+	  vlib_set_trace_count (vm, node, n_trace);
 	}
       n_packets_to_generate -= n_this_frame;
       n_packets_generated += n_this_frame;
@@ -1799,10 +1808,10 @@ pg_input (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
     worker_index = vlib_get_current_worker_index ();
 
   /* *INDENT-OFF* */
-  clib_bitmap_foreach (i, pg->enabled_streams[worker_index], ({
+  clib_bitmap_foreach (i, pg->enabled_streams[worker_index])  {
     pg_stream_t *s = vec_elt_at_index (pg->streams, i);
     n_packets += pg_input_stream (node, pg, s);
-  }));
+  }
   /* *INDENT-ON* */
 
   return n_packets;
@@ -1822,6 +1831,124 @@ VLIB_REGISTER_NODE (pg_input_node) = {
   .state = VLIB_NODE_STATE_DISABLED,
 };
 /* *INDENT-ON* */
+
+VLIB_NODE_FN (pg_input_mac_filter) (vlib_main_t * vm,
+				    vlib_node_runtime_t * node,
+				    vlib_frame_t * frame)
+{
+  vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b = bufs;
+  u16 nexts[VLIB_FRAME_SIZE], *next;
+  pg_main_t *pg = &pg_main;
+  u32 n_left, *from;
+
+  from = vlib_frame_vector_args (frame);
+  n_left = frame->n_vectors;
+  next = nexts;
+
+  clib_memset_u16 (next, 0, VLIB_FRAME_SIZE);
+
+  vlib_get_buffers (vm, from, bufs, n_left);
+
+  while (n_left)
+    {
+      const ethernet_header_t *eth;
+      pg_interface_t *pi;
+      mac_address_t in;
+
+      pi = pool_elt_at_index
+	(pg->interfaces,
+	 pg->if_id_by_sw_if_index[vnet_buffer (b[0])->sw_if_index[VLIB_RX]]);
+      eth = vlib_buffer_get_current (b[0]);
+
+      mac_address_from_bytes (&in, eth->dst_address);
+
+      if (PREDICT_FALSE (ethernet_address_cast (in.bytes)))
+	{
+	  mac_address_t *allowed;
+
+	  if (0 != vec_len (pi->allowed_mcast_macs))
+	    {
+	      vec_foreach (allowed, pi->allowed_mcast_macs)
+	      {
+		if (0 != mac_address_cmp (allowed, &in))
+		  break;
+	      }
+
+	      if (vec_is_member (allowed, pi->allowed_mcast_macs))
+		vnet_feature_next_u16 (&next[0], b[0]);
+	    }
+	}
+
+      b += 1;
+      next += 1;
+      n_left -= 1;
+    }
+
+  vlib_buffer_enqueue_to_next (vm, node, from, nexts, frame->n_vectors);
+
+  return (frame->n_vectors);
+}
+
+/* *INDENT-OFF* */
+VLIB_REGISTER_NODE (pg_input_mac_filter) = {
+  .name = "pg-input-mac-filter",
+  .vector_size = sizeof (u32),
+  .format_trace = format_pg_input_trace,
+  .n_next_nodes = 1,
+  .next_nodes = {
+    [0] = "error-drop",
+  },
+};
+VNET_FEATURE_INIT (pg_input_mac_filter_feat, static) = {
+  .arc_name = "device-input",
+  .node_name = "pg-input-mac-filter",
+};
+/* *INDENT-ON* */
+
+static clib_error_t *
+pg_input_mac_filter_cfg (vlib_main_t * vm,
+			 unformat_input_t * input, vlib_cli_command_t * cmd)
+{
+  unformat_input_t _line_input, *line_input = &_line_input;
+  u32 sw_if_index = ~0;
+  int is_enable = 1;
+
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "%U",
+		    unformat_vnet_sw_interface,
+		    vnet_get_main (), &sw_if_index))
+	;
+      else if (unformat (line_input, "%U",
+			 unformat_vlib_enable_disable, &is_enable))
+	;
+      else
+	return clib_error_create ("unknown input `%U'",
+				  format_unformat_error, line_input);
+    }
+  unformat_free (line_input);
+
+  if (~0 == sw_if_index)
+    return clib_error_create ("specify interface");
+
+  vnet_feature_enable_disable ("device-input",
+			       "pg-input-mac-filter",
+			       sw_if_index, is_enable, 0, 0);
+
+  return NULL;
+}
+
+/* *INDENT-OFF* */
+VLIB_CLI_COMMAND (enable_streams_cli, static) = {
+  .path = "packet-generator mac-filter",
+  .short_help = "packet-generator mac-filter <INTERFACE> <on|off>",
+  .function = pg_input_mac_filter_cfg,
+};
+/* *INDENT-ON* */
+
 
 /*
  * fd.io coding-style-patch-verification: ON

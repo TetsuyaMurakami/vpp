@@ -24,7 +24,6 @@
 
 #include <vnet/ip/ip.h>
 #include <vlib/vlib.h>
-#include <vnet/pg/pg.h>
 #include <vnet/udp/udp.h>
 #include <vnet/tcp/tcp.h>
 #include <vnet/ip/punt.h>
@@ -870,7 +869,7 @@ punt_config (vlib_main_t * vm, unformat_input_t * input)
   clib_file_t template = { 0 };
   template.read_function = punt_socket_read_ready;
   template.file_descriptor = pm->socket_fd;
-  template.description = format (0, "%s", socket_path);
+  template.description = format (0, "punt socket %s", socket_path);
   pm->clib_file_index = clib_file_add (fm, &template);
 
   pm->is_configured = true;

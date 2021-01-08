@@ -176,6 +176,7 @@ list(APPEND VNET_SOURCES
   l2/l2_flood.c
   l2/l2_fwd.c
   l2/l2_input.c
+  l2/l2_input_node.c
   l2/l2_input_vtr.c
   l2/l2_learn.c
   l2/l2_output.c
@@ -196,7 +197,7 @@ list(APPEND VNET_MULTIARCH_SOURCES
   l2/l2_patch.c
   l2/l2_in_out_feat_arc.c
   l2/l2_input_classify.c
-  l2/l2_input.c
+  l2/l2_input_node.c
   l2/l2_output_classify.c
   l2/l2_flood.c
   l2/l2_uu_fwd.c
@@ -322,29 +323,6 @@ list(APPEND VNET_MULTIARCH_SOURCES vxlan/decap.c)
 list(APPEND VNET_API_FILES vxlan/vxlan.api)
 
 ##############################################################################
-# Layer 2 / Geneve
-##############################################################################
-list(APPEND VNET_SOURCES
-  geneve/geneve.c
-  geneve/encap.c
-  geneve/decap.c
-  geneve/geneve_api.c
-)
-
-list(APPEND VNET_MULTIARCH_SOURCES
-  geneve/encap.c
-  geneve/decap.c
-)
-
-list(APPEND VNET_HEADERS
-  geneve/geneve.h
-  geneve/geneve_packet.h
-  geneve/geneve_error.def
-)
-
-list(APPEND VNET_API_FILES geneve/geneve.api)
-
-##############################################################################
 # Layer 2 / Bonding
 ##############################################################################
 list(APPEND VNET_SOURCES
@@ -360,24 +338,6 @@ list(APPEND VNET_HEADERS
 
 list(APPEND VNET_MULTIARCH_SOURCES bonding/node.c bonding/device.c)
 list(APPEND VNET_API_FILES bonding/bond.api)
-
-##############################################################################
-# Layer 2 / LLDP
-##############################################################################
-list(APPEND VNET_SOURCES
-  lldp/lldp_input.c
-  lldp/lldp_node.c
-  lldp/lldp_output.c
-  lldp/lldp_cli.c
-  lldp/lldp_api.c
-)
-
-list(APPEND VNET_HEADERS
-  lldp/lldp_protocol.h
-  lldp/lldp.h
-)
-
-list(APPEND VNET_API_FILES lldp/lldp.api)
 
 ##############################################################################
 # Layer 2/3 "classify"
@@ -446,6 +406,7 @@ list(APPEND VNET_SOURCES
   ip/reass/ip6_sv_reass.c
   ip/ip_api.c
   ip/ip_checksum.c
+  ip/ip_container_proxy.c
   ip/ip_frag.c
   ip/ip.c
   ip/ip_interface.c
@@ -484,14 +445,18 @@ list(APPEND VNET_HEADERS
   ip/ip4_error.h
   ip/ip4.h
   ip/ip4_mtrie.h
+  ip/ip4_inlines.h
   ip/ip4_packet.h
   ip/ip46_address.h
   ip/ip6_error.h
   ip/ip6.h
   ip/ip6_hop_by_hop.h
   ip/ip6_hop_by_hop_packet.h
+  ip/ip6_inlines.h
   ip/ip6_packet.h
   ip/ip.h
+  ip/ip_container_proxy.h
+  ip/ip_flow_hash.h
   ip/ip_table.h
   ip/ip_interface.h
   ip/ip_packet.h
@@ -568,6 +533,7 @@ list(APPEND VNET_SOURCES
   crypto/crypto.c
   crypto/format.c
   crypto/node.c
+  crypto/crypto_api.c
 )
 
 list(APPEND VNET_HEADERS
@@ -575,6 +541,8 @@ list(APPEND VNET_HEADERS
 )
 
 list(APPEND VNET_MULTIARCH_SOURCES crypto/node.c)
+
+list(APPEND VNET_API_FILES crypto/crypto.api)
 
 ##############################################################################
 # Layer 3 protocol: IPSec
@@ -660,6 +628,7 @@ list(APPEND VNET_SOURCES
   tcp/tcp_cubic.c
   tcp/tcp_debug.c
   tcp/tcp_sack.c
+  tcp/tcp_timer.c
   tcp/tcp.c
 )
 
@@ -708,6 +677,8 @@ list(APPEND VNET_HEADERS
   udp/udp_error.def
   udp/udp.h
   udp/udp_packet.h
+  udp/udp_inlines.h
+  udp/udp_local.h
 )
 
 list(APPEND VNET_API_FILES udp/udp.api)
@@ -775,29 +746,6 @@ list(APPEND VNET_HEADERS
   tunnel/tunnel.h
   tunnel/tunnel_dp.h
 )
-
-##############################################################################
-# Tunnel protocol: l2tpv3
-##############################################################################
-list(APPEND VNET_SOURCES
-  l2tp/l2tp.c
-  l2tp/encap.c
-  l2tp/decap.c
-  l2tp/pg.c
-  l2tp/l2tp_api.c
-)
-
-list(APPEND VNET_MULTIARCH_SOURCES
-  l2tp/encap.c
-  l2tp/decap.c
-)
-
-list(APPEND VNET_HEADERS
-  l2tp/l2tp.h
-  l2tp/packet.h
-)
-
-list(APPEND VNET_API_FILES l2tp/l2tp.api)
 
 ##############################################################################
 # Tunnel protocol: gre+mpls
@@ -879,64 +827,6 @@ list(APPEND VNET_HEADERS
 list(APPEND VNET_API_FILES vxlan-gpe/vxlan_gpe.api)
 
 ##############################################################################
-# LISP control plane: lisp-cp
-##############################################################################
-
-list(APPEND VNET_SOURCES
-  lisp-cp/lisp_types.c
-  lisp-cp/lisp_cp_dpo.c
-  lisp-cp/control.c
-  lisp-cp/gid_dictionary.c
-  lisp-cp/lisp_msg_serdes.c
-  lisp-cp/packets.c
-  lisp-cp/one_cli.c
-  lisp-cp/lisp_cli.c
-  lisp-cp/one_api.c
-  lisp-cp/lisp_api.c
-  lisp-cp/lisp_types_api.c
-)
-
-list(APPEND VNET_HEADERS
-  lisp-cp/lisp_types.h
-  lisp-cp/packets.h
-  lisp-cp/gid_dictionary.h
-  lisp-cp/lisp_cp_messages.h
-  lisp-cp/lisp_msg_serdes.h
-  lisp-cp/control.h
-  lisp-cp/lisp_types_api.h
-)
-
-list(APPEND VNET_API_FILES lisp-cp/lisp_types.api)
-list(APPEND VNET_API_FILES lisp-cp/lisp.api)
-list(APPEND VNET_API_FILES lisp-cp/one.api)
-
-##############################################################################
-# Tunnel protocol: lisp-gpe
-##############################################################################
-
-list(APPEND VNET_SOURCES
-  lisp-gpe/lisp_gpe.c
-  lisp-gpe/lisp_gpe_sub_interface.c
-  lisp-gpe/lisp_gpe_adjacency.c
-  lisp-gpe/lisp_gpe_tunnel.c
-  lisp-gpe/lisp_gpe_fwd_entry.c
-  lisp-gpe/lisp_gpe_tenant.c
-  lisp-gpe/interface.c
-  lisp-gpe/decap.c
-  lisp-gpe/lisp_gpe_api.c
-)
-
-list(APPEND VNET_HEADERS
-  lisp-gpe/lisp_gpe.h
-  lisp-gpe/lisp_gpe_fwd_entry.h
-  lisp-gpe/lisp_gpe_tenant.h
-  lisp-gpe/lisp_gpe_packet.h
-  lisp-gpe/lisp_gpe_error.def
-)
-
-list(APPEND VNET_API_FILES lisp-gpe/lisp_gpe.api)
-
-##############################################################################
 # ipv6 segment routing
 ##############################################################################
 
@@ -974,7 +864,6 @@ list(APPEND VNET_HEADERS
 
 list(APPEND VNET_API_FILES
   srmpls/sr_mpls.api
-  srv6/sr_types.api
 )
 
 ##############################################################################
@@ -1102,14 +991,18 @@ list(APPEND VNET_SOURCES
   devices/virtio/virtio_api.c
   devices/virtio/virtio_pci_legacy.c
   devices/virtio/virtio_pci_modern.c
+  devices/virtio/virtio_process.c
   devices/virtio/virtio_types_api.c
 )
 
 list(APPEND VNET_HEADERS
   devices/virtio/pci.h
   devices/virtio/virtio.h
+  devices/virtio/virtio_buffering.h
+  devices/virtio/virtio_std.h
   devices/virtio/virtio_pci_legacy.h
   devices/virtio/virtio_pci_modern.h
+  devices/virtio/vhost_std.h
   devices/virtio/vhost_user.h
   devices/virtio/virtio_types_api.h
 )
@@ -1142,7 +1035,9 @@ list(APPEND VNET_HEADERS
   devices/tap/tap.h
 )
 
-list(APPEND VNET_API_FILES devices/tap/tapv2.api)
+list(APPEND VNET_API_FILES
+  devices/tap/tapv2.api
+)
 
 ##############################################################################
 # tap interface (with virtio backend)
@@ -1300,6 +1195,7 @@ list(APPEND VNET_SOURCES
   fib/fib_path_list.c
   fib/fib_path.c
   fib/fib_path_ext.c
+  fib/fib_sas.c
   fib/fib_source.c
   fib/fib_urpf_list.c
   fib/fib_attached_export.c
@@ -1318,6 +1214,7 @@ list(APPEND VNET_HEADERS
   fib/fib_node_list.h
   fib/fib_entry.h
   fib/fib_entry_delegate.h
+  fib/fib_sas.h
   fib/fib_source.h
 )
 
@@ -1602,6 +1499,13 @@ add_vpp_library(vnet
 add_vpp_library (vatclient
   SOURCES ip/ip_types_api.c
   DEPENDS api_headers
+)
+
+##############################################################################
+# VAT2 plugins
+##############################################################################
+add_vpp_test_library(vnet
+  ${VNET_API_FILES}
 )
 
 ##############################################################################

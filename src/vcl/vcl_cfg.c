@@ -34,7 +34,6 @@ vppcom_cfg_init (vppcom_cfg_t * vcl_cfg)
 
   vcl_cfg->heapsize = (256ULL << 20);
   vcl_cfg->max_workers = 16;
-  vcl_cfg->vpp_api_q_length = 1024;
   vcl_cfg->segment_baseva = HIGH_SEGMENT_BASEVA;
   vcl_cfg->segment_size = (256 << 20);
   vcl_cfg->add_segment_size = (128 << 20);
@@ -230,7 +229,7 @@ vppcom_cfg_read_file (char *conf_fname)
   unformat_input_t _line_input, *line_input = &_line_input;
   u8 vc_cfg_input = 0;
   struct stat s;
-  u32 uid, gid, q_len;
+  u32 uid, gid;
 
   fd = open (conf_fname, O_RDONLY);
   if (fd < 0)
@@ -282,36 +281,19 @@ vppcom_cfg_read_file (char *conf_fname)
 	      VCFG_DBG (0, "VCL<%d>: configured max-workers %u", getpid (),
 			vcl_cfg->max_workers);
 	    }
-	  else if (unformat (line_input, "api-prefix %s",
-			     &vcl_cfg->vpp_api_chroot))
-	    {
-	      vec_terminate_c_string (vcl_cfg->vpp_api_chroot);
-	      VCFG_DBG (0, "VCL<%d>: configured api-prefix (%s) ", getpid (),
-			vcl_cfg->vpp_api_chroot);
-	    }
 	  else if (unformat (line_input, "api-socket-name %s",
-			     &vcl_cfg->vpp_api_socket_name))
+			     &vcl_cfg->vpp_bapi_socket_name))
 	    {
-	      vec_terminate_c_string (vcl_cfg->vpp_api_socket_name);
+	      vec_terminate_c_string (vcl_cfg->vpp_bapi_socket_name);
 	      VCFG_DBG (0, "VCL<%d>: configured api-socket-name (%s)",
-			getpid (), vcl_cfg->vpp_api_socket_name);
+			getpid (), vcl_cfg->vpp_bapi_socket_name);
 	    }
-	  else if (unformat (line_input, "vpp-api-q-length %d", &q_len))
+	  else if (unformat (line_input, "app-socket-api %s",
+			     &vcl_cfg->vpp_app_socket_api))
 	    {
-	      if (q_len < vcl_cfg->vpp_api_q_length)
-		{
-		  fprintf (stderr,
-			   "VCL<%d>: ERROR: configured vpp-api-q-length "
-			   "(%u) is too small! Using default: %u ", getpid (),
-			   q_len, vcl_cfg->vpp_api_q_length);
-		}
-	      else
-		{
-		  vcl_cfg->vpp_api_q_length = q_len;
-
-		  VCFG_DBG (0, "VCL<%d>: configured vpp-api-q-length %u",
-			    getpid (), vcl_cfg->vpp_api_q_length);
-		}
+	      vec_terminate_c_string (vcl_cfg->vpp_app_socket_api);
+	      VCFG_DBG (0, "VCL<%d>: configured app-socket-api (%s)",
+			getpid (), vcl_cfg->vpp_app_socket_api);
 	    }
 	  else if (unformat (line_input, "uid %d", &uid))
 	    {
@@ -473,7 +455,7 @@ vppcom_cfg_read_file (char *conf_fname)
 	  else if (unformat (line_input, "namespace-id %v",
 			     &vcl_cfg->namespace_id))
 	    {
-	      u32 max_nsid_vec_len = vcl_max_nsid_len ();
+	      u32 max_nsid_vec_len = vcl_bapi_max_nsid_len ();
 	      u32 nsid_vec_len = vec_len (vcl_cfg->namespace_id);
 	      if (nsid_vec_len > max_nsid_vec_len)
 		{
@@ -564,14 +546,6 @@ vppcom_cfg (vppcom_cfg_t * vcl_cfg)
 
   /* Regrab cfg after heap initialization */
   vcl_cfg = &vcm->cfg;
-  env_var_str = getenv (VPPCOM_ENV_API_PREFIX);
-  if (env_var_str)
-    {
-      vcl_cfg->vpp_api_chroot = format (0, "%s", env_var_str);
-      vec_terminate_c_string (vcl_cfg->vpp_api_chroot);
-      VCFG_DBG (0, "VCL<%d>: configured api prefix (%s) from "
-		VPPCOM_ENV_API_PREFIX "!", getpid (), env_var_str);
-    }
   env_var_str = getenv (VPPCOM_ENV_APP_NAMESPACE_ID);
   if (env_var_str)
     {
@@ -634,9 +608,16 @@ vppcom_cfg (vppcom_cfg_t * vcl_cfg)
   env_var_str = getenv (VPPCOM_ENV_VPP_API_SOCKET);
   if (env_var_str)
     {
-      vcm->cfg.vpp_api_socket_name = format (0, "%s%c", env_var_str, 0);
+      vcm->cfg.vpp_bapi_socket_name = format (0, "%s%c", env_var_str, 0);
       VCFG_DBG (0, "VCL<%d>: configured api-socket-name (%s)", getpid (),
-		vcl_cfg->vpp_api_socket_name);
+		vcl_cfg->vpp_bapi_socket_name);
+    }
+  env_var_str = getenv (VPPCOM_ENV_VPP_SAPI_SOCKET);
+  if (env_var_str)
+    {
+      vcm->cfg.vpp_app_socket_api = format (0, "%s%c", env_var_str, 0);
+      VCFG_DBG (0, "VCL<%d>: configured app-socket-api (%s)", getpid (),
+		vcl_cfg->vpp_app_socket_api);
     }
 }
 

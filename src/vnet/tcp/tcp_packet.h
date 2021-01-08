@@ -172,6 +172,7 @@ typedef struct
 #define TCP_MAX_WND_SCALE               14	/* See RFC 1323 */
 #define TCP_OPTS_ALIGN                  4
 #define TCP_OPTS_MAX_SACK_BLOCKS        3
+#define TCP_MAX_GSO_SZ 			65536
 
 /* Modulo arithmetic for TCP sequence numbers */
 #define seq_lt(_s1, _s2) ((i32)((_s1)-(_s2)) < 0)
@@ -369,14 +370,10 @@ tcp_options_write (u8 * data, tcp_options_t * opts)
 	}
     }
 
-  /* Terminate TCP options */
-  if (opts_len % 4)
-    {
-      *data++ = TCP_OPTION_EOL;
-      opts_len += TCP_OPTION_LEN_EOL;
-    }
-
-  /* Pad with zeroes to a u32 boundary */
+  /* Terminate TCP options by padding with NOPs to a u32 boundary. Avoid using
+   * EOL because, it seems, it can break peers with broken option parsers that
+   * rely on options ending on a u32 boundary.
+   */
   while (opts_len % 4)
     {
       *data++ = TCP_OPTION_NOOP;

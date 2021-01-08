@@ -17,6 +17,8 @@
 #include <plugins/gbp/gbp_bridge_domain.h>
 #include <plugins/gbp/gbp_route_domain.h>
 
+#include <vnet/ip/ip.h>
+
 #define foreach_gbp_itf_mode  \
   _(L2, "l2")                 \
   _(L3, "L3")
@@ -539,10 +541,10 @@ gbp_itf_show (vlib_main_t * vm,
   vlib_cli_output (vm, "Interfaces:");
 
   /* *INDENT-OFF* */
-  pool_foreach_index (gii, gbp_itf_pool,
-  ({
+  pool_foreach_index (gii, gbp_itf_pool)
+   {
     vlib_cli_output (vm, "  [%d] %U", gii, format_gbp_itf, gii);
-  }));
+  }
   /* *INDENT-ON* */
 
   return (NULL);

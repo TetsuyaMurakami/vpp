@@ -131,13 +131,13 @@ quic_app_cert_key_pair_delete_callback (app_cert_key_pair_t * ckpair)
   for (i = 0; i < num_threads; i++)
     {
       /* *INDENT-OFF* */
-      pool_foreach (crctx, qm->wrk_ctx[i].crypto_ctx_pool, ({
+      pool_foreach (crctx, qm->wrk_ctx[i].crypto_ctx_pool)  {
 	if (crctx->ckpair_index == ckpair->cert_key_index)
 	  {
 	    quic_crypto_context_make_key_from_crctx (&kv, crctx);
 	    clib_bihash_add_del_24_8 (&qm->wrk_ctx[i].crypto_context_hash, &kv, 0 /* is_add */ );
 	  }
-      }));
+      }
       /* *INDENT-ON* */
     }
   return 0;
@@ -179,9 +179,9 @@ quic_list_crypto_context_command_fn (vlib_main_t * vm,
   for (i = 0; i < num_threads; i++)
     {
       /* *INDENT-OFF* */
-      pool_foreach (crctx, qm->wrk_ctx[i].crypto_ctx_pool, ({
+      pool_foreach (crctx, qm->wrk_ctx[i].crypto_ctx_pool)  {
 	vlib_cli_output (vm, "[%d][Q]%U", i, format_crypto_context, crctx);
-      }));
+      }
       /* *INDENT-ON* */
     }
   return 0;
@@ -1543,7 +1543,8 @@ format_quic_ctx (u8 * s, va_list * args)
 		ctx->parent_app_wrk_id);
 
   if (verbose == 1)
-    s = format (s, "%-50s%-15d", str, ctx->conn_state);
+    s = format (s, "%-" SESSION_CLI_ID_LEN "s%-" SESSION_CLI_STATE_LEN "d",
+		str, ctx->conn_state);
   else
     s = format (s, "%s\n", str);
   vec_free (str);
@@ -2545,18 +2546,29 @@ quic_plugin_crypto_command_fn (vlib_main_t * vm,
 			       unformat_input_t * input,
 			       vlib_cli_command_t * cmd)
 {
+  unformat_input_t _line_input, *line_input = &_line_input;
   quic_main_t *qm = &quic_main;
-  if (unformat_check_input (input) == UNFORMAT_END_OF_INPUT)
-    return clib_error_return (0, "unknown input '%U'",
-			      format_unformat_error, input);
-  if (unformat (input, "vpp"))
-    qm->default_crypto_engine = CRYPTO_ENGINE_VPP;
-  else if (unformat (input, "picotls"))
-    qm->default_crypto_engine = CRYPTO_ENGINE_PICOTLS;
-  else
-    return clib_error_return (0, "unknown input '%U'",
-			      format_unformat_error, input);
-  return 0;
+  clib_error_t *e = 0;
+
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "vpp"))
+	qm->default_crypto_engine = CRYPTO_ENGINE_VPP;
+      else if (unformat (line_input, "picotls"))
+	qm->default_crypto_engine = CRYPTO_ENGINE_PICOTLS;
+      else
+	{
+	  e = clib_error_return (0, "unknown input '%U'",
+				 format_unformat_error, line_input);
+	  goto done;
+	}
+    }
+done:
+  unformat_free (line_input);
+  return e;
 }
 
 u64 quic_fifosize = 0;
@@ -2635,8 +2647,8 @@ quic_show_aggregated_stats (vlib_main_t * vm)
   for (i = 0; i < num_workers + 1; i++)
     {
       /* *INDENT-OFF* */
-      pool_foreach (ctx, qm->ctx_pool[i],
-      ({
+      pool_foreach (ctx, qm->ctx_pool[i])
+       {
 	if (quic_ctx_is_conn (ctx) && ctx->conn)
 	  {
 	    quicly_get_stats (ctx->conn, &st);
@@ -2653,7 +2665,7 @@ quic_show_aggregated_stats (vlib_main_t * vm)
 	  }
 	else if (quic_ctx_is_stream (ctx))
 	  nstream++;
-      }));
+      }
       /* *INDENT-ON* */
     }
   vlib_cli_output (vm, "-------- Connections --------");
@@ -2810,15 +2822,15 @@ quic_show_connections_command_fn (vlib_main_t * vm,
   for (int i = 0; i < num_workers + 1; i++)
     {
       /* *INDENT-OFF* */
-      pool_foreach (ctx, qm->ctx_pool[i],
-      ({
+      pool_foreach (ctx, qm->ctx_pool[i])
+       {
         if (quic_ctx_is_stream (ctx) && show_stream)
           vlib_cli_output (vm, "%U", quic_format_stream_ctx, ctx);
         else if (quic_ctx_is_listener (ctx) && show_listeners)
           vlib_cli_output (vm, "%U", quic_format_listener_ctx, ctx);
 	else if (quic_ctx_is_conn (ctx) && show_conn)
           vlib_cli_output (vm, "%U", quic_format_connection_ctx, ctx);
-      }));
+      }
       /* *INDENT-ON* */
     }
 
@@ -2869,22 +2881,29 @@ VLIB_PLUGIN_REGISTER () =
 static clib_error_t *
 quic_config_fn (vlib_main_t * vm, unformat_input_t * input)
 {
+  unformat_input_t _line_input, *line_input = &_line_input;
   quic_main_t *qm = &quic_main;
+  clib_error_t *error = 0;
   uword tmp;
   u32 i;
 
   qm->udp_fifo_size = QUIC_DEFAULT_FIFO_SIZE;
   qm->udp_fifo_prealloc = 0;
   qm->connection_timeout = QUIC_DEFAULT_CONN_TIMEOUT;
-  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
       if (unformat (input, "fifo-size %U", unformat_memory_size, &tmp))
 	{
 	  if (tmp >= 0x100000000ULL)
 	    {
-	      return clib_error_return (0,
-					"fifo-size %llu (0x%llx) too large",
-					tmp, tmp);
+	      error = clib_error_return (0,
+					 "fifo-size %llu (0x%llx) too large",
+					 tmp, tmp);
+	      goto done;
 	    }
 	  qm->udp_fifo_size = tmp;
 	}
@@ -2893,11 +2912,15 @@ quic_config_fn (vlib_main_t * vm, unformat_input_t * input)
       else if (unformat (input, "fifo-prealloc %u", &i))
 	qm->udp_fifo_prealloc = i;
       else
-	return clib_error_return (0, "unknown input '%U'",
-				  format_unformat_error, input);
+	{
+	  error = clib_error_return (0, "unknown input '%U'",
+				     format_unformat_error, line_input);
+	  goto done;
+	}
     }
-
-  return 0;
+done:
+  unformat_free (line_input);
+  return error;
 }
 
 VLIB_EARLY_CONFIG_FUNCTION (quic_config_fn, "quic");

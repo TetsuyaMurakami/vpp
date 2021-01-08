@@ -42,14 +42,14 @@ format_gso_trace (u8 * s, va_list * args)
 
   if (t->flags & VNET_BUFFER_F_GSO)
     {
-      s = format (s, "gso_sz %d gso_l4_hdr_sz %d %U",
+      s = format (s, "gso_sz %d gso_l4_hdr_sz %d\n%U",
 		  t->gso_size, t->gso_l4_hdr_sz, format_generic_header_offset,
 		  &t->gho);
     }
   else
     {
       s =
-	format (s, "non-gso buffer %U", format_generic_header_offset,
+	format (s, "non-gso buffer\n%U", format_generic_header_offset,
 		&t->gho);
     }
 
@@ -97,7 +97,6 @@ tso_segment_ipip_tunnel_fixup (vlib_main_t * vm,
       i++;
     }
   return n_tx_bytes;
-
 }
 
 static_always_inline void

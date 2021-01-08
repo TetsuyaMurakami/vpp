@@ -188,9 +188,8 @@ format_tcp_vars (u8 * s, va_list * args)
   s = format (s, " index: %u cfg: %U flags: %U timers: %U\n", tc->c_c_index,
 	      format_tcp_cfg_flags, tc, format_tcp_connection_flags, tc,
 	      format_tcp_timers, tc);
-  s = format (s, " snd_una %u snd_nxt %u snd_una_max %u",
-	      tc->snd_una - tc->iss, tc->snd_nxt - tc->iss,
-	      tc->snd_una_max - tc->iss);
+  s = format (s, " snd_una %u snd_nxt %u", tc->snd_una - tc->iss,
+	      tc->snd_nxt - tc->iss);
   s = format (s, " rcv_nxt %u rcv_las %u\n",
 	      tc->rcv_nxt - tc->irs, tc->rcv_las - tc->irs);
   s = format (s, " snd_wnd %u rcv_wnd %u rcv_wscale %u ",
@@ -258,10 +257,11 @@ format_tcp_connection (u8 * s, va_list * args)
 
   if (!tc)
     return s;
-  s = format (s, "%-50U", format_tcp_connection_id, tc);
+  s = format (s, "%-" SESSION_CLI_ID_LEN "U", format_tcp_connection_id, tc);
   if (verbose)
     {
-      s = format (s, "%-15U", format_tcp_state, tc->state);
+      s = format (s, "%-" SESSION_CLI_STATE_LEN "U", format_tcp_state,
+		  tc->state);
       if (verbose > 1)
 	s = format (s, "\n%U", format_tcp_vars, tc);
     }
@@ -716,7 +716,7 @@ tcp_scoreboard_replay (u8 * s, tcp_connection_t * tc, u8 verbose)
       if (trace[i].ack != 0)
 	{
 	  placeholder_tc->snd_una = trace[i].ack - 1448;
-	  placeholder_tc->snd_una_max = trace[i].ack;
+	  placeholder_tc->snd_nxt = trace[i].ack;
 	}
     }
 
@@ -732,8 +732,8 @@ tcp_scoreboard_replay (u8 * s, tcp_connection_t * tc, u8 verbose)
 	    {
 	      if (verbose)
 		s = format (s, "Adding ack %u, snd_una_max %u, segs: ",
-			    trace[left].ack, trace[left].snd_una_max);
-	      placeholder_tc->snd_una_max = trace[left].snd_una_max;
+			    trace[left].ack, trace[left].snd_nxt);
+	      placeholder_tc->snd_nxt = trace[left].snd_nxt;
 	      next_ack = trace[left].ack;
 	      has_new_ack = 1;
 	    }
@@ -1050,7 +1050,7 @@ unformat_tcp_cc_algo_cfg (unformat_input_t * input, va_list * va)
 static clib_error_t *
 tcp_config_fn (vlib_main_t * vm, unformat_input_t * input)
 {
-  u32 cwnd_multiplier, tmp_time, mtu;
+  u32 cwnd_multiplier, tmp_time, mtu, max_gso_size;
   uword memory_size;
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
@@ -1100,6 +1100,8 @@ tcp_config_fn (vlib_main_t * vm, unformat_input_t * input)
 	tcp_cfg.allow_tso = 1;
       else if (unformat (input, "no-csum-offload"))
 	tcp_cfg.csum_offload = 0;
+      else if (unformat (input, "max-gso-size %u", &max_gso_size))
+	tcp_cfg.max_gso_size = clib_min (max_gso_size, TCP_MAX_GSO_SZ);
       else if (unformat (input, "cc-algo %U", unformat_tcp_cc_algo,
 			 &tcp_cfg.cc_algo))
 	;

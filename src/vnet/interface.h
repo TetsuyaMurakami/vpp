@@ -52,13 +52,13 @@ union ip46_address_t_;
 
 typedef enum
 {
-  VNET_HW_INTERFACE_RX_MODE_UNKNOWN,
-  VNET_HW_INTERFACE_RX_MODE_POLLING,
-  VNET_HW_INTERFACE_RX_MODE_INTERRUPT,
-  VNET_HW_INTERFACE_RX_MODE_ADAPTIVE,
-  VNET_HW_INTERFACE_RX_MODE_DEFAULT,
-  VNET_HW_INTERFACE_NUM_RX_MODES,
-} vnet_hw_interface_rx_mode;
+  VNET_HW_IF_RX_MODE_UNKNOWN,
+  VNET_HW_IF_RX_MODE_POLLING,
+  VNET_HW_IF_RX_MODE_INTERRUPT,
+  VNET_HW_IF_RX_MODE_ADAPTIVE,
+  VNET_HW_IF_RX_MODE_DEFAULT,
+  VNET_HW_IF_NUM_RX_MODES,
+} vnet_hw_if_rx_mode;
 
 /* Interface up/down callback. */
 typedef clib_error_t *(vnet_interface_function_t)
@@ -81,12 +81,17 @@ typedef clib_error_t *(vnet_interface_add_del_mac_address_function_t)
 /* Interface set rx mode callback. */
 typedef clib_error_t *(vnet_interface_set_rx_mode_function_t)
   (struct vnet_main_t * vnm, u32 if_index, u32 queue_id,
-   vnet_hw_interface_rx_mode mode);
+   vnet_hw_if_rx_mode mode);
 
 /* Interface set l2 mode callback. */
 typedef clib_error_t *(vnet_interface_set_l2_mode_function_t)
   (struct vnet_main_t * vnm, struct vnet_hw_interface_t * hi,
    i32 l2_if_adjust);
+
+/* Interface to set rss queues of the interface */
+typedef clib_error_t *(vnet_interface_rss_queues_set_t)
+  (struct vnet_main_t * vnm, struct vnet_hw_interface_t * hi,
+   clib_bitmap_t * bitmap);
 
 typedef enum
 {
@@ -174,6 +179,8 @@ static __clib_unused void * __clib_unused_##f = f;
   _VNET_INTERFACE_FUNCTION_DECL(f,sw_interface_mtu_change)
 #define VNET_SW_INTERFACE_ADD_DEL_FUNCTION(f)			\
   _VNET_INTERFACE_FUNCTION_DECL(f,sw_interface_add_del)
+#define VNET_SW_INTERFACE_ADD_DEL_FUNCTION_PRIO(f,p)		\
+  _VNET_INTERFACE_FUNCTION_DECL_PRIO(f,sw_interface_add_del,p)
 #define VNET_SW_INTERFACE_ADMIN_UP_DOWN_FUNCTION(f)		\
   _VNET_INTERFACE_FUNCTION_DECL(f,sw_interface_admin_up_down)
 #define VNET_SW_INTERFACE_ADMIN_UP_DOWN_FUNCTION_PRIO(f,p)     	\
@@ -273,6 +280,10 @@ typedef struct _vnet_device_class
 
   /* Function to add/delete additional MAC addresses */
   vnet_interface_add_del_mac_address_function_t *mac_addr_add_del_function;
+
+  /* Interface to set rss queues of the interface */
+  vnet_interface_rss_queues_set_t *set_rss_queues_function;
+
 } vnet_device_class_t;
 
 #ifndef CLIB_MARCH_VARIANT
@@ -591,15 +602,18 @@ typedef struct vnet_hw_interface_t
   /* input node cpu index by queue */
   u32 *input_node_thread_index_by_queue;
 
-  /* vnet_hw_interface_rx_mode by queue */
+  /* vnet_hw_if_rx_mode by queue */
   u8 *rx_mode_by_queue;
-  vnet_hw_interface_rx_mode default_rx_mode;
+  vnet_hw_if_rx_mode default_rx_mode;
 
   /* device input device_and_queue runtime index */
   uword *dq_runtime_index_by_queue;
 
   /* numa node that hardware device connects to */
   u8 numa_node;
+
+  /* rss queues bitmap */
+  clib_bitmap_t *rss_queues;
 
   /* trace */
   i32 n_trace;
@@ -904,9 +918,7 @@ void vnet_pcap_drop_trace_filter_add_del (u32 error_index, int is_add);
 
 int vnet_interface_name_renumber (u32 sw_if_index, u32 new_show_dev_instance);
 
-uword vnet_interface_output_node (vlib_main_t * vm,
-				  vlib_node_runtime_t * node,
-				  vlib_frame_t * frame);
+vlib_node_function_t *vnet_interface_output_node_get (void);
 
 void vnet_register_format_buffer_opaque_helper
   (vnet_buffer_opquae_formatter_t fn);

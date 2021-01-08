@@ -16,11 +16,9 @@
  */
 
 #include <vnet/vnet.h>
-#include <vnet/pg/pg.h>
 #include <vnet/gre/gre.h>
 #include <vnet/ip/format.h>
-#include <vnet/fib/ip4_fib.h>
-#include <vnet/fib/ip6_fib.h>
+#include <vnet/fib/fib_table.h>
 #include <vnet/adj/adj_midchain.h>
 #include <vnet/adj/adj_nbr.h>
 #include <vnet/mpls/mpls.h>
@@ -204,13 +202,13 @@ gre_teib_mk_key (const gre_tunnel_t * t,
 }
 
 /**
- * An NHRP entry has been added
+ * An TEIB entry has been added
  */
 static void
 gre_teib_entry_added (const teib_entry_t * ne)
 {
   gre_main_t *gm = &gre_main;
-  const ip46_address_t *nh;
+  const ip_address_t *nh;
   gre_tunnel_key_t key;
   gre_tunnel_t *t;
   u32 sw_if_index;
@@ -244,16 +242,17 @@ gre_teib_entry_added (const teib_entry_t * ne)
   };
   nh = teib_entry_get_peer (ne);
   adj_nbr_walk_nh (teib_entry_get_sw_if_index (ne),
-		   (ip46_address_is_ip4 (nh) ?
+		   (AF_IP4 == ip_addr_version (nh) ?
 		    FIB_PROTOCOL_IP4 :
-		    FIB_PROTOCOL_IP6), nh, mgre_mk_complete_walk, &ctx);
+		    FIB_PROTOCOL_IP6),
+		   &ip_addr_46 (nh), mgre_mk_complete_walk, &ctx);
 }
 
 static void
 gre_teib_entry_deleted (const teib_entry_t * ne)
 {
   gre_main_t *gm = &gre_main;
-  const ip46_address_t *nh;
+  const ip_address_t *nh;
   gre_tunnel_key_t key;
   gre_tunnel_t *t;
   u32 sw_if_index;
@@ -278,9 +277,10 @@ gre_teib_entry_deleted (const teib_entry_t * ne)
 
   /* make all the adjacencies incomplete */
   adj_nbr_walk_nh (teib_entry_get_sw_if_index (ne),
-		   (ip46_address_is_ip4 (nh) ?
+		   (AF_IP4 == ip_addr_version (nh) ?
 		    FIB_PROTOCOL_IP4 :
-		    FIB_PROTOCOL_IP6), nh, mgre_mk_incomplete_walk, t);
+		    FIB_PROTOCOL_IP6),
+		   &ip_addr_46 (nh), mgre_mk_incomplete_walk, t);
 }
 
 static walk_rc_t
@@ -528,10 +528,9 @@ vnet_gre_tunnel_add_del (vnet_gre_tunnel_add_del_args_t * a,
 {
   u32 outer_fib_index;
 
-  if (!a->is_ipv6)
-    outer_fib_index = ip4_fib_index_from_table_id (a->outer_table_id);
-  else
-    outer_fib_index = ip6_fib_index_from_table_id (a->outer_table_id);
+  outer_fib_index = fib_table_find ((a->is_ipv6 ?
+				     FIB_PROTOCOL_IP6 :
+				     FIB_PROTOCOL_IP4), a->outer_table_id);
 
   if (~0 == outer_fib_index)
     return VNET_API_ERROR_NO_SUCH_FIB;
@@ -594,6 +593,7 @@ create_gre_tunnel_command_fn (vlib_main_t * vm,
   u32 outer_table_id = 0;
   gre_tunnel_type_t t_type = GRE_TUNNEL_TYPE_L3;
   tunnel_mode_t t_mode = TUNNEL_MODE_P2P;
+  tunnel_encap_decap_flags_t flags = TUNNEL_ENCAP_DECAP_FLAG_NONE;
   u32 session_id = 0;
   int rv;
   u8 is_add = 1;
@@ -622,6 +622,11 @@ create_gre_tunnel_command_fn (vlib_main_t * vm,
 	t_type = GRE_TUNNEL_TYPE_TEB;
       else if (unformat (line_input, "erspan %d", &session_id))
 	t_type = GRE_TUNNEL_TYPE_ERSPAN;
+      else
+	if (unformat
+	    (line_input, "flags %U", unformat_tunnel_encap_decap_flags,
+	     &flags))
+	;
       else
 	{
 	  error = clib_error_return (0, "unknown input `%U'",
@@ -663,6 +668,7 @@ create_gre_tunnel_command_fn (vlib_main_t * vm,
   a->session_id = session_id;
   a->is_ipv6 = !ip46_address_is_ip4 (&src);
   a->instance = instance;
+  a->flags = flags;
   clib_memcpy (&a->src, &src, sizeof (a->src));
   clib_memcpy (&a->dst, &dst, sizeof (a->dst));
 
@@ -707,7 +713,8 @@ done:
 VLIB_CLI_COMMAND (create_gre_tunnel_command, static) = {
   .path = "create gre tunnel",
   .short_help = "create gre tunnel src <addr> dst <addr> [instance <n>] "
-                "[outer-fib-id <fib>] [teb | erspan <session-id>] [del]",
+                "[outer-fib-id <fib>] [teb | erspan <session-id>] [del] "
+                "[multipoint]",
   .function = create_gre_tunnel_command_fn,
 };
 /* *INDENT-ON* */
@@ -735,10 +742,10 @@ show_gre_tunnel_command_fn (vlib_main_t * vm,
   if (~0 == ti)
     {
       /* *INDENT-OFF* */
-      pool_foreach (t, gm->tunnels,
-      ({
+      pool_foreach (t, gm->tunnels)
+       {
           vlib_cli_output (vm, "%U", format_gre_tunnel, t);
-      }));
+      }
       /* *INDENT-ON* */
     }
   else

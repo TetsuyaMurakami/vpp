@@ -376,7 +376,18 @@ session_test_endpoint_cfg (vlib_main_t * vm, unformat_input_t * input)
 
   /* wait for stuff to happen */
   while (connected_session_index == ~0 && ++tries < 100)
-    vlib_process_suspend (vm, 100e-3);
+    {
+      vlib_worker_thread_barrier_release (vm);
+      vlib_process_suspend (vm, 100e-3);
+      vlib_worker_thread_barrier_sync (vm);
+    }
+  while (accepted_session_index == ~0 && ++tries < 100)
+    {
+      vlib_worker_thread_barrier_release (vm);
+      vlib_process_suspend (vm, 100e-3);
+      vlib_worker_thread_barrier_sync (vm);
+    }
+
   clib_warning ("waited %.1f seconds for connections", tries / 10.0);
   SESSION_TEST ((connected_session_index != ~0), "session should exist");
   SESSION_TEST ((connected_session_thread != ~0), "thread should exist");
@@ -422,7 +433,7 @@ session_test_endpoint_cfg (vlib_main_t * vm, unformat_input_t * input)
 static int
 session_test_namespace (vlib_main_t * vm, unformat_input_t * input)
 {
-  u64 options[APP_OPTIONS_N_OPTIONS], placeholder_secret = 1234;
+  u64 options[APP_OPTIONS_N_OPTIONS], placeholder_secret = 1234, tries;
   u32 server_index, server_st_index, server_local_st_index;
   u32 placeholder_port = 1234, client_index, server_wrk_index;
   u32 placeholder_api_context = 4321, placeholder_client_api_index = ~0;
@@ -609,6 +620,19 @@ session_test_namespace (vlib_main_t * vm, unformat_input_t * input)
   connect_args.sep.ip.ip4.as_u8[0] = 127;
   error = vnet_connect (&connect_args);
   SESSION_TEST ((error == 0), "client connect should not return error code");
+
+  /* wait for accept */
+  if (vlib_num_workers ())
+    {
+      tries = 0;
+      while (!placeholder_accept && ++tries < 100)
+	{
+	  vlib_worker_thread_barrier_release (vm);
+	  vlib_process_suspend (vm, 100e-3);
+	  vlib_worker_thread_barrier_sync (vm);
+	}
+    }
+
   SESSION_TEST ((placeholder_segment_count == 1),
 		"should've received request to map new segment");
   SESSION_TEST ((placeholder_accept == 1),
@@ -1797,8 +1821,6 @@ session_test_mq_speed (vlib_main_t * vm, unformat_input_t * input)
   /* Shut up coverity */
   if (reg == 0)
     abort ();
-  if (!session_main.evt_qs_use_memfd_seg)
-    reg->clib_file_index = VL_API_INVALID_FI;
 
   vnet_app_attach_args_t attach_args = {
     .api_client_index = api_index,
@@ -1828,7 +1850,7 @@ session_test_mq_speed (vlib_main_t * vm, unformat_input_t * input)
   s.rx_fifo = rx_fifo;
   s.tx_fifo = tx_fifo;
   s.session_state = SESSION_STATE_READY;
-  counter = (u64 *) rx_fifo->head_chunk->data;
+  counter = (u64 *) f_head_cptr (rx_fifo)->data;
   start = vlib_time_now (vm);
 
   pid = fork ();
@@ -1887,8 +1909,9 @@ session_test_mq_basic (vlib_main_t * vm, unformat_input_t * input)
   svm_msg_q_cfg_t _cfg, *cfg = &_cfg;
   svm_msg_q_msg_t msg1, msg2, msg[12];
   int __clib_unused verbose, i, rv;
-  svm_msg_q_t *mq;
+  svm_msg_q_shared_t *smq;
   svm_msg_q_ring_t *ring;
+  svm_msg_q_t _mq = { 0 }, *mq = &_mq;
   u8 *rings_ptr;
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
@@ -1911,28 +1934,30 @@ session_test_mq_basic (vlib_main_t * vm, unformat_input_t * input)
   cfg->q_nitems = 16;
   cfg->ring_cfgs = rc;
 
-  mq = svm_msg_q_alloc (cfg);
+  smq = svm_msg_q_alloc (cfg);
+  svm_msg_q_attach (mq, smq);
   SESSION_TEST (mq != 0, "svm_msg_q_alloc");
   SESSION_TEST (vec_len (mq->rings) == 2, "ring allocation");
-  rings_ptr = (u8 *) mq->rings + vec_bytes (mq->rings);
+  rings_ptr = (u8 *) mq->rings[0].shr->data;
   vec_foreach (ring, mq->rings)
   {
-    SESSION_TEST (ring->data == rings_ptr, "ring data");
+    SESSION_TEST (ring->shr->data == rings_ptr, "ring data");
     rings_ptr += (uword) ring->nitems * ring->elsize;
+    rings_ptr += sizeof (svm_msg_q_ring_shared_t);
   }
 
   msg1 = svm_msg_q_alloc_msg (mq, 8);
-  rv = (mq->rings[0].cursize != 1
-	|| msg1.ring_index != 0 || msg1.elt_index != 0);
+  rv = (mq->rings[0].shr->cursize != 1 || msg1.ring_index != 0 ||
+	msg1.elt_index != 0);
   SESSION_TEST (rv == 0, "msg alloc1");
 
   msg2 = svm_msg_q_alloc_msg (mq, 15);
-  rv = (mq->rings[1].cursize != 1
-	|| msg2.ring_index != 1 || msg2.elt_index != 0);
+  rv = (mq->rings[1].shr->cursize != 1 || msg2.ring_index != 1 ||
+	msg2.elt_index != 0);
   SESSION_TEST (rv == 0, "msg alloc2");
 
   svm_msg_q_free_msg (mq, &msg1);
-  SESSION_TEST (mq->rings[0].cursize == 0, "free msg");
+  SESSION_TEST (mq->rings[0].shr->cursize == 0, "free msg");
 
   for (i = 0; i < 12; i++)
     {
@@ -1940,7 +1965,7 @@ session_test_mq_basic (vlib_main_t * vm, unformat_input_t * input)
       *(u32 *) svm_msg_q_msg_data (mq, &msg[i]) = i;
     }
 
-  rv = (mq->rings[0].cursize != 8 || mq->rings[1].cursize != 5);
+  rv = (mq->rings[0].shr->cursize != 8 || mq->rings[1].shr->cursize != 5);
   SESSION_TEST (rv == 0, "msg alloc3");
 
   *(u32 *) svm_msg_q_msg_data (mq, &msg2) = 123;
@@ -1976,7 +2001,7 @@ session_test_mq_basic (vlib_main_t * vm, unformat_input_t * input)
 	SESSION_TEST (0, "dequeue2 wrong data");
       svm_msg_q_free_msg (mq, &msg[i]);
     }
-  rv = (mq->rings[0].cursize == 0 && mq->rings[1].cursize == 0);
+  rv = (mq->rings[0].shr->cursize == 0 && mq->rings[1].shr->cursize == 0);
   SESSION_TEST (rv, "post dequeue");
 
   return 0;

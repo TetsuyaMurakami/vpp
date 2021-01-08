@@ -10,17 +10,6 @@
 %endif
 %define _vpp_install_dir install-%{_vpp_tag}-native
 
-# Failsafe backport of Python2-macros for RHEL <= 6
-%{!?python_sitelib: %global python_sitelib      %(%{__python} -c "from distutils.sysconfig import get_python_lib; print(get_python_lib())")}
-%{!?python_sitearch:    %global python_sitearch     %(%{__python} -c "from distutils.sysconfig import get_python_lib; print(get_python_lib(1))")}
-%{!?python_version: %global python_version      %(%{__python} -c "import sys; sys.stdout.write(sys.version[:3])")}
-%{!?__python2:      %global __python2       %{__python}}
-%{!?python2_sitelib:    %global python2_sitelib     %{python_sitelib}}
-%{!?python2_sitearch:   %global python2_sitearch    %{python_sitearch}}
-%{!?python2_version:    %global python2_version     %{python_version}}
-
-%{!?python2_minor_version: %define python2_minor_version %(%{__python} -c "import sys ; print sys.version[2:3]")}
-
 %{?systemd_requires}
 
 
@@ -60,7 +49,6 @@ BuildRequires: python3, python36-devel, python3-virtualenv
 BuildRequires: cmake
 %else
 %if 0%{rhel} >= 7
-Requires: epel-release
 Requires: vpp-lib = %{_version}-%{_release}, vpp-selinux-policy = %{_version}-%{_release}, net-tools, pciutils, python36
 Requires: boost-filesystem mbedtls libffi-devel
 BuildRequires: epel-release
@@ -137,20 +125,11 @@ Requires: vpp = %{_version}-%{_release}, vpp-lib = %{_version}-%{_release}
 %description api-lua
 This package contains the lua bindings for the vpp api
 
-%package api-python
-Summary: VPP api python bindings
-Group: Development/Libraries
-Requires: vpp = %{_version}-%{_release}, vpp-lib = %{_version}-%{_release}, libffi-devel
-Requires: python-setuptools
-
-%description api-python
-This package contains the python bindings for the vpp api
-
 %package api-python3
 Summary: VPP api python3 bindings
 Group: Development/Libraries
 Requires: vpp = %{_version}-%{_release}, vpp-lib = %{_version}-%{_release}, libffi-devel
-Requires: python-setuptools
+Requires: python3-setuptools
 
 %description api-python3
 This package contains the python3 bindings for the vpp api
@@ -169,7 +148,10 @@ Requires(post): python3-policycoreutils
 This package contains a tailored VPP SELinux policy
 
 %prep
-%setup -q -n %{name}-%{_version}
+%setup -q -c -T -n %{name}-%{_version}
+cd ..
+unxz --stdout ./SOURCES/%{name}-%{_version}-%{_release}.tar.xz | tar --extract --touch
+cd -
 
 %pre
 # Add the vpp group
@@ -180,13 +162,12 @@ groupadd -f -r vpp
 . /opt/rh/devtoolset-9/enable
 %endif
 %if %{with aesni}
-    make bootstrap
+    make install-dep
     make -C build-root PLATFORM=vpp TAG=%{_vpp_tag} install-packages
 %else
     make bootstrap AESNI=n
     make -C build-root PLATFORM=vpp AESNI=n TAG=%{_vpp_tag} install-packages
 %endif
-cd %{_mu_build_dir}/../src/vpp-api/python && %py2_build
 cd %{_mu_build_dir}/../src/vpp-api/python && %py3_build
 cd %{_mu_build_dir}/../extras/selinux && make -f %{_datadir}/selinux/devel/Makefile
 
@@ -243,7 +224,6 @@ do
 done
 
 # Python bindings
-cd %{_mu_build_dir}/../src/vpp-api/python && %py2_install
 cd %{_mu_build_dir}/../src/vpp-api/python && %py3_install
 
 # SELinux Policy
@@ -262,7 +242,7 @@ install -m 0644 $MODULES \
 #
 # devel
 #
-for dir in %{_mu_build_dir}/%{_vpp_install_dir}/{vom,vpp}/include/
+for dir in %{_mu_build_dir}/%{_vpp_install_dir}/vpp/include/
 do
 	for subdir in $(cd ${dir} && find . -type d -print)
 	do
@@ -396,10 +376,6 @@ fi
 %files api-lua
 %defattr(644,root,root,644)
 /usr/share/doc/vpp/examples/lua
-
-%files api-python
-%defattr(644,root,root,755)
-%{python2_sitelib}/vpp_*
 
 %files api-python3
 %defattr(644,root,root,755)

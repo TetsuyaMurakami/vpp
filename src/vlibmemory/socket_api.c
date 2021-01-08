@@ -85,13 +85,13 @@ vl_sock_api_dump_clients (vlib_main_t * vm, api_main_t * am)
   vlib_cli_output (vm, "Socket clients");
   vlib_cli_output (vm, "%20s %8s", "Name", "Fildesc");
     /* *INDENT-OFF* */
-    pool_foreach (reg, sm->registration_pool,
-    ({
+    pool_foreach (reg, sm->registration_pool)
+     {
         if (reg->registration_type == REGISTRATION_TYPE_SOCKET_SERVER) {
             f = vl_api_registration_file (reg);
             vlib_cli_output (vm, "%20s %8d", reg->name, f->file_descriptor);
         }
-    }));
+    }
 /* *INDENT-ON* */
 }
 
@@ -410,6 +410,7 @@ socksvr_file_add (clib_file_main_t * fm, int fd)
   template.write_function = vl_socket_write_ready;
   template.error_function = vl_socket_error_ready;
   template.file_descriptor = fd;
+  template.description = format (0, "socksrv");
   template.private_data = rp - socket_main.registration_pool;
 
   rp->registration_type = REGISTRATION_TYPE_SOCKET_SERVER;
@@ -639,11 +640,16 @@ vl_api_sock_init_shm_t_handler (vl_api_sock_init_shm_t * mp)
   clib_memset (memfd, 0, sizeof (*memfd));
   memfd->ssvm_size = mp->requested_size;
   memfd->requested_va = 0ULL;
-  memfd->i_am_master = 1;
+  memfd->is_server = 1;
   memfd->name = format (0, "%s%c", regp->name, 0);
 
-  if ((rv = ssvm_master_init_memfd (memfd)))
+  if ((rv = ssvm_server_init_memfd (memfd)))
     goto reply;
+
+  /* delete the unused heap created in ssvm_server_init_memfd and mark it
+   * accessible again for ASAN */
+  clib_mem_destroy_heap (memfd->sh->heap);
+  CLIB_MEM_UNPOISON ((void *) memfd->sh->ssvm_va, memfd->ssvm_size);
 
   /* Remember to close this fd when the socket connection goes away */
   vec_add1 (regp->additional_fds_to_close, memfd->fd);
@@ -762,6 +768,7 @@ vl_sock_api_init (vlib_main_t * vm)
   template.read_function = socksvr_accept_ready;
   template.write_function = socksvr_bogus_write;
   template.file_descriptor = sock->fd;
+  template.description = format (0, "socksvr %s", sock->config);
   template.private_data = rp - sm->registration_pool;
 
   rp->clib_file_index = clib_file_add (fm, &template);
@@ -779,11 +786,11 @@ socket_exit (vlib_main_t * vm)
     {
       u32 index;
         /* *INDENT-OFF* */
-        pool_foreach (rp, sm->registration_pool, ({
+        pool_foreach (rp, sm->registration_pool)  {
           vl_api_registration_del_file (rp);
           index = rp->vl_api_registration_pool_index;
           vl_socket_free_registration_index (index);
-        }));
+        }
 /* *INDENT-ON* */
     }
 

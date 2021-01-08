@@ -40,6 +40,7 @@
 #include <vnet/vnet.h>
 #include <vnet/ip/icmp46_packet.h>
 #include <vnet/ethernet/packet.h>
+#include <vnet/ip/format.h>
 #include <vnet/ip/ip4.h>
 #include <vnet/ip/ip6.h>
 #include <vnet/udp/udp_packet.h>
@@ -90,6 +91,7 @@ format_vnet_interface_output_trace (u8 * s, va_list * va)
     }
   return s;
 }
+#endif /* CLIB_MARCH_VARIANT */
 
 static void
 vnet_interface_output_trace (vlib_main_t * vm,
@@ -426,7 +428,6 @@ vnet_interface_output_node_inline (vlib_main_t * vm,
 				   rt->sw_if_index, n_packets, n_bytes);
   return n_buffers;
 }
-#endif /* CLIB_MARCH_VARIANT */
 
 static_always_inline void vnet_interface_pcap_tx_trace
   (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame,
@@ -485,11 +486,12 @@ static_always_inline void vnet_interface_pcap_tx_trace
     }
 }
 
-#ifndef CLIB_MARCH_VARIANT
+static vlib_node_function_t CLIB_MULTIARCH_FN (vnet_interface_output_node);
 
-uword
-vnet_interface_output_node (vlib_main_t * vm, vlib_node_runtime_t * node,
-			    vlib_frame_t * frame)
+static uword
+CLIB_MULTIARCH_FN (vnet_interface_output_node) (vlib_main_t * vm,
+						vlib_node_runtime_t * node,
+						vlib_frame_t * frame)
 {
   vnet_main_t *vnm = vnet_get_main ();
   vnet_hw_interface_t *hi;
@@ -505,6 +507,15 @@ vnet_interface_output_node (vlib_main_t * vm, vlib_node_runtime_t * node,
   else
     return vnet_interface_output_node_inline (vm, node, frame, vnm, hi,
 					      /* do_tx_offloads */ 1);
+}
+
+CLIB_MARCH_FN_REGISTRATION (vnet_interface_output_node);
+
+#ifndef CLIB_MARCH_VARIANT
+vlib_node_function_t *
+vnet_interface_output_node_get (void)
+{
+  return CLIB_MARCH_FN_POINTER (vnet_interface_output_node);
 }
 #endif /* CLIB_MARCH_VARIANT */
 
@@ -799,19 +810,21 @@ interface_drop_punt (vlib_main_t * vm,
 	  node->flags |= VLIB_NODE_FLAG_TRACE;
 	  while (n_trace && n_left)
 	    {
-	      vlib_trace_buffer (vm, node, 0 /* next_index */ ,
-				 b[0], 0 /* follow chain */ );
-	      /*
-	       * Here we have a wireshark dissector problem.
-	       * Packets may be well-formed, or not. We
-	       * must not blow chunks in any case.
-	       *
-	       * Try to produce trace records which will help
-	       * folks understand what's going on.
-	       */
-	      drop_catchup_trace (vm, node, b[0]);
-
-	      n_trace--;
+	      if (PREDICT_TRUE
+		  (vlib_trace_buffer (vm, node, 0 /* next_index */ , b[0],
+				      0 /* follow chain */ )))
+		{
+		  /*
+		   * Here we have a wireshark dissector problem.
+		   * Packets may be well-formed, or not. We
+		   * must not blow chunks in any case.
+		   *
+		   * Try to produce trace records which will help
+		   * folks understand what's going on.
+		   */
+		  drop_catchup_trace (vm, node, b[0]);
+		  n_trace--;
+		}
 	      n_left--;
 	      b++;
 	    }
@@ -967,7 +980,7 @@ pcap_drop_trace (vlib_main_t * vm,
 	    vlib_node_t *n;
 	    /* Length of the error string */
 	    int error_string_len =
-	      clib_strnlen (em->error_strings_heap[b0->error], 128);
+	      clib_strnlen (em->counters_heap[b0->error].name, 128);
 
 	    /* Dig up the drop node */
 	    error_node_index = vm->node_main.node_by_error[b0->error];
@@ -996,7 +1009,7 @@ pcap_drop_trace (vlib_main_t * vm,
 				  ": ", 2);
 		clib_memcpy_fast (last->data + last->current_data +
 				  last->current_length + vec_len (n->name) +
-				  2, em->error_strings_heap[b0->error],
+				  2, em->counters_heap[b0->error].name,
 				  error_string_len);
 		last->current_length += drop_string_len;
 		b0->flags &= ~(VLIB_BUFFER_TOTAL_LENGTH_VALID);

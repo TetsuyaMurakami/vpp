@@ -6,12 +6,11 @@ import struct
 import threading
 import select
 import multiprocessing
-try:
-    import queue as queue
-except ImportError:
-    import Queue as queue
+import queue
 import logging
-from . import vpp_papi
+
+logger = logging.getLogger('vpp_papi.transport')
+logger.addHandler(logging.NullHandler())
 
 
 class VppTransportSocketIOError(IOError):
@@ -19,7 +18,7 @@ class VppTransportSocketIOError(IOError):
     pass
 
 
-class VppTransport(object):
+class VppTransport:
     VppTransportSocketIOError = VppTransportSocketIOError
 
     def __init__(self, parent, read_timeout, server_address):
@@ -141,8 +140,9 @@ class VppTransport(object):
         try:
             # Might fail, if VPP closes socket before packet makes it out,
             # or if there was a failure during connect().
+            # TODO: manually build message so that .disconnect releases server-side resources
             rv = self.parent.api.sockclnt_delete(index=self.socket_index)
-        except (IOError, vpp_papi.VPPApiError):
+        except (IOError, self.parent.VPPApiError):
             pass
         self.connected = False
         if self.socket is not None:

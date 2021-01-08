@@ -21,7 +21,7 @@
 
 #include <vnet/ipsec/ipsec.h>
 #include <vnet/ipsec/esp.h>
-#include <vnet/udp/udp.h>
+#include <vnet/udp/udp_local.h>
 #include <dpdk/buffer.h>
 #include <dpdk/ipsec/ipsec.h>
 #include <vnet/ipsec/ipsec_tun.h>
@@ -45,8 +45,8 @@ typedef enum
 #define foreach_esp_encrypt_error                   \
  _(RX_PKTS, "ESP pkts received")                    \
  _(SEQ_CYCLED, "Sequence number cycled")            \
- _(ENQ_FAIL, "Enqueue failed to crypto device")     \
- _(DISCARD, "Not enough crypto operations, discarding frame")  \
+ _(ENQ_FAIL, "Enqueue encrypt failed (queue full)")     \
+ _(DISCARD, "Not enough crypto operations")         \
  _(SESSION, "Failed to get crypto session")         \
  _(NOSUP, "Cipher/Auth not supported")
 
@@ -141,11 +141,12 @@ dpdk_esp_encrypt_inline (vlib_main_t * vm,
     {
       if (is_ip6)
 	vlib_node_increment_counter (vm, dpdk_esp6_encrypt_node.index,
-				     ESP_ENCRYPT_ERROR_DISCARD, 1);
+				     ESP_ENCRYPT_ERROR_DISCARD, n_left_from);
       else
 	vlib_node_increment_counter (vm, dpdk_esp4_encrypt_node.index,
-				     ESP_ENCRYPT_ERROR_DISCARD, 1);
+				     ESP_ENCRYPT_ERROR_DISCARD, n_left_from);
       /* Discard whole frame */
+      vlib_buffer_free (vm, from, n_left_from);
       return n_left_from;
     }
 
@@ -513,8 +514,7 @@ dpdk_esp_encrypt_inline (vlib_main_t * vm,
 	  u32 *aad = NULL;
 
 	  u8 *digest = vlib_buffer_get_tail (b0) - trunc_size;
-	  u64 digest_paddr =
-	    mb0->buf_physaddr + digest - ((u8 *) mb0->buf_addr);
+	  u64 digest_paddr = mb0->buf_iova + digest - ((u8 *) mb0->buf_addr);
 
 	  if (!is_aead && (cipher_alg->alg == RTE_CRYPTO_CIPHER_AES_CBC ||
 			   cipher_alg->alg == RTE_CRYPTO_CIPHER_NULL))

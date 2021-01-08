@@ -100,10 +100,15 @@ typedef struct
   u32 vlsh_bit_val;
   u32 vlsh_bit_mask;
   u32 debug;
-  u8 transparent_tls;
 
   /** vcl needs next epoll_create to go to libc_epoll */
   u8 vcl_needs_real_epoll;
+
+  /**
+   * crypto state used only for testing
+   */
+  u8 transparent_tls;
+  u32 ckpair_index;
 } ldp_main_t;
 
 #define LDP_DEBUG ldp->debug
@@ -112,7 +117,7 @@ typedef struct
   if (ldp->debug > _lvl)						\
     {									\
       int errno_saved = errno;						\
-      clib_warning ("ldp<%d>: " _fmt, getpid(), ##_args);		\
+      fprintf (stderr, "ldp<%d>: " _fmt "\n", getpid(), ##_args);	\
       errno = errno_saved;						\
     }
 
@@ -121,6 +126,7 @@ static ldp_main_t ldp_main = {
   .vlsh_bit_mask = (1 << LDP_SID_BIT_MIN) - 1,
   .debug = LDP_DEBUG_INIT,
   .transparent_tls = 0,
+  .ckpair_index = ~0,
 };
 
 static ldp_main_t *ldp = &ldp_main;
@@ -279,9 +285,9 @@ ldp_init (void)
     }
 
   /* *INDENT-OFF* */
-  pool_foreach (ldpw, ldp->workers, ({
+  pool_foreach (ldpw, ldp->workers)  {
     clib_memset (&ldpw->clib_time, 0, sizeof (ldpw->clib_time));
-  }));
+  }
   /* *INDENT-ON* */
 
   LDBG (0, "LDP initialization: done!");
@@ -632,7 +638,7 @@ ldp_select_init_maps (fd_set * __restrict original,
   memset (original, 0, n_bytes);
 
   /* *INDENT-OFF* */
-  clib_bitmap_foreach (fd, *resultb, ({
+  clib_bitmap_foreach (fd, *resultb)  {
     if (fd > nfds)
       break;
     vlsh = ldp_fd_to_vlsh (fd);
@@ -640,7 +646,7 @@ ldp_select_init_maps (fd_set * __restrict original,
       clib_bitmap_set_no_check (*libcb, fd, 1);
     else
       *vclb = clib_bitmap_set (*vclb, vlsh_to_session_index (vlsh), 1);
-  }));
+  }
   /* *INDENT-ON* */
 
   si_bits_set = clib_bitmap_last_set (*vclb) + 1;
@@ -662,7 +668,7 @@ ldp_select_vcl_map_to_libc (clib_bitmap_t * vclb, fd_set * __restrict libcb)
     return 0;
 
   /* *INDENT-OFF* */
-  clib_bitmap_foreach (si, vclb, ({
+  clib_bitmap_foreach (si, vclb)  {
     vlsh = vls_session_index_to_vlsh (si);
     ASSERT (vlsh != VLS_INVALID_HANDLE);
     fd = ldp_vlsh_to_fd (vlsh);
@@ -672,7 +678,7 @@ ldp_select_vcl_map_to_libc (clib_bitmap_t * vclb, fd_set * __restrict libcb)
         return -1;
       }
     FD_SET (fd, libcb);
-  }));
+  }
   /* *INDENT-ON* */
 
   return 0;
@@ -687,9 +693,8 @@ ldp_select_libc_map_merge (clib_bitmap_t * result, fd_set * __restrict libcb)
     return;
 
   /* *INDENT-OFF* */
-  clib_bitmap_foreach (fd, result, ({
+  clib_bitmap_foreach (fd, result)
     FD_SET ((int)fd, libcb);
-  }));
   /* *INDENT-ON* */
 }
 
@@ -903,66 +908,69 @@ pselect (int nfds, fd_set * __restrict readfds,
 /* If transparent TLS mode is turned on, then ldp will load key and cert.
  */
 static int
-load_tls_cert (vls_handle_t vlsh)
+load_cert_key_pair (void)
 {
-  char *env_var_str = getenv (LDP_ENV_TLS_CERT);
-  char inbuf[4096];
-  char *tls_cert;
-  int cert_size;
+  char *cert_str = getenv (LDP_ENV_TLS_CERT);
+  char *key_str = getenv (LDP_ENV_TLS_KEY);
+  char cert_buf[4096], key_buf[4096];
+  int cert_size, key_size;
+  vppcom_cert_key_pair_t crypto;
+  int ckp_index;
   FILE *fp;
 
-  if (env_var_str)
-    {
-      fp = fopen (env_var_str, "r");
-      if (fp == NULL)
-	{
-	  LDBG (0, "ERROR: failed to open cert file %s \n", env_var_str);
-	  return -1;
-	}
-      cert_size = fread (inbuf, sizeof (char), sizeof (inbuf), fp);
-      tls_cert = inbuf;
-      vppcom_session_tls_add_cert (vlsh_to_session_index (vlsh), tls_cert,
-				   cert_size);
-      fclose (fp);
-    }
-  else
+  if (!cert_str || !key_str)
     {
       LDBG (0, "ERROR: failed to read LDP environment %s\n",
 	    LDP_ENV_TLS_CERT);
       return -1;
     }
+
+  fp = fopen (cert_str, "r");
+  if (fp == NULL)
+    {
+      LDBG (0, "ERROR: failed to open cert file %s \n", cert_str);
+      return -1;
+    }
+  cert_size = fread (cert_buf, sizeof (char), sizeof (cert_buf), fp);
+  fclose (fp);
+
+  fp = fopen (key_str, "r");
+  if (fp == NULL)
+    {
+      LDBG (0, "ERROR: failed to open key file %s \n", key_str);
+      return -1;
+    }
+  key_size = fread (key_buf, sizeof (char), sizeof (key_buf), fp);
+  fclose (fp);
+
+  crypto.cert = cert_buf;
+  crypto.key = key_buf;
+  crypto.cert_len = cert_size;
+  crypto.key_len = key_size;
+  ckp_index = vppcom_add_cert_key_pair (&crypto);
+  if (ckp_index < 0)
+    {
+      LDBG (0, "ERROR: failed to add cert key pair\n");
+      return -1;
+    }
+
+  ldp->ckpair_index = ckp_index;
+
   return 0;
 }
 
 static int
-load_tls_key (vls_handle_t vlsh)
+assign_cert_key_pair (vls_handle_t vlsh)
 {
-  char *env_var_str = getenv (LDP_ENV_TLS_KEY);
-  char inbuf[4096];
-  char *tls_key;
-  int key_size;
-  FILE *fp;
+  uint32_t ckp_len;
 
-  if (env_var_str)
-    {
-      fp = fopen (env_var_str, "r");
-      if (fp == NULL)
-	{
-	  LDBG (0, "ERROR: failed to open key file %s \n", env_var_str);
-	  return -1;
-	}
-      key_size = fread (inbuf, sizeof (char), sizeof (inbuf), fp);
-      tls_key = inbuf;
-      vppcom_session_tls_add_key (vlsh_to_session_index (vlsh), tls_key,
-				  key_size);
-      fclose (fp);
-    }
-  else
-    {
-      LDBG (0, "ERROR: failed to read LDP environment %s\n", LDP_ENV_TLS_KEY);
-      return -1;
-    }
-  return 0;
+  if (ldp->ckpair_index == ~0 && load_cert_key_pair () < 0)
+    return -1;
+
+  ckp_len = sizeof (ldp->ckpair_index);
+  return vppcom_session_attr (vlsh_to_session_index (vlsh),
+			      VPPCOM_ATTR_SET_CKPAIR, &ldp->ckpair_index,
+			      &ckp_len);
 }
 
 int
@@ -1000,10 +1008,8 @@ socket (int domain, int type, int protocol)
 	{
 	  if (ldp->transparent_tls)
 	    {
-	      if (load_tls_cert (vlsh) < 0 || load_tls_key (vlsh) < 0)
-		{
-		  return -1;
-		}
+	      if (assign_cert_key_pair (vlsh) < 0)
+		return -1;
 	    }
 	  rv = ldp_vlsh_to_fd (vlsh);
 	}
@@ -1408,7 +1414,7 @@ sendfile (int out_fd, int in_fd, off_t * offset, size_t len)
 	  size = vls_attr (vlsh, VPPCOM_ATTR_GET_NWRITE, 0, 0);
 	  if (size < 0)
 	    {
-	      LDBG (0, "ERROR: fd %d: vls_attr: vlsh %u returned %d (%s)!",
+	      LDBG (0, "ERROR: fd %d: vls_attr: vlsh %u returned %ld (%s)!",
 		    out_fd, vlsh, size, vppcom_retval_str (size));
 	      vec_reset_length (ldpw->io_buffer);
 	      errno = -size;
@@ -2125,7 +2131,7 @@ ldp_accept4 (int listen_fd, __SOCKADDR_ARG addr,
       ep.ip = src_addr;
 
       LDBG (0, "listen fd %d: calling vppcom_session_accept: listen sid %u,"
-	    " ep %p, flags 0x%x", listen_fd, listen_vlsh, ep, flags);
+	    " ep %p, flags 0x%x", listen_fd, listen_vlsh, &ep, flags);
 
       accept_vlsh = vls_accept (listen_vlsh, &ep, flags);
       if (accept_vlsh < 0)
@@ -2290,7 +2296,7 @@ epoll_ctl (int epfd, int op, int fd, struct epoll_event *event)
   if (vlsh != VLS_INVALID_HANDLE)
     {
       LDBG (1, "epfd %d: calling vls_epoll_ctl: ep_vlsh %d op %d, vlsh %u,"
-	    " event %p", epfd, vep_vlsh, vlsh, event);
+	    " event %p", epfd, vep_vlsh, op, vlsh, event);
 
       rv = vls_epoll_ctl (vep_vlsh, op, vlsh, event);
       if (rv != VPPCOM_OK)
@@ -2564,7 +2570,7 @@ poll (struct pollfd *fds, nfds_t nfds, int timeout)
   vcl_poll_t *vp;
   double max_time;
 
-  LDBG (3, "fds %p, nfds %d, timeout %d", fds, nfds, timeout);
+  LDBG (3, "fds %p, nfds %ld, timeout %d", fds, nfds, timeout);
 
   if (PREDICT_FALSE (ldpw->clib_time.init_cpu_time == 0))
     clib_time_init (&ldpw->clib_time);

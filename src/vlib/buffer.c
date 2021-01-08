@@ -507,8 +507,14 @@ vlib_buffer_chain_append_data_with_alloc (vlib_main_t * vm,
 static uword
 vlib_buffer_alloc_size (uword ext_hdr_size, uword data_size)
 {
-  return CLIB_CACHE_LINE_ROUND (ext_hdr_size + sizeof (vlib_buffer_t) +
-				data_size);
+  uword alloc_size = ext_hdr_size + sizeof (vlib_buffer_t) + data_size;
+  alloc_size = CLIB_CACHE_LINE_ROUND (alloc_size);
+
+  /* in case when we have even number of cachelines, we add one more for
+   * better cache occupancy */
+  alloc_size |= CLIB_CACHE_LINE_BYTES;
+
+  return alloc_size;
 }
 
 u8
@@ -679,72 +685,90 @@ vlib_buffer_worker_init (vlib_main_t * vm)
 VLIB_WORKER_INIT_FUNCTION (vlib_buffer_worker_init);
 
 static clib_error_t *
-vlib_buffer_main_init_numa_node (struct vlib_main_t *vm, u32 numa_node,
-				 u8 * index)
+vlib_buffer_main_init_numa_alloc (struct vlib_main_t *vm, u32 numa_node,
+				  u32 * physmem_map_index,
+				  clib_mem_page_sz_t log2_page_size,
+				  u8 unpriv)
 {
   vlib_buffer_main_t *bm = vm->buffer_main;
+  u32 buffers_per_numa = bm->buffers_per_numa;
   clib_error_t *error;
-  u32 physmem_map_index;
+  u32 buffer_size;
   uword n_pages, pagesize;
-  u32 buffers_per_numa;
-  u32 buffer_size = vlib_buffer_alloc_size (bm->ext_hdr_size,
-					    vlib_buffer_get_default_data_size
-					    (vm));
-  u8 *name;
+  u8 *name = 0;
 
-  pagesize = clib_mem_get_default_hugepage_size ();
-  name = format (0, "buffers-numa-%d%c", numa_node, 0);
+  ASSERT (log2_page_size != CLIB_MEM_PAGE_SZ_UNKNOWN);
 
-  buffers_per_numa = bm->buffers_per_numa ? bm->buffers_per_numa :
-    VLIB_BUFFER_DEFAULT_BUFFERS_PER_NUMA;
-
-retry:
-
+  pagesize = clib_mem_page_bytes (log2_page_size);
+  buffer_size = vlib_buffer_alloc_size (bm->ext_hdr_size,
+					vlib_buffer_get_default_data_size
+					(vm));
   if (buffer_size > pagesize)
-    {
-      error =
-	clib_error_return (0,
-			   "buffer size (%llu) is greater than page size (%llu)",
-			   buffer_size, pagesize);
-      goto done;
-    }
+    return clib_error_return (0, "buffer size (%llu) is greater than page "
+			      "size (%llu)", buffer_size, pagesize);
 
+  if (buffers_per_numa == 0)
+    buffers_per_numa = unpriv ? VLIB_BUFFER_DEFAULT_BUFFERS_PER_NUMA_UNPRIV :
+      VLIB_BUFFER_DEFAULT_BUFFERS_PER_NUMA;
+
+  name = format (0, "buffers-numa-%d%c", numa_node, 0);
   n_pages = (buffers_per_numa - 1) / (pagesize / buffer_size) + 1;
   error = vlib_physmem_shared_map_create (vm, (char *) name,
 					  n_pages * pagesize,
 					  min_log2 (pagesize), numa_node,
-					  &physmem_map_index);
+					  physmem_map_index);
+  vec_free (name);
+  return error;
+}
 
-  if (error && pagesize != clib_mem_get_page_size ())
+static clib_error_t *
+vlib_buffer_main_init_numa_node (struct vlib_main_t *vm, u32 numa_node,
+				 u8 * index)
+{
+  vlib_buffer_main_t *bm = vm->buffer_main;
+  u32 physmem_map_index;
+  clib_error_t *error;
+  u8 *name = 0;
+
+  if (bm->log2_page_size == CLIB_MEM_PAGE_SZ_UNKNOWN)
     {
-      vlib_log_warn (bm->log_default, "%U", format_clib_error, error);
+      error = vlib_buffer_main_init_numa_alloc (vm, numa_node,
+						&physmem_map_index,
+						CLIB_MEM_PAGE_SZ_DEFAULT_HUGE,
+						0 /* unpriv */ );
+      if (!error)
+	goto buffer_pool_create;
+
+      /* If alloc failed, retry without hugepages */
+      vlib_log_warn (bm->log_default,
+		     "numa[%u] falling back to non-hugepage backed "
+		     "buffer pool (%U)", numa_node, format_clib_error, error);
       clib_error_free (error);
-      vlib_log_warn (bm->log_default, "falling back to non-hugepage "
-		     "backed buffer pool");
-      pagesize = clib_mem_get_page_size ();
-      buffers_per_numa = bm->buffers_per_numa ? bm->buffers_per_numa :
-	VLIB_BUFFER_DEFAULT_BUFFERS_PER_NUMA_UNPRIV;
-      goto retry;
+
+      error = vlib_buffer_main_init_numa_alloc (vm, numa_node,
+						&physmem_map_index,
+						CLIB_MEM_PAGE_SZ_DEFAULT,
+						1 /* unpriv */ );
     }
-
+  else
+    error = vlib_buffer_main_init_numa_alloc (vm, numa_node,
+					      &physmem_map_index,
+					      bm->log2_page_size,
+					      0 /* unpriv */ );
   if (error)
-    goto done;
+    return error;
 
-  vec_reset_length (name);
+buffer_pool_create:
   name = format (name, "default-numa-%d%c", numa_node, 0);
-
   *index = vlib_buffer_pool_create (vm, (char *) name,
 				    vlib_buffer_get_default_data_size (vm),
 				    physmem_map_index);
 
   if (*index == (u8) ~ 0)
-    {
-      error = clib_error_return (0, "maximum number of buffer pools reached");
-      goto done;
-    }
-
-done:
+    error = clib_error_return (0, "maximum number of buffer pools reached");
   vec_free (name);
+
+
   return error;
 }
 
@@ -862,7 +886,7 @@ vlib_buffer_main_init (struct vlib_main_t * vm)
 		VLIB_BUFFER_MAX_NUMA_NODES);
 
   /* *INDENT-OFF* */
-  clib_bitmap_foreach (numa_node, bmp,
+  clib_bitmap_foreach (numa_node, bmp)
     {
       u8 *index = bm->default_buffer_pool_index_for_numa + numa_node;
       index[0] = ~0;
@@ -875,7 +899,7 @@ vlib_buffer_main_init (struct vlib_main_t * vm)
 
       if (first_valid_buffer_pool_index == 0xff)
         first_valid_buffer_pool_index = index[0];
-    });
+    }
   /* *INDENT-ON* */
 
   if (first_valid_buffer_pool_index == (u8) ~ 0)
@@ -885,12 +909,12 @@ vlib_buffer_main_init (struct vlib_main_t * vm)
     }
 
   /* *INDENT-OFF* */
-  clib_bitmap_foreach (numa_node, bmp,
+  clib_bitmap_foreach (numa_node, bmp)
     {
       if (bm->default_buffer_pool_index_for_numa[numa_node]  == (u8) ~0)
 	bm->default_buffer_pool_index_for_numa[numa_node] =
 	  first_valid_buffer_pool_index;
-    });
+    }
   /* *INDENT-ON* */
 
   vec_foreach (bp, bm->buffer_pools)
@@ -929,10 +953,14 @@ vlib_buffers_configure (vlib_main_t * vm, unformat_input_t * input)
   vlib_buffer_main_alloc (vm);
 
   bm = vm->buffer_main;
+  bm->log2_page_size = CLIB_MEM_PAGE_SZ_UNKNOWN;
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
     {
       if (unformat (input, "buffers-per-numa %u", &bm->buffers_per_numa))
+	;
+      else if (unformat (input, "page-size %U", unformat_log2_page_size,
+			 &bm->log2_page_size))
 	;
       else if (unformat (input, "default data-size %u",
 			 &bm->default_data_size))

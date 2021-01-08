@@ -22,6 +22,10 @@
 #include <vnet/l2/feat_bitmap.h>
 
 #include <vnet/ip/ip4_packet.h>
+#include <vnet/ip/ip6_packet.h>
+#include <vnet/ip/icmp6.h>
+#include <vnet/ip/ip6.h>
+#include <vnet/ip/format.h>
 #include <vnet/ethernet/arp_packet.h>
 
 static const u8 vrrp_prefix[] = { 0x00, 0x00, 0x5E, 0x00, 0x01 };
@@ -377,7 +381,7 @@ arp_term_l2bd (vlib_main_t * vm,
 	  /* For BVI, need to use l2-fwd node to send ARP reply as
 	     l2-output node cannot output packet to BVI properly */
 	  cfg0 = vec_elt_at_index (l2im->configs, sw_if_index0);
-	  if (PREDICT_FALSE (cfg0->bvi))
+	  if (PREDICT_FALSE (l2_input_is_bvi (cfg0)))
 	    {
 	      vnet_buffer (p0)->l2.feature_bitmap |= L2INPUT_FEAT_FWD;
 	      vnet_buffer (p0)->sw_if_index[VLIB_RX] = 0;

@@ -69,9 +69,9 @@ echo_session_dequeue_notify (echo_session_t * s)
   int rv;
   if (!svm_fifo_set_event (s->rx_fifo))
     return;
-  if ((rv =
-       app_send_io_evt_to_vpp (s->vpp_evt_q, s->rx_fifo->master_session_index,
-			       SESSION_IO_EVT_RX, SVM_Q_WAIT)))
+  if ((rv = app_send_io_evt_to_vpp (s->vpp_evt_q,
+				    s->rx_fifo->shr->master_session_index,
+				    SESSION_IO_EVT_RX, SVM_Q_WAIT)))
     ECHO_FAIL (ECHO_FAIL_SEND_IO_EVT, "app_send_io_evt_to_vpp errored %d",
 	       rv);
   svm_fifo_clear_deq_ntf (s->rx_fifo);
@@ -263,11 +263,11 @@ echo_free_sessions (echo_main_t * em)
   u32 *session_indexes = 0, *session_index;
 
   /* *INDENT-OFF* */
-  pool_foreach (s, em->sessions,
-  ({
+  pool_foreach (s, em->sessions)
+   {
     if (s->session_state == ECHO_SESSION_STATE_CLOSED)
-      vec_add1 (session_indexes, s->session_index);}
-  ));
+      vec_add1 (session_indexes, s->session_index);
+   }
   /* *INDENT-ON* */
   vec_foreach (session_index, session_indexes)
   {
@@ -537,27 +537,11 @@ session_bound_handler (session_bound_msg_t * mp)
     em->proto_cb_vft->bound_uri_cb (mp, listen_session);
 }
 
-static int
-echo_segment_is_not_mapped (u64 segment_handle)
-{
-  echo_main_t *em = &echo_main;
-  uword *segment_present;
-  ECHO_LOG (3, "Check if segment mapped 0x%lx...", segment_handle);
-  clib_spinlock_lock (&em->segment_handles_lock);
-  segment_present = hash_get (em->shared_segment_handles, segment_handle);
-  clib_spinlock_unlock (&em->segment_handles_lock);
-  if (segment_present != 0)
-    return 0;
-  ECHO_LOG (2, "Segment not mapped (0x%lx)", segment_handle);
-  return -1;
-}
-
 static void
 session_accepted_handler (session_accepted_msg_t * mp)
 {
   app_session_evt_t _app_evt, *app_evt = &_app_evt;
   session_accepted_reply_msg_t *rmp;
-  svm_fifo_t *rx_fifo, *tx_fifo;
   echo_main_t *em = &echo_main;
   echo_session_t *session, *ls;
 
@@ -567,24 +551,20 @@ session_accepted_handler (session_accepted_msg_t * mp)
 		 "Unknown listener handle 0x%lx", mp->listener_handle);
       return;
     }
-  if (echo_segment_is_not_mapped (mp->segment_handle))
+
+  /* Allocate local session and set it up */
+  session = echo_session_new (em);
+
+  if (echo_attach_session (mp->segment_handle, mp->server_rx_fifo,
+			   mp->server_tx_fifo, mp->vpp_event_queue_address,
+			   session))
     {
       ECHO_FAIL (ECHO_FAIL_ACCEPTED_WAIT_FOR_SEG_ALLOC,
 		 "accepted wait_for_segment_allocation errored");
       return;
     }
 
-  /* Allocate local session and set it up */
-  session = echo_session_new (em);
   session->vpp_session_handle = mp->handle;
-
-  rx_fifo = uword_to_pointer (mp->server_rx_fifo, svm_fifo_t *);
-  rx_fifo->client_session_index = session->session_index;
-  tx_fifo = uword_to_pointer (mp->server_tx_fifo, svm_fifo_t *);
-  tx_fifo->client_session_index = session->session_index;
-
-  session->rx_fifo = rx_fifo;
-  session->tx_fifo = tx_fifo;
 
   /* session->transport needed by app_send_dgram */
   clib_memcpy_fast (&session->transport.rmt_ip, &mp->rmt.ip,
@@ -596,10 +576,8 @@ session_accepted_handler (session_accepted_msg_t * mp)
   session->transport.lcl_port = em->uri_elts.port;
 
   session->vpp_session_handle = mp->handle;
-  session->start = clib_time_now (&em->clib_time);
-  session->vpp_evt_q = uword_to_pointer (mp->vpp_event_queue_address,
-					 svm_msg_q_t *);
   session->listener_index = ls->session_index;
+  session->start = clib_time_now (&em->clib_time);
 
   /* Add it to lookup table */
   ECHO_LOG (2, "Accepted session 0x%lx S[%u] -> 0x%lx S[%u]",
@@ -622,7 +600,6 @@ session_connected_handler (session_connected_msg_t * mp)
   echo_main_t *em = &echo_main;
   echo_session_t *session;
   u32 listener_index = htonl (mp->context);
-  svm_fifo_t *rx_fifo, *tx_fifo;
 
   clib_atomic_add_fetch (&em->max_sim_connects, 1);
 
@@ -636,24 +613,18 @@ session_connected_handler (session_connected_msg_t * mp)
     }
 
   session = echo_session_new (em);
-  if (echo_segment_is_not_mapped (mp->segment_handle))
+
+  if (echo_attach_session (mp->segment_handle, mp->server_rx_fifo,
+			   mp->server_tx_fifo, mp->vpp_event_queue_address,
+			   session))
     {
       ECHO_FAIL (ECHO_FAIL_CONNECTED_WAIT_FOR_SEG_ALLOC,
 		 "connected wait_for_segment_allocation errored");
       return;
     }
 
-  rx_fifo = uword_to_pointer (mp->server_rx_fifo, svm_fifo_t *);
-  rx_fifo->client_session_index = session->session_index;
-  tx_fifo = uword_to_pointer (mp->server_tx_fifo, svm_fifo_t *);
-  tx_fifo->client_session_index = session->session_index;
-
-  session->rx_fifo = rx_fifo;
-  session->tx_fifo = tx_fifo;
   session->vpp_session_handle = mp->handle;
   session->start = clib_time_now (&em->clib_time);
-  session->vpp_evt_q = uword_to_pointer (mp->vpp_event_queue_address,
-					 svm_msg_q_t *);
   session->listener_index = listener_index;
   /* session->transport needed by app_send_dgram */
   clib_memcpy_fast (&session->transport.lcl_ip, &mp->lcl.ip,
@@ -734,7 +705,6 @@ add_segment_handler (session_app_add_segment_msg_t * mp)
 {
   fifo_segment_main_t *sm = &echo_main.segment_main;
   fifo_segment_create_args_t _a, *a = &_a;
-  echo_main_t *em = &echo_main;
   int *fds = 0, i;
   char *seg_name = (char *) mp->segment_name;
   u64 segment_handle = mp->segment_handle;
@@ -749,7 +719,8 @@ add_segment_handler (session_app_add_segment_msg_t * mp)
 	  goto failed;
 	}
 
-      if (echo_ssvm_segment_attach (seg_name, SSVM_SEGMENT_MEMFD, fds[0]))
+      if (echo_segment_attach (segment_handle, seg_name, SSVM_SEGMENT_MEMFD,
+			       fds[0]))
 	{
 	  ECHO_FAIL (ECHO_FAIL_VL_API_SVM_FIFO_SEG_ATTACH,
 		     "svm_fifo_segment_attach ('%s') "
@@ -771,7 +742,6 @@ add_segment_handler (session_app_add_segment_msg_t * mp)
 	  goto failed;
 	}
     }
-  echo_segment_handle_add_del (em, segment_handle, 1 /* add */ );
   ECHO_LOG (2, "Mapped segment 0x%lx", segment_handle);
   return;
 
@@ -784,8 +754,7 @@ failed:
 static void
 del_segment_handler (session_app_del_segment_msg_t * mp)
 {
-  echo_main_t *em = &echo_main;
-  echo_segment_handle_add_del (em, mp->segment_handle, 0 /* add */ );
+  echo_segment_detach (mp->segment_handle);
   ECHO_LOG (2, "Unmaped segment 0x%lx", mp->segment_handle);
 }
 
@@ -835,7 +804,7 @@ echo_process_rpcs (echo_main_t * em)
 {
   echo_rpc_msg_t *rpc;
   svm_msg_q_msg_t msg;
-  svm_msg_q_t *mq = em->rpc_msq_queue;
+  svm_msg_q_t *mq = &em->rpc_msq_queue;
 
   while (em->state < STATE_DATA_DONE && !em->time_to_stop)
     {
@@ -1350,7 +1319,7 @@ main (int argc, char **argv)
   cfg->n_rings = 1;
   cfg->q_nitems = rpc_queue_size;
   cfg->ring_cfgs = rc;
-  em->rpc_msq_queue = svm_msg_q_alloc (cfg);
+  svm_msg_q_attach (&em->rpc_msq_queue, svm_msg_q_alloc (cfg));
 
   signal (SIGINT, stop_signal);
   signal (SIGQUIT, stop_signal);

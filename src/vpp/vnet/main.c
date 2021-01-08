@@ -111,6 +111,9 @@ main (int argc, char *argv[])
   uword main_heap_size = (1ULL << 30);
   u8 *sizep;
   u32 size;
+  clib_mem_page_sz_t main_heap_log2_page_sz = CLIB_MEM_PAGE_SZ_DEFAULT;
+  unformat_input_t input, sub_input;
+  u8 *s = 0, *v = 0;
   int main_core = 1;
   cpu_set_t cpuset;
   void *main_heap;
@@ -268,8 +271,47 @@ main (int argc, char *argv[])
 	    }
 	}
     }
-
 defaulted:
+
+  /* temporary heap */
+  clib_mem_init (0, 1 << 20);
+  unformat_init_command_line (&input, (char **) argv);
+
+  while (unformat_check_input (&input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (&input, "memory %v", &v))
+	{
+	  unformat_init_vector (&sub_input, v);
+	  v = 0;
+	  while (unformat_check_input (&sub_input) != UNFORMAT_END_OF_INPUT)
+	    {
+	      if (unformat (&sub_input, "main-heap-size %U",
+			    unformat_memory_size, &main_heap_size))
+		;
+	      else if (unformat (&sub_input, "main-heap-page-size %U",
+				 unformat_log2_page_size,
+				 &main_heap_log2_page_sz))
+		;
+	      else
+		{
+		  fformat (stderr, "unknown 'memory' config input '%U'\n",
+			   format_unformat_error, &sub_input);
+		  exit (1);
+		}
+
+	    }
+	  unformat_free (&sub_input);
+	}
+      else if (!unformat (&input, "%s %v", &s, &v))
+	break;
+
+      vec_reset_length (s);
+      vec_reset_length (v);
+    }
+  vec_free (s);
+  vec_free (v);
+
+  unformat_free (&input);
 
   /* set process affinity for main thread */
   CPU_ZERO (&cpuset);
@@ -279,14 +321,14 @@ defaulted:
   /* Set up the plugin message ID allocator right now... */
   vl_msg_api_set_first_available_msg_id (VL_MSG_FIRST_AVAILABLE);
 
-  /* Allocate main heap */
-  if ((main_heap = clib_mem_init_thread_safe (0, main_heap_size)))
-    {
-      vlib_worker_thread_t tmp;
+  /* destroy temporary heap and create main one */
+  clib_mem_destroy ();
 
+  if ((main_heap = clib_mem_init_with_page_size (main_heap_size,
+						 main_heap_log2_page_sz)))
+    {
       /* Figure out which numa runs the main thread */
-      vlib_get_thread_core_numa (&tmp, main_core);
-      __os_numa_index = tmp.numa_id;
+      __os_numa_index = clib_get_current_numa_node ();
 
       /* and use the main heap as that numa's numa heap */
       clib_mem_set_per_numa_heap (main_heap);
@@ -306,20 +348,16 @@ defaulted:
 }
 
 static clib_error_t *
+memory_config (vlib_main_t * vm, unformat_input_t * input)
+{
+  return 0;
+}
+
+VLIB_CONFIG_FUNCTION (memory_config, "memory");
+
+static clib_error_t *
 heapsize_config (vlib_main_t * vm, unformat_input_t * input)
 {
-  u32 junk;
-
-  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
-    {
-      if (unformat (input, "%dm", &junk)
-	  || unformat (input, "%dM", &junk)
-	  || unformat (input, "%dg", &junk) || unformat (input, "%dG", &junk))
-	return 0;
-      else
-	return clib_error_return (0, "unknown input '%U'",
-				  format_unformat_error, input);
-    }
   return 0;
 }
 
@@ -361,13 +399,13 @@ test_plugin_path_config (vlib_main_t * vm, unformat_input_t * input)
 VLIB_CONFIG_FUNCTION (test_plugin_path_config, "test_plugin_path");
 
 void vl_msg_api_post_mortem_dump (void);
-void elog_post_mortem_dump (void);
+void vlib_post_mortem_dump (void);
 
 void
 os_panic (void)
 {
   vl_msg_api_post_mortem_dump ();
-  elog_post_mortem_dump ();
+  vlib_post_mortem_dump ();
   abort ();
 }
 
@@ -390,7 +428,7 @@ os_exit (int code)
       recursion_block = 1;
 
       vl_msg_api_post_mortem_dump ();
-      elog_post_mortem_dump ();
+      vlib_post_mortem_dump ();
       vhost_user_unmap_all ();
       abort ();
     }
@@ -433,34 +471,12 @@ vlib_app_num_thread_stacks_needed (void)
 
 #include <vppinfra/bihash_8_8.h>
 
-typedef struct
-{
-  u8 *name;
-  u64 actual_virt_size;
-  u64 configured_virt_size;
-} name_sort_t;
-
-static int
-name_sort_cmp (void *a1, void *a2)
-{
-  name_sort_t *n1 = a1;
-  name_sort_t *n2 = a2;
-
-  return strcmp ((char *) n1->name, (char *) n2->name);
-}
-
 static clib_error_t *
 show_bihash_command_fn (vlib_main_t * vm,
 			unformat_input_t * input, vlib_cli_command_t * cmd)
 {
   int i;
   clib_bihash_8_8_t *h;
-  u64 total_actual_virt_size = 0;
-  u64 total_configured_virt_size = 0;
-  u64 actual_virt_size;
-  u64 configured_virt_size;
-  name_sort_t *names = 0;
-  name_sort_t *this;
   int verbose = 0;
 
   if (unformat (input, "verbose"))
@@ -469,37 +485,9 @@ show_bihash_command_fn (vlib_main_t * vm,
   for (i = 0; i < vec_len (clib_all_bihashes); i++)
     {
       h = (clib_bihash_8_8_t *) clib_all_bihashes[i];
-      if (alloc_arena (h) || verbose)
-	{
-	  vec_add2 (names, this, 1);
-	  this->name = format (0, "%s%c", h->name, 0);
-	  configured_virt_size = h->memory_size;
-	  actual_virt_size = alloc_arena (h) ? h->memory_size : 0ULL;
-	  this->actual_virt_size = actual_virt_size;
-	  this->configured_virt_size = configured_virt_size;
-	  total_actual_virt_size += actual_virt_size;
-	  total_configured_virt_size += configured_virt_size;
-	}
+      vlib_cli_output (vm, "\n%U", h->fmt_fn, h, verbose);
     }
 
-  vec_sort_with_function (names, name_sort_cmp);
-
-  vlib_cli_output (vm, "%-30s %8s %s", "Name", "Actual", "Configured");
-
-  for (i = 0; i < vec_len (names); i++)
-    {
-      vlib_cli_output (vm, "%-30s %8U %U", names[i].name,
-		       format_memory_size,
-		       names[i].actual_virt_size,
-		       format_memory_size, names[i].configured_virt_size);
-      vec_free (names[i].name);
-    }
-
-  vec_free (names);
-
-  vlib_cli_output (vm, "%-30s %8U %U", "Total",
-		   format_memory_size, total_actual_virt_size,
-		   format_memory_size, total_configured_virt_size);
   return 0;
 }
 

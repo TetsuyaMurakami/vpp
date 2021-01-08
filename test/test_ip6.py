@@ -21,9 +21,10 @@ from six import moves
 
 from framework import VppTestCase, VppTestRunner
 from util import ppp, ip6_normalize, mk_ll_addr
-from vpp_ip import DpoProto
+from vpp_papi import VppEnum
+from vpp_ip import DpoProto, VppIpPuntPolicer, VppIpPuntRedirect
 from vpp_ip_route import VppIpRoute, VppRoutePath, find_route, VppIpMRoute, \
-    VppMRoutePath, MRouteItfFlags, MRouteEntryFlags, VppMplsIpBind, \
+    VppMRoutePath, VppMplsIpBind, \
     VppMplsRoute, VppMplsTable, VppIpTable, FibPathType, FibPathProto, \
     VppIpInterfaceAddress, find_route_in_dump, find_mroute_in_dump, \
     VppIp6LinkLocalAddress
@@ -163,6 +164,10 @@ class TestIPv6ND(VppTestCase):
 
 class TestIPv6(TestIPv6ND):
     """ IPv6 Test Case """
+
+    @classmethod
+    def force_solo(cls):
+        return True
 
     @classmethod
     def setUpClass(cls):
@@ -1841,6 +1846,8 @@ class TestIPDisabled(VppTestCase):
     def test_ip_disabled(self):
         """ IP Disabled """
 
+        MRouteItfFlags = VppEnum.vl_api_mfib_itf_flags_t
+        MRouteEntryFlags = VppEnum.vl_api_mfib_entry_flags_t
         #
         # An (S,G).
         # one accepting interface, pg0, 2 forwarding interfaces
@@ -1849,11 +1856,11 @@ class TestIPDisabled(VppTestCase):
             self,
             "::",
             "ffef::1", 128,
-            MRouteEntryFlags.MFIB_ENTRY_FLAG_NONE,
+            MRouteEntryFlags.MFIB_API_ENTRY_FLAG_NONE,
             [VppMRoutePath(self.pg1.sw_if_index,
-                           MRouteItfFlags.MFIB_ITF_FLAG_ACCEPT),
+                           MRouteItfFlags.MFIB_API_ITF_FLAG_ACCEPT),
              VppMRoutePath(self.pg0.sw_if_index,
-                           MRouteItfFlags.MFIB_ITF_FLAG_FORWARD)])
+                           MRouteItfFlags.MFIB_API_ITF_FLAG_FORWARD)])
         route_ff_01.add_vpp_config()
 
         pu = (Ether(src=self.pg1.remote_mac,
@@ -2204,9 +2211,9 @@ class TestIP6Punt(VppTestCase):
         # Configure a punt redirect via pg1.
         #
         nh_addr = self.pg1.remote_ip6
-        self.vapi.ip_punt_redirect(self.pg0.sw_if_index,
-                                   self.pg1.sw_if_index,
-                                   nh_addr)
+        ip_punt_redirect = VppIpPuntRedirect(self, self.pg0.sw_if_index,
+                                             self.pg1.sw_if_index, nh_addr)
+        ip_punt_redirect.add_vpp_config()
 
         self.send_and_expect(self.pg0, pkts, self.pg1)
 
@@ -2215,7 +2222,9 @@ class TestIP6Punt(VppTestCase):
         #
         policer = VppPolicer(self, "ip6-punt", 400, 0, 10, 0, rate_type=1)
         policer.add_vpp_config()
-        self.vapi.ip_punt_police(policer.policer_index, is_ip6=1)
+        ip_punt_policer = VppIpPuntPolicer(self, policer.policer_index,
+                                           is_ip6=True)
+        ip_punt_policer.add_vpp_config()
 
         self.vapi.cli("clear trace")
         self.pg0.add_stream(pkts)
@@ -2233,32 +2242,25 @@ class TestIP6Punt(VppTestCase):
         #
         # remove the policer. back to full rx
         #
-        self.vapi.ip_punt_police(policer.policer_index, is_add=0, is_ip6=1)
+        ip_punt_policer.remove_vpp_config()
         policer.remove_vpp_config()
         self.send_and_expect(self.pg0, pkts, self.pg1)
 
         #
         # remove the redirect. expect full drop.
         #
-        self.vapi.ip_punt_redirect(self.pg0.sw_if_index,
-                                   self.pg1.sw_if_index,
-                                   nh_addr,
-                                   is_add=0)
+        ip_punt_redirect.remove_vpp_config()
         self.send_and_assert_no_replies(self.pg0, pkts,
                                         "IP no punt config")
 
         #
         # Add a redirect that is not input port selective
         #
-        self.vapi.ip_punt_redirect(0xffffffff,
-                                   self.pg1.sw_if_index,
-                                   nh_addr)
+        ip_punt_redirect = VppIpPuntRedirect(self, 0xffffffff,
+                                             self.pg1.sw_if_index, nh_addr)
+        ip_punt_redirect.add_vpp_config()
         self.send_and_expect(self.pg0, pkts, self.pg1)
-
-        self.vapi.ip_punt_redirect(0xffffffff,
-                                   self.pg1.sw_if_index,
-                                   nh_addr,
-                                   is_add=0)
+        ip_punt_redirect.remove_vpp_config()
 
     def test_ip_punt_dump(self):
         """ IP6 punt redirect dump"""
@@ -2266,24 +2268,23 @@ class TestIP6Punt(VppTestCase):
         #
         # Configure a punt redirects
         #
-        nh_addr = self.pg3.remote_ip6
-        self.vapi.ip_punt_redirect(self.pg0.sw_if_index,
-                                   self.pg3.sw_if_index,
-                                   nh_addr)
-        self.vapi.ip_punt_redirect(self.pg1.sw_if_index,
-                                   self.pg3.sw_if_index,
-                                   nh_addr)
-        self.vapi.ip_punt_redirect(self.pg2.sw_if_index,
-                                   self.pg3.sw_if_index,
-                                   '0::0')
+        nh_address = self.pg3.remote_ip6
+        ipr_03 = VppIpPuntRedirect(self, self.pg0.sw_if_index,
+                                   self.pg3.sw_if_index, nh_address)
+        ipr_13 = VppIpPuntRedirect(self, self.pg1.sw_if_index,
+                                   self.pg3.sw_if_index, nh_address)
+        ipr_23 = VppIpPuntRedirect(self, self.pg2.sw_if_index,
+                                   self.pg3.sw_if_index, '0::0')
+        ipr_03.add_vpp_config()
+        ipr_13.add_vpp_config()
+        ipr_23.add_vpp_config()
 
         #
         # Dump pg0 punt redirects
         #
-        punts = self.vapi.ip_punt_redirect_dump(self.pg0.sw_if_index,
-                                                is_ipv6=1)
-        for p in punts:
-            self.assertEqual(p.punt.rx_sw_if_index, self.pg0.sw_if_index)
+        self.assertTrue(ipr_03.query_vpp_config())
+        self.assertTrue(ipr_13.query_vpp_config())
+        self.assertTrue(ipr_23.query_vpp_config())
 
         #
         # Dump punt redirects for all interfaces
@@ -2549,6 +2550,8 @@ class TestIPReplace(VppTestCase):
     def test_replace(self):
         """ IP Table Replace """
 
+        MRouteItfFlags = VppEnum.vl_api_mfib_itf_flags_t
+        MRouteEntryFlags = VppEnum.vl_api_mfib_entry_flags_t
         N_ROUTES = 20
         links = [self.pg0, self.pg1, self.pg2, self.pg3]
         routes = [[], [], [], []]
@@ -2571,18 +2574,18 @@ class TestIPReplace(VppTestCase):
                 multi = VppIpMRoute(
                     self, "::",
                     "ff:2001::%d" % jj, 128,
-                    MRouteEntryFlags.MFIB_ENTRY_FLAG_NONE,
+                    MRouteEntryFlags.MFIB_API_ENTRY_FLAG_NONE,
                     [VppMRoutePath(self.pg0.sw_if_index,
-                                   MRouteItfFlags.MFIB_ITF_FLAG_ACCEPT,
+                                   MRouteItfFlags.MFIB_API_ITF_FLAG_ACCEPT,
                                    proto=FibPathProto.FIB_PATH_NH_PROTO_IP6),
                      VppMRoutePath(self.pg1.sw_if_index,
-                                   MRouteItfFlags.MFIB_ITF_FLAG_FORWARD,
+                                   MRouteItfFlags.MFIB_API_ITF_FLAG_FORWARD,
                                    proto=FibPathProto.FIB_PATH_NH_PROTO_IP6),
                      VppMRoutePath(self.pg2.sw_if_index,
-                                   MRouteItfFlags.MFIB_ITF_FLAG_FORWARD,
+                                   MRouteItfFlags.MFIB_API_ITF_FLAG_FORWARD,
                                    proto=FibPathProto.FIB_PATH_NH_PROTO_IP6),
                      VppMRoutePath(self.pg3.sw_if_index,
-                                   MRouteItfFlags.MFIB_ITF_FLAG_FORWARD,
+                                   MRouteItfFlags.MFIB_API_ITF_FLAG_FORWARD,
                                    proto=FibPathProto.FIB_PATH_NH_PROTO_IP6)],
                     table_id=t.table_id).add_vpp_config()
                 routes[ii].append({'uni': uni,

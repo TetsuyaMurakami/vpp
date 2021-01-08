@@ -17,57 +17,6 @@
 
 static pthread_key_t vcl_worker_stop_key;
 
-static const char *
-vppcom_app_state_str (app_state_t state)
-{
-  char *st;
-
-  switch (state)
-    {
-    case STATE_APP_START:
-      st = "STATE_APP_START";
-      break;
-
-    case STATE_APP_CONN_VPP:
-      st = "STATE_APP_CONN_VPP";
-      break;
-
-    case STATE_APP_ENABLED:
-      st = "STATE_APP_ENABLED";
-      break;
-
-    case STATE_APP_ATTACHED:
-      st = "STATE_APP_ATTACHED";
-      break;
-
-    default:
-      st = "UNKNOWN_APP_STATE";
-      break;
-    }
-
-  return st;
-}
-
-int
-vcl_wait_for_app_state_change (app_state_t app_state)
-{
-  vcl_worker_t *wrk = vcl_worker_get_current ();
-  f64 timeout = clib_time_now (&wrk->clib_time) + vcm->cfg.app_timeout;
-
-  while (clib_time_now (&wrk->clib_time) < timeout)
-    {
-      if (vcm->app_state == app_state)
-	return VPPCOM_OK;
-      if (vcm->app_state == STATE_APP_FAILED)
-	return VPPCOM_ECONNABORTED;
-    }
-  VDBG (0, "timeout waiting for state %s (%d)",
-	vppcom_app_state_str (app_state), app_state);
-  vcl_evt (VCL_EVT_SESSION_TIMEOUT, vcm, app_state);
-
-  return VPPCOM_ETIMEDOUT;
-}
-
 vcl_mq_evt_conn_t *
 vcl_mq_evt_conn_alloc (vcl_worker_t * wrk)
 {
@@ -152,24 +101,30 @@ vcl_worker_free (vcl_worker_t * wrk)
   pool_put (vcm->workers, wrk);
 }
 
+int
+vcl_api_app_worker_add (void)
+{
+  if (vcm->cfg.vpp_app_socket_api)
+    return vcl_sapi_app_worker_add ();
+
+  return vcl_bapi_app_worker_add ();
+}
+
+void
+vcl_api_app_worker_del (vcl_worker_t * wrk)
+{
+  if (vcm->cfg.vpp_app_socket_api)
+    return vcl_sapi_app_worker_del (wrk);
+
+  vcl_bapi_app_worker_del (wrk);
+}
+
 void
 vcl_worker_cleanup (vcl_worker_t * wrk, u8 notify_vpp)
 {
   clib_spinlock_lock (&vcm->workers_lock);
   if (notify_vpp)
-    {
-      /* Notify vpp that the worker is going away */
-      if (wrk->wrk_index == vcl_get_worker_index ())
-	vcl_send_app_worker_add_del (0 /* is_add */ );
-      else
-	vcl_send_child_worker_del (wrk);
-
-      /* Disconnect the binary api */
-      if (vec_len (vcm->workers) == 1)
-	vppcom_disconnect_from_vpp ();
-      else
-	vl_client_send_disconnect (1 /* vpp should cleanup */ );
-    }
+    vcl_api_app_worker_del (wrk);
 
   if (wrk->mqs_epfd > 0)
     close (wrk->mqs_epfd);
@@ -247,11 +202,10 @@ vcl_worker_register_with_vpp (void)
 
   clib_spinlock_lock (&vcm->workers_lock);
 
-  vcm->app_state = STATE_APP_ADDING_WORKER;
-  vcl_send_app_worker_add_del (1 /* is_add */ );
-  if (vcl_wait_for_app_state_change (STATE_APP_READY))
+  if (vcl_api_app_worker_add ())
     {
       VDBG (0, "failed to add worker to vpp");
+      clib_spinlock_unlock (&vcm->workers_lock);
       return -1;
     }
   if (pthread_key_create (&vcl_worker_stop_key, vcl_worker_cleanup_cb))
@@ -265,143 +219,94 @@ vcl_worker_register_with_vpp (void)
   return 0;
 }
 
-int
-vcl_worker_set_bapi (void)
-{
-  vcl_worker_t *wrk = vcl_worker_get_current ();
-  int i;
-
-  /* Find the first worker with the same pid */
-  for (i = 0; i < vec_len (vcm->workers); i++)
-    {
-      if (i == wrk->wrk_index)
-	continue;
-      if (vcm->workers[i].current_pid == wrk->current_pid)
-	{
-	  wrk->vl_input_queue = vcm->workers[i].vl_input_queue;
-	  wrk->my_client_index = vcm->workers[i].my_client_index;
-	  return 0;
-	}
-    }
-  return -1;
-}
-
 svm_msg_q_t *
 vcl_worker_ctrl_mq (vcl_worker_t * wrk)
 {
   return wrk->ctrl_mq;
 }
 
-void
-vcl_cleanup_bapi (void)
-{
-  socket_client_main_t *scm = &socket_client_main;
-  api_main_t *am = vlibapi_get_main ();
-
-  am->my_client_index = ~0;
-  am->my_registration = 0;
-  am->vl_input_queue = 0;
-  am->msg_index_by_name_and_crc = 0;
-  scm->socket_fd = 0;
-
-  vl_client_api_unmap ();
-}
-
 int
-vcl_session_read_ready (vcl_session_t * session)
+vcl_session_read_ready (vcl_session_t * s)
 {
-  u32 max_deq;
-
-  /* Assumes caller has acquired spinlock: vcm->sessions_lockp */
-  if (PREDICT_FALSE (session->is_vep))
+  if (PREDICT_FALSE (s->flags & VCL_SESSION_F_IS_VEP))
     {
       VDBG (0, "ERROR: session %u: cannot read from an epoll session!",
-	    session->session_index);
+	    s->session_index);
       return VPPCOM_EBADFD;
     }
 
-  if (PREDICT_FALSE (!(session->session_state & (STATE_OPEN | STATE_LISTEN))))
+  if (vcl_session_is_open (s))
     {
-      vcl_session_state_t state = session->session_state;
-      int rv;
+      if (vcl_session_is_ct (s))
+	return svm_fifo_max_dequeue_cons (s->ct_rx_fifo);
 
-      rv = ((state & STATE_DISCONNECT) ? VPPCOM_ECONNRESET : VPPCOM_ENOTCONN);
+      if (s->is_dgram)
+	{
+	  session_dgram_pre_hdr_t ph;
+	  u32 max_deq;
 
-      VDBG (1, "session %u [0x%llx]: not open! state 0x%x (%s), ret %d (%s)",
-	    session->session_index, session->vpp_handle, state,
-	    vppcom_session_state_str (state), rv, vppcom_retval_str (rv));
-      return rv;
+	  max_deq = svm_fifo_max_dequeue_cons (s->rx_fifo);
+	  if (max_deq <= SESSION_CONN_HDR_LEN)
+	    return 0;
+	  if (svm_fifo_peek (s->rx_fifo, 0, sizeof (ph), (u8 *) & ph) < 0)
+	    return 0;
+	  if (ph.data_length + SESSION_CONN_HDR_LEN > max_deq)
+	    return 0;
+
+	  return ph.data_length;
+	}
+
+      return svm_fifo_max_dequeue_cons (s->rx_fifo);
     }
-
-  if (session->session_state & STATE_LISTEN)
-    return clib_fifo_elts (session->accept_evts_fifo);
-
-  if (vcl_session_is_ct (session))
-    return svm_fifo_max_dequeue_cons (session->ct_rx_fifo);
-
-  max_deq = svm_fifo_max_dequeue_cons (session->rx_fifo);
-
-  if (session->is_dgram)
+  else if (s->session_state == VCL_STATE_LISTEN)
     {
-      session_dgram_pre_hdr_t ph;
-
-      if (max_deq <= SESSION_CONN_HDR_LEN)
-	return 0;
-      if (svm_fifo_peek (session->rx_fifo, 0, sizeof (ph), (u8 *) & ph) < 0)
-	return 0;
-      if (ph.data_length + SESSION_CONN_HDR_LEN > max_deq)
-	return 0;
-
-      return ph.data_length;
+      return clib_fifo_elts (s->accept_evts_fifo);
     }
-
-  return max_deq;
+  else
+    {
+      return (s->session_state == VCL_STATE_DISCONNECT) ?
+	VPPCOM_ECONNRESET : VPPCOM_ENOTCONN;
+    }
 }
 
 int
-vcl_session_write_ready (vcl_session_t * session)
+vcl_session_write_ready (vcl_session_t * s)
 {
-  /* Assumes caller has acquired spinlock: vcm->sessions_lockp */
-  if (PREDICT_FALSE (session->is_vep))
+  if (PREDICT_FALSE (s->flags & VCL_SESSION_F_IS_VEP))
     {
       VDBG (0, "session %u [0x%llx]: cannot write to an epoll session!",
-	    session->session_index, session->vpp_handle);
+	    s->session_index, s->vpp_handle);
       return VPPCOM_EBADFD;
     }
 
-  if (PREDICT_FALSE (session->session_state & STATE_LISTEN))
+  if (vcl_session_is_open (s))
     {
-      if (session->tx_fifo)
-	return svm_fifo_max_enqueue_prod (session->tx_fifo);
+      if (vcl_session_is_ct (s))
+	return svm_fifo_max_enqueue_prod (s->ct_tx_fifo);
+
+      if (s->is_dgram)
+	{
+	  u32 max_enq = svm_fifo_max_enqueue_prod (s->tx_fifo);
+
+	  if (max_enq <= sizeof (session_dgram_hdr_t))
+	    return 0;
+	  return max_enq - sizeof (session_dgram_hdr_t);
+	}
+
+      return svm_fifo_max_enqueue_prod (s->tx_fifo);
+    }
+  else if (s->session_state == VCL_STATE_LISTEN)
+    {
+      if (s->tx_fifo)
+	return svm_fifo_max_enqueue_prod (s->tx_fifo);
       else
 	return VPPCOM_EBADFD;
     }
-
-  if (PREDICT_FALSE (!(session->session_state & STATE_OPEN)))
+  else
     {
-      vcl_session_state_t state = session->session_state;
-      int rv;
-
-      rv = ((state & STATE_DISCONNECT) ? VPPCOM_ECONNRESET : VPPCOM_ENOTCONN);
-      VDBG (0, "session %u [0x%llx]: not open! state 0x%x (%s), ret %d (%s)",
-	    session->session_index, session->vpp_handle, state,
-	    vppcom_session_state_str (state), rv, vppcom_retval_str (rv));
-      return rv;
+      return (s->session_state == VCL_STATE_DISCONNECT) ?
+	VPPCOM_ECONNRESET : VPPCOM_ENOTCONN;
     }
-
-  if (vcl_session_is_ct (session))
-    return svm_fifo_max_enqueue_prod (session->ct_tx_fifo);
-
-  if (session->is_dgram)
-    {
-      u32 max_enq = svm_fifo_max_enqueue_prod (session->tx_fifo);
-
-      if (max_enq <= sizeof (session_dgram_hdr_t))
-	return 0;
-      return max_enq - sizeof (session_dgram_hdr_t);
-    }
-
-  return svm_fifo_max_enqueue_prod (session->tx_fifo);
 }
 
 int
@@ -469,6 +374,87 @@ vcl_segment_detach (u64 segment_handle)
   VDBG (0, "detached segment %u handle %u", segment_index, segment_handle);
 }
 
+int
+vcl_segment_attach_session (uword segment_handle, uword rxf_offset,
+			    uword txf_offset, uword mq_offset, u8 is_ct,
+			    vcl_session_t *s)
+{
+  u32 fs_index, eqs_index;
+  svm_fifo_t *rxf, *txf;
+  fifo_segment_t *fs;
+  u64 eqs_handle;
+
+  fs_index = vcl_segment_table_lookup (segment_handle);
+  if (fs_index == VCL_INVALID_SEGMENT_INDEX)
+    {
+      VDBG (0, "ERROR: segment for session %u is not mounted!",
+	    s->session_index);
+      return -1;
+    }
+
+  if (!is_ct && mq_offset != (uword) ~0)
+    {
+      eqs_handle = vcl_vpp_worker_segment_handle (0);
+      eqs_index = vcl_segment_table_lookup (eqs_handle);
+      ASSERT (eqs_index != VCL_INVALID_SEGMENT_INDEX);
+    }
+
+  clib_rwlock_reader_lock (&vcm->segment_table_lock);
+
+  fs = fifo_segment_get_segment (&vcm->segment_main, fs_index);
+  rxf = fifo_segment_alloc_fifo_w_offset (fs, rxf_offset);
+  txf = fifo_segment_alloc_fifo_w_offset (fs, txf_offset);
+
+  if (!is_ct && mq_offset != (uword) ~0)
+    {
+      fs = fifo_segment_get_segment (&vcm->segment_main, eqs_index);
+      s->vpp_evt_q =
+	fifo_segment_msg_q_attach (fs, mq_offset, rxf->shr->slice_index);
+    }
+
+  clib_rwlock_reader_unlock (&vcm->segment_table_lock);
+
+  if (!is_ct)
+    {
+      rxf->shr->client_session_index = s->session_index;
+      txf->shr->client_session_index = s->session_index;
+      rxf->client_thread_index = vcl_get_worker_index ();
+      txf->client_thread_index = vcl_get_worker_index ();
+      s->rx_fifo = rxf;
+      s->tx_fifo = txf;
+    }
+  else
+    {
+      s->ct_rx_fifo = rxf;
+      s->ct_tx_fifo = txf;
+    }
+
+  return 0;
+}
+
+int
+vcl_segment_attach_mq (uword segment_handle, uword mq_offset, u32 mq_index,
+		       svm_msg_q_t **mq)
+{
+  fifo_segment_t *fs;
+  u32 fs_index;
+
+  fs_index = vcl_segment_table_lookup (segment_handle);
+  if (fs_index == VCL_INVALID_SEGMENT_INDEX)
+    {
+      VDBG (0, "ERROR: mq segment %lx for is not attached!", segment_handle);
+      return -1;
+    }
+
+  clib_rwlock_reader_lock (&vcm->segment_table_lock);
+
+  fs = fifo_segment_get_segment (&vcm->segment_main, fs_index);
+  *mq = fifo_segment_msg_q_attach (fs, mq_offset, mq_index);
+
+  clib_rwlock_reader_unlock (&vcm->segment_table_lock);
+
+  return 0;
+}
 
 /*
  * fd.io coding-style-patch-verification: ON

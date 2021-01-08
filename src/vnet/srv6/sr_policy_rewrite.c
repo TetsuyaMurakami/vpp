@@ -41,9 +41,9 @@
 #include <vlib/vlib.h>
 #include <vnet/vnet.h>
 #include <vnet/srv6/sr.h>
-#include <vnet/ip/ip.h>
+#include <vnet/ip/ip4_inlines.h>
+#include <vnet/ip/ip6_inlines.h>
 #include <vnet/srv6/sr_packet.h>
-#include <vnet/ip/ip6_packet.h>
 #include <vnet/fib/ip6_fib.h>
 #include <vnet/dpo/dpo.h>
 #include <vnet/dpo/replicate_dpo.h>
@@ -117,6 +117,12 @@ void
 sr_set_source (ip6_address_t * address)
 {
   clib_memcpy_fast (&sr_pr_encaps_src, address, sizeof (sr_pr_encaps_src));
+}
+
+ip6_address_t *
+sr_get_encaps_source ()
+{
+  return &sr_pr_encaps_src;
 }
 
 static clib_error_t *
@@ -973,10 +979,10 @@ sr_policy_command_fn (vlib_main_t * vm, unformat_input_t * input,
 	  sr_policy_fn_registration_t **plugin_it = 0;
 
 	  /* *INDENT-OFF* */
-	  pool_foreach (plugin, sm->policy_plugin_functions,
+	  pool_foreach (plugin, sm->policy_plugin_functions)
 	    {
 	      vec_add1 (vec_plugins, plugin);
-	    });
+	    }
 	  /* *INDENT-ON* */
 
 	  vec_foreach (plugin_it, vec_plugins)
@@ -1115,8 +1121,8 @@ show_sr_policies_command_fn (vlib_main_t * vm, unformat_input_t * input,
   vlib_cli_output (vm, "SR policies:");
 
   /* *INDENT-OFF* */
-  pool_foreach  (sr_policy, sm->sr_policies,
-                {vec_add1 (vec_policies, sr_policy); } );
+  pool_foreach (sr_policy, sm->sr_policies)
+                {vec_add1 (vec_policies, sr_policy); }
   /* *INDENT-ON* */
 
   vec_foreach_index (i, vec_policies)
@@ -1159,6 +1165,48 @@ VLIB_CLI_COMMAND (show_sr_policies_command, static) = {
   .path = "show sr policies",
   .short_help = "show sr policies",
   .function = show_sr_policies_command_fn,
+};
+/* *INDENT-ON* */
+
+/**
+ * @brief CLI to display onscreen the SR encaps source addr
+ */
+static clib_error_t *
+show_sr_encaps_source_command_fn (vlib_main_t * vm, unformat_input_t * input,
+				  vlib_cli_command_t * cmd)
+{
+  vlib_cli_output (vm, "SR encaps source addr = %U", format_ip6_address,
+		   sr_get_encaps_source ());
+
+  return 0;
+}
+
+/* *INDENT-OFF* */
+VLIB_CLI_COMMAND (show_sr_encaps_source_command, static) = {
+  .path = "show sr encaps source addr",
+  .short_help = "show sr encaps source addr",
+  .function = show_sr_encaps_source_command_fn,
+};
+/* *INDENT-ON* */
+
+/**
+ * @brief CLI to display onscreen the hop-limit value used for SRv6 encapsulation
+ */
+static clib_error_t *
+show_sr_encaps_hop_limit_command_fn (vlib_main_t * vm,
+				     unformat_input_t * input,
+				     vlib_cli_command_t * cmd)
+{
+  vlib_cli_output (vm, "SR encaps hop-limit = %u", sr_get_hop_limit ());
+
+  return 0;
+}
+
+/* *INDENT-OFF* */
+VLIB_CLI_COMMAND (show_sr_encaps_hop_limit_command, static) = {
+  .path = "show sr encaps hop-limit",
+  .short_help = "show sr encaps hop-limit",
+  .function = show_sr_encaps_hop_limit_command_fn,
 };
 /* *INDENT-ON* */
 
@@ -3363,8 +3411,8 @@ show_sr_policy_behaviors_command_fn (vlib_main_t * vm,
   vlib_cli_output (vm, "SR Policy behaviors:\n-----------------------\n\n");
 
   /* *INDENT-OFF* */
-  pool_foreach (plugin, sm->policy_plugin_functions,
-    ({ vec_add1 (plugins_vec, plugin); }));
+  pool_foreach (plugin, sm->policy_plugin_functions)
+     { vec_add1 (plugins_vec, plugin); }
   /* *INDENT-ON* */
 
   vlib_cli_output (vm, "Plugin behaviors:\n");

@@ -39,6 +39,7 @@
 
 #include <vlib/vlib.h>
 #include <vlib/threads.h>
+#include <vnet/classify/vnet_classify.h>
 
 u8 *vnet_trace_placeholder;
 
@@ -110,7 +111,7 @@ vlib_trace_frame_buffers_only (vlib_main_t * vm,
 }
 
 /* Free up all trace buffer memory. */
-always_inline void
+void
 clear_trace_buffer (void)
 {
   int i;
@@ -122,6 +123,12 @@ clear_trace_buffer (void)
     tm = &this_vlib_main->trace_main;
 
     tm->trace_enable = 0;
+    vec_free (tm->nodes);
+  }));
+
+  foreach_vlib_main (
+  ({
+    tm = &this_vlib_main->trace_main;
 
     for (i = 0; i < vec_len (tm->trace_buffer_pool); i++)
       if (! pool_is_free_index (tm->trace_buffer_pool, i))
@@ -175,8 +182,8 @@ VLIB_CLI_COMMAND (trace_cli_command,static) = {
 };
 /* *INDENT-ON* */
 
-static int
-trace_cmp (void *a1, void *a2)
+int
+trace_time_cmp (void *a1, void *a2)
 {
   vlib_trace_header_t **t1 = a1;
   vlib_trace_header_t **t2 = a2;
@@ -194,6 +201,15 @@ filter_accept (vlib_trace_main_t * tm, vlib_trace_header_t * h)
 
   if (tm->filter_flag == 0)
     return 1;
+
+  /*
+   * When capturing a post-mortem dispatch trace,
+   * toss all existing traces once per dispatch cycle.
+   * So we can trace 4 billion pkts without running out of
+   * memory...
+   */
+  if (tm->filter_flag == FILTER_FLAG_POST_MORTEM)
+    return 0;
 
   if (tm->filter_flag == FILTER_FLAG_INCLUDE)
     {
@@ -243,15 +259,15 @@ trace_apply_filter (vlib_main_t * vm)
    */
   n_accepted = 0;
   /* *INDENT-OFF* */
-  pool_foreach (h, tm->trace_buffer_pool,
-   ({
+  pool_foreach (h, tm->trace_buffer_pool)
+    {
       accept = filter_accept(tm, h[0]);
 
       if ((n_accepted == tm->filter_count) || !accept)
           vec_add1 (traces_to_remove, h);
       else
           n_accepted++;
-  }));
+  }
   /* *INDENT-ON* */
 
   /* remove all traces that we don't want to keep */
@@ -304,10 +320,10 @@ cli_show_trace_buffer (vlib_main_t * vm,
     trace_apply_filter(this_vlib_main);
 
     traces = 0;
-    pool_foreach (h, tm->trace_buffer_pool,
-    ({
+    pool_foreach (h, tm->trace_buffer_pool)
+     {
       vec_add1 (traces, h[0]);
-    }));
+    }
 
     if (vec_len (traces) == 0)
       {
@@ -316,7 +332,7 @@ cli_show_trace_buffer (vlib_main_t * vm,
       }
 
     /* Sort them by increasing time. */
-    vec_sort_with_function (traces, trace_cmp);
+    vec_sort_with_function (traces, trace_time_cmp);
 
     for (i = 0; i < vec_len (traces); i++)
       {
@@ -352,10 +368,57 @@ VLIB_CLI_COMMAND (show_trace_cli,static) = {
 /* *INDENT-ON* */
 
 int vlib_enable_disable_pkt_trace_filter (int enable) __attribute__ ((weak));
+
 int
 vlib_enable_disable_pkt_trace_filter (int enable)
 {
   return 0;
+}
+
+void
+vlib_trace_stop_and_clear (void)
+{
+  vlib_enable_disable_pkt_trace_filter (0);	/* disble tracing */
+  clear_trace_buffer ();
+}
+
+
+void
+trace_update_capture_options (u32 add, u32 node_index, u32 filter, u8 verbose)
+{
+  vlib_trace_main_t *tm;
+  vlib_trace_node_t *tn;
+
+  if (add == ~0)
+    add = 50;
+
+  /* *INDENT-OFF* */
+  foreach_vlib_main ((
+    {
+      tm = &this_vlib_main->trace_main;
+      tm->verbose = verbose;
+      vec_validate (tm->nodes, node_index);
+      tn = tm->nodes + node_index;
+
+      /*
+       * Adding 0 makes no real sense, and there wa no other way
+       * to explicilty zero-out the limits and count, so make
+       * an "add 0" request really be "set to 0".
+       */
+      if (add == 0)
+	  tn->limit = tn->count = 0;
+      else
+	  tn->limit += add;
+    }));
+
+  foreach_vlib_main ((
+    {
+      tm = &this_vlib_main->trace_main;
+      tm->trace_enable = 1;
+    }));
+  /* *INDENT-ON* */
+
+  vlib_enable_disable_pkt_trace_filter (! !filter);
 }
 
 static clib_error_t *
@@ -363,9 +426,7 @@ cli_add_trace_buffer (vlib_main_t * vm,
 		      unformat_input_t * input, vlib_cli_command_t * cmd)
 {
   unformat_input_t _line_input, *line_input = &_line_input;
-  vlib_trace_main_t *tm;
   vlib_node_t *node;
-  vlib_trace_node_t *tn;
   u32 node_index, add;
   u8 verbose = 0;
   int filter = 0;
@@ -406,26 +467,14 @@ cli_add_trace_buffer (vlib_main_t * vm,
       goto done;
     }
 
-  if (filter)
+  u32 filter_table = classify_get_trace_chain ();
+  if (filter && filter_table == ~0)
     {
-      if (vlib_enable_disable_pkt_trace_filter (1 /* enable */ ))
-	{
-	  error = clib_error_create ("No packet trace filter configured...");
-	  goto done;
-	}
+      error = clib_error_create ("No packet trace filter configured...");
+      goto done;
     }
 
-  /* *INDENT-OFF* */
-  foreach_vlib_main ((
-    {
-      tm = &this_vlib_main->trace_main;
-      tm->verbose = verbose;
-      vec_validate (tm->nodes, node_index);
-      tn = tm->nodes + node_index;
-      tn->limit += add;
-      tm->trace_enable = 1;
-    }));
-  /* *INDENT-ON* */
+  trace_update_capture_options (add, node_index, filter, verbose);
 
 done:
   unformat_free (line_input);
@@ -436,7 +485,7 @@ done:
 /* *INDENT-OFF* */
 VLIB_CLI_COMMAND (add_trace_cli,static) = {
   .path = "trace add",
-  .short_help = "Trace given number of packets",
+  .short_help = "trace add <input-graph-node> <add'l-pkts-for-node-> [filter] [verbose]",
   .function = cli_add_trace_buffer,
 };
 /* *INDENT-ON* */
@@ -478,11 +527,35 @@ VLIB_CLI_COMMAND (add_trace_cli,static) = {
  * criteria (e.g. input sw_if_index, mac address) but for now just checks if
  * a specified node is in the trace or not in the trace.
  */
+
+void
+trace_filter_set (u32 node_index, u32 flag, u32 count)
+{
+  /* *INDENT-OFF* */
+  foreach_vlib_main (
+  ({
+    vlib_trace_main_t *tm;
+
+    tm = &this_vlib_main->trace_main;
+    tm->filter_node_index = node_index;
+    tm->filter_flag = flag;
+    tm->filter_count = count;
+
+    /*
+     * Clear the trace limits to stop any in-progress tracing
+     * Prevents runaway trace allocations when the filter changes
+     * (or is removed)
+     */
+    vec_free (tm->nodes);
+  }));
+  /* *INDENT-ON* */
+}
+
+
 static clib_error_t *
 cli_filter_trace (vlib_main_t * vm,
 		  unformat_input_t * input, vlib_cli_command_t * cmd)
 {
-  vlib_trace_main_t *tm = &vm->trace_main;
   u32 filter_node_index;
   u32 filter_flag;
   u32 filter_count;
@@ -510,22 +583,7 @@ cli_filter_trace (vlib_main_t * vm,
       ("expected 'include NODE COUNT' or 'exclude NODE COUNT' or 'none', got `%U'",
        format_unformat_error, input);
 
-  /* *INDENT-OFF* */
-  foreach_vlib_main (
-    ({
-    tm = &this_vlib_main->trace_main;
-    tm->filter_node_index = filter_node_index;
-    tm->filter_flag = filter_flag;
-    tm->filter_count = filter_count;
-
-    /*
-     * Clear the trace limits to stop any in-progress tracing
-     * Prevents runaway trace allocations when the filter changes
-     * (or is removed)
-     */
-    vec_free (tm->nodes);
-  }));
-  /* *INDENT-ON* */
+  trace_filter_set (filter_node_index, filter_flag, filter_count);
 
   return 0;
 }
@@ -533,7 +591,7 @@ cli_filter_trace (vlib_main_t * vm,
 /* *INDENT-OFF* */
 VLIB_CLI_COMMAND (filter_trace_cli,static) = {
   .path = "trace filter",
-  .short_help = "filter trace output - include NODE COUNT | exclude NODE COUNT | none",
+  .short_help = "trace filter none | [include|exclude] NODE COUNT",
   .function = cli_filter_trace,
 };
 /* *INDENT-ON* */
@@ -542,8 +600,7 @@ static clib_error_t *
 cli_clear_trace_buffer (vlib_main_t * vm,
 			unformat_input_t * input, vlib_cli_command_t * cmd)
 {
-  vlib_enable_disable_pkt_trace_filter (0 /* enable */ );
-  clear_trace_buffer ();
+  vlib_trace_stop_and_clear ();
   return 0;
 }
 

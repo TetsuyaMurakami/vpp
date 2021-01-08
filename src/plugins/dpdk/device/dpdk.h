@@ -58,6 +58,12 @@ extern vnet_device_class_t dpdk_device_class;
 extern vlib_node_registration_t dpdk_input_node;
 extern vlib_node_registration_t admin_up_down_process_node;
 
+#if RTE_VERSION < RTE_VERSION_NUM(20, 8, 0, 0)
+#define DPDK_MLX5_PMD_NAME "net_mlx5"
+#else
+#define DPDK_MLX5_PMD_NAME "mlx5_pci"
+#endif
+
 #define foreach_dpdk_pmd          \
   _ ("net_thunderx", THUNDERX)    \
   _ ("net_e1000_em", E1000EM)     \
@@ -76,7 +82,7 @@ extern vlib_node_registration_t admin_up_down_process_node;
   _ ("net_fm10k", FM10K)          \
   _ ("net_cxgbe", CXGBE)          \
   _ ("net_mlx4", MLX4)            \
-  _ ("net_mlx5", MLX5)            \
+  _ (DPDK_MLX5_PMD_NAME, MLX5)    \
   _ ("net_dpaa2", DPAA2)          \
   _ ("net_virtio_user", VIRTIO_USER) \
   _ ("net_vhost", VHOST_ETHER)    \
@@ -260,6 +266,7 @@ typedef struct
     clib_bitmap_t * workers;
   u8 tso;
   u8 *devargs;
+  clib_bitmap_t *rss_queues;
 
 #define DPDK_DEVICE_TSO_DEFAULT 0
 #define DPDK_DEVICE_TSO_OFF 1
@@ -276,6 +283,7 @@ typedef struct
   u8 no_multi_seg;
   u8 enable_tcp_udp_checksum;
   u8 no_tx_checksum_offload;
+  u8 enable_telemetry;
 
   /* Required config parameters */
   u8 coremask_set_manually;
@@ -345,6 +353,8 @@ typedef struct
 
   /* logging */
   vlib_log_class_t log_default;
+  vlib_log_class_t log_cryptodev;
+  vlib_log_class_t log_ipsec;
 } dpdk_main_t;
 
 extern dpdk_main_t dpdk_main;
@@ -355,9 +365,9 @@ typedef struct
   u16 device_index;
   u8 queue_index;
   struct rte_mbuf mb;
+  u8 data[256];			/* First 256 data bytes, used for hexdump */
   /* Copy of VLIB buffer; packet data stored in pre_data. */
   vlib_buffer_t buffer;
-  u8 data[256];			/* First 256 data bytes, used for hexdump */
 } dpdk_tx_trace_t;
 
 typedef struct
@@ -366,14 +376,13 @@ typedef struct
   u16 device_index;
   u16 queue_index;
   struct rte_mbuf mb;
-  vlib_buffer_t buffer;		/* Copy of VLIB buffer; pkt data stored in pre_data. */
   u8 data[256];			/* First 256 data bytes, used for hexdump */
+  vlib_buffer_t buffer;		/* Copy of VLIB buffer; pkt data stored in pre_data. */
 } dpdk_rx_trace_t;
 
 void dpdk_device_setup (dpdk_device_t * xd);
 void dpdk_device_start (dpdk_device_t * xd);
 void dpdk_device_stop (dpdk_device_t * xd);
-
 int dpdk_port_state_callback (dpdk_portid_t port_id,
 			      enum rte_eth_event_type type,
 			      void *param, void *ret_param);

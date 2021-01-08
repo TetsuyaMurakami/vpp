@@ -47,7 +47,6 @@
 #include <vppinfra/pool.h>
 #include <vppinfra/random_buffer.h>
 #include <vppinfra/time.h>
-#include <vppinfra/pmc.h>
 #include <vppinfra/pcap.h>
 
 #include <pthread.h>
@@ -77,8 +76,7 @@ typedef struct
 typedef struct
 {
   u8 trace_filter_enable;
-  u32 trace_classify_table_index;
-  u32 trace_filter_set_index;
+  u32 classify_table_index;
 } vlib_trace_filter_t;
 
 typedef enum
@@ -133,7 +131,7 @@ typedef struct vlib_main_t
   u64 cpu_time_main_loop_start;
 
   /* Incremented once for each main loop. */
-  u32 main_loop_count;
+  volatile u32 main_loop_count;
 
   /* Count of vectors processed this main loop. */
   u32 main_loop_vectors_processed;
@@ -150,6 +148,9 @@ typedef struct vlib_main_t
 
   /* Main loop hw / sw performance counters */
   vlib_node_runtime_perf_callback_set_t vlib_node_runtime_perf_callbacks;
+
+  /* dispatch wrapper function */
+  vlib_node_function_t *dispatch_wrapper_fn;
 
   /* Every so often we switch to the next counter. */
 #define VLIB_LOG2_MAIN_LOOPS_PER_STATS_UPDATE 7
@@ -197,6 +198,7 @@ typedef struct vlib_main_t
   /* Pcap dispatch trace main */
   pcap_main_t dispatch_pcap_main;
   uword dispatch_pcap_enable;
+  uword dispatch_pcap_postmortem;
   u32 *dispatch_buffer_trace_nodes;
   u8 *pcap_buffer;
 
@@ -222,6 +224,7 @@ typedef struct vlib_main_t
 
   /* Event logger. */
   elog_main_t elog_main;
+  u32 configured_elog_ring_size;
 
   /* Event logger trace flags */
   int elog_trace_api_messages;
@@ -483,12 +486,15 @@ typedef struct
   u8 *filename;
   int enable;
   int status;
+  int post_mortem;
   u32 packets_to_capture;
   u32 buffer_trace_node_index;
   u32 buffer_traces_to_capture;
 } vlib_pcap_dispatch_trace_args_t;
 
 int vlib_pcap_dispatch_trace_configure (vlib_pcap_dispatch_trace_args_t *);
+vlib_main_t *vlib_get_main_not_inline (void);
+elog_main_t *vlib_get_elog_main_not_inline ();
 
 #endif /* included_vlib_main_h */
 

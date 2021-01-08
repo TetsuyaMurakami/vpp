@@ -319,6 +319,13 @@ ip6_full_reass_add_trace (vlib_main_t * vm, vlib_node_runtime_t * node,
   vlib_buffer_t *b = vlib_get_buffer (vm, bi);
   vnet_buffer_opaque_t *vnb = vnet_buffer (b);
   bool is_after_handoff = false;
+  if (pool_is_free_index
+      (vm->trace_main.trace_buffer_pool, vlib_buffer_get_trace_index (b)))
+    {
+      // this buffer's trace is gone
+      b->flags &= ~VLIB_BUFFER_IS_TRACED;
+      return;
+    }
   if (vlib_buffer_get_trace_thread (b) != vm->thread_index)
     {
       is_after_handoff = true;
@@ -1520,13 +1527,13 @@ ip6_full_reass_walk_expired (vlib_main_t * vm,
 
 	  vec_reset_length (pool_indexes_to_free);
           /* *INDENT-OFF* */
-          pool_foreach_index (index, rt->pool, ({
+          pool_foreach_index (index, rt->pool)  {
                                 reass = pool_elt_at_index (rt->pool, index);
                                 if (now > reass->last_heard + rm->timeout)
                                   {
                                     vec_add1 (pool_indexes_to_free, index);
                                   }
-                              }));
+                              }
           /* *INDENT-ON* */
 	  int *i;
           /* *INDENT-OFF* */
@@ -1665,9 +1672,9 @@ show_ip6_full_reass (vlib_main_t * vm, unformat_input_t * input,
       if (details)
 	{
           /* *INDENT-OFF* */
-          pool_foreach (reass, rt->pool, {
+          pool_foreach (reass, rt->pool) {
             vlib_cli_output (vm, "%U", format_ip6_full_reass, vm, reass);
-          });
+          }
           /* *INDENT-ON* */
 	}
       sum_reass_n += rt->reass_n;

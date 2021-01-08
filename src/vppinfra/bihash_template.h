@@ -124,6 +124,25 @@ typedef CLIB_PACKED (struct {
 STATIC_ASSERT_SIZEOF (BVT (clib_bihash_shared_header), 8 * sizeof (u64));
 
 typedef
+BVS (clib_bihash_alloc_chunk)
+{
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
+
+  /* chunk size */
+  uword size;
+
+  /* pointer to the next allocation */
+  u8 *next_alloc;
+
+  /* number of bytes left in this chunk */
+  uword bytes_left;
+
+  /* doubly linked list of heap allocated chunks */
+  BVS (clib_bihash_alloc_chunk) * prev, *next;
+
+} BVT (clib_bihash_alloc_chunk);
+
+typedef
 BVS (clib_bihash)
 {
   BVT (clib_bihash_bucket) * buckets;
@@ -137,6 +156,9 @@ BVS (clib_bihash)
   u32 log2_nbuckets;
   u64 memory_size;
   u8 *name;
+  format_function_t *fmt_fn;
+  void *heap;
+  BVT (clib_bihash_alloc_chunk) * chunks;
 
   u64 *freelists;
 
@@ -153,7 +175,7 @@ BVS (clib_bihash)
   /**
     * A custom format function to print the Key and Value of bihash_key instead of default hexdump
     */
-  format_function_t *fmt_fn;
+  format_function_t *kvp_fmt_fn;
 
   /** Optional statistics-gathering callback */
 #if BIHASH_ENABLE_STATS
@@ -171,7 +193,7 @@ typedef struct
   char *name;
   u32 nbuckets;
   uword memory_size;
-  format_function_t *fmt_fn;
+  format_function_t *kvp_fmt_fn;
   u8 instantiate_immediately;
   u8 dont_add_to_all_bihash_list;
 } BVT (clib_bihash_init2_args);
@@ -325,7 +347,7 @@ void BV (clib_bihash_responder_init_svm)
 #endif
 
 void BV (clib_bihash_set_kvp_format_fn) (BVT (clib_bihash) * h,
-					 format_function_t * fmt_fn);
+					 format_function_t * kvp_fmt_fn);
 
 void BV (clib_bihash_free) (BVT (clib_bihash) * h);
 
@@ -340,6 +362,8 @@ int BV (clib_bihash_add_or_overwrite_stale) (BVT (clib_bihash) * h,
 int BV (clib_bihash_search) (BVT (clib_bihash) * h,
 			     BVT (clib_bihash_kv) * search_v,
 			     BVT (clib_bihash_kv) * return_v);
+
+int BV (clib_bihash_is_initialised) (const BVT (clib_bihash) * h);
 
 #define BIHASH_WALK_STOP 0
 #define BIHASH_WALK_CONTINUE 1
@@ -368,9 +392,9 @@ BV (clib_bihash_get_bucket) (BVT (clib_bihash) * h, u64 hash)
   offset = offset * (sizeof (BVT (clib_bihash_bucket))
 		     + (BIHASH_KVP_PER_PAGE * sizeof (BVT (clib_bihash_kv))));
   return ((BVT (clib_bihash_bucket) *) (((u8 *) h->buckets) + offset));
-#endif
-
+#else
   return h->buckets + (hash & (h->nbuckets - 1));
+#endif
 }
 
 static inline int BV (clib_bihash_search_inline_with_hash)

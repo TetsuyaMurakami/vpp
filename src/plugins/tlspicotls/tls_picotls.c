@@ -1,8 +1,8 @@
 #include <math.h>
 
-#include "certs.h"
-#include "tls_picotls.h"
-#include "pico_vpp_crypto.h"
+#include <tlspicotls/certs.h>
+#include <tlspicotls/tls_picotls.h>
+#include <tlspicotls/pico_vpp_crypto.h>
 
 picotls_main_t picotls_main;
 
@@ -117,13 +117,13 @@ picotls_start_listen (tls_ctx_t * lctx)
 #ifdef PTLS_OPENSSL_HAVE_X25519
     &ptls_openssl_x25519,
 #endif
-#ifdef PTLS_OPENSSL_HAVE_SECP256r1
+#ifdef PTLS_OPENSSL_HAVE_SECP256R1
     &ptls_openssl_secp256r1,
 #endif
-#ifdef PTLS_OPENSSL_HAVE_SECP384r1
+#ifdef PTLS_OPENSSL_HAVE_SECP384R1
     &ptls_openssl_secp384r1,
 #endif
-#ifdef PTLS_OPENSSL_HAVE_SECP521r1
+#ifdef PTLS_OPENSSL_HAVE_SECP521R1
     &ptls_openssl_secp521r1
 #endif
   };
@@ -573,6 +573,8 @@ tls_picotls_init (vlib_main_t * vm)
   num_threads = 1 + vtm->n_threads;
 
   vec_validate (pm->ctx_pool, num_threads - 1);
+
+  clib_rwlock_init (&picotls_main.crypto_keys_rw_lock);
 
   tls_register_engine (&picotls_engine, CRYPTO_ENGINE_PICOTLS);
 

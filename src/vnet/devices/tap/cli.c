@@ -25,8 +25,6 @@
 #include <vnet/ip/ip4_packet.h>
 #include <vnet/ip/ip6_packet.h>
 #include <vnet/ip/format.h>
-#include <linux/virtio_net.h>
-#include <linux/vhost.h>
 #include <vnet/devices/virtio/virtio.h>
 #include <vnet/devices/tap/tap.h>
 
@@ -100,6 +98,10 @@ tap_create_command_fn (vlib_main_t * vm, unformat_input_t * input,
 	    args.tap_flags |= TAP_FLAG_ATTACH;
 	  else if (unformat (line_input, "tun"))
 	    args.tap_flags |= TAP_FLAG_TUN;
+	  else if (unformat (line_input, "packed"))
+	    args.tap_flags |= TAP_FLAG_PACKED;
+	  else if (unformat (line_input, "in-order"))
+	    args.tap_flags |= TAP_FLAG_IN_ORDER;
 	  else if (unformat (line_input, "hw-addr %U",
 			     unformat_ethernet_address, args.mac_addr.bytes))
 	    args.mac_addr_set = 1;
@@ -140,8 +142,8 @@ VLIB_CLI_COMMAND (tap_create_command, static) = {
     "[host-ip4-addr <ip4addr/mask>] [host-ip6-addr <ip6-addr>] "
     "[host-ip4-gw <ip4-addr>] [host-ip6-gw <ip6-addr>] "
     "[host-mac-addr <host-mac-address>] [host-if-name <name>] "
-    "[host-mtu-size <size>] [no-gso|gso|csum-offload|gro-coalesce] "
-    "[persist] [attach] [tun]",
+    "[host-mtu-size <size>] [no-gso|gso [gro-coalesce]|csum-offload] "
+    "[persist] [attach] [tun] [packed] [in-order]",
   .function = tap_create_command_fn,
 };
 /* *INDENT-ON* */
@@ -295,9 +297,8 @@ tap_show_command_fn (vlib_main_t * vm, unformat_input_t * input,
   if (vec_len (hw_if_indices) == 0)
     {
       /* *INDENT-OFF* */
-      pool_foreach (vif, mm->interfaces,
+      pool_foreach (vif, mm->interfaces)
 	  vec_add1 (hw_if_indices, vif->hw_if_index);
-      );
       /* *INDENT-ON* */
     }
 
@@ -345,9 +346,8 @@ tun_show_command_fn (vlib_main_t * vm, unformat_input_t * input,
   if (vec_len (hw_if_indices) == 0)
     {
       /* *INDENT-OFF* */
-      pool_foreach (vif, mm->interfaces,
+      pool_foreach (vif, mm->interfaces)
           vec_add1 (hw_if_indices, vif->hw_if_index);
-      );
       /* *INDENT-ON* */
     }
 

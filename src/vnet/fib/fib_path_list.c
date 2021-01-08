@@ -62,11 +62,6 @@ typedef struct fib_path_list_t_ {
      * the RPF list calculated for this path list
      */
     fib_node_index_t fpl_urpf;
-
-    /**
-     * Hash table of paths. valid only with INDEXED flag
-     */
-    uword *fpl_db;
 } fib_path_list_t;
 
 /*
@@ -1474,10 +1469,10 @@ show_fib_path_list_command (vlib_main_t * vm,
 	 * show all
 	 */
 	vlib_cli_output (vm, "FIB Path Lists");
-	pool_foreach_index (pli, fib_path_list_pool,
-	({
+	pool_foreach_index (pli, fib_path_list_pool)
+	 {
 	    vlib_cli_output (vm, "%U", format_fib_path_list, pli, 0);
-	}));
+	}
     }
     return (NULL);
 }

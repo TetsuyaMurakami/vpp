@@ -37,8 +37,6 @@
 #include <vnet/mfib/mfib_entry.h>
 #include <vnet/mfib/mfib_api.h>
 #include <vnet/ip/ip_source_and_port_range_check.h>
-#include <vnet/fib/ip4_fib.h>
-#include <vnet/fib/ip6_fib.h>
 #include <vnet/fib/fib_path_list.h>
 #include <vnet/ip/ip6_hop_by_hop.h>
 #include <vnet/ip/ip6_link.h>
@@ -47,6 +45,7 @@
 #include <vnet/ip/reass/ip6_sv_reass.h>
 #include <vnet/ip/reass/ip6_full_reass.h>
 #include <vnet/ip/ip_table.h>
+#include <vnet/ip/ip_container_proxy.h>
 
 #include <vnet/vnet_msg_enum.h>
 
@@ -155,17 +154,17 @@ vl_api_ip_table_dump_t_handler (vl_api_ip_table_dump_t * mp)
     return;
 
   /* *INDENT-OFF* */
-  pool_foreach (fib_table, ip4_main.fibs,
-  ({
+  pool_foreach (fib_table, ip4_main.fibs)
+   {
     send_ip_table_details(am, reg, mp->context, fib_table);
-  }));
-  pool_foreach (fib_table, ip6_main.fibs,
-  ({
+  }
+  pool_foreach (fib_table, ip6_main.fibs)
+   {
     /* don't send link locals */
     if (fib_table->ft_flags & FIB_TABLE_FLAG_IP6_LL)
       continue;
     send_ip_table_details(am, reg, mp->context, fib_table);
-  }));
+  }
   /* *INDENT-ON* */
 }
 
@@ -295,14 +294,14 @@ vl_api_ip_mtable_dump_t_handler (vl_api_ip_mtable_dump_t * mp)
     return;
 
   /* *INDENT-OFF* */
-  pool_foreach (mfib_table, ip4_main.mfibs,
-  ({
+  pool_foreach (mfib_table, ip4_main.mfibs)
+   {
       send_ip_mtable_details (reg, mp->context, mfib_table);
-  }));
-  pool_foreach (mfib_table, ip6_main.mfibs,
-  ({
+  }
+  pool_foreach (mfib_table, ip6_main.mfibs)
+   {
       send_ip_mtable_details (reg, mp->context, mfib_table);
-  }));
+  }
   /* *INDENT-ON* */
 }
 
@@ -330,7 +329,7 @@ send_ip_mroute_details (vpe_api_main_t * am,
   vl_api_ip_mroute_details_t *mp;
   const mfib_prefix_t *pfx;
   vl_api_mfib_path_t *fp;
-  int path_count;
+  u8 path_count;
 
   rpaths = NULL;
   pfx = mfib_entry_get_prefix (mfib_entry_index);
@@ -348,7 +347,7 @@ send_ip_mroute_details (vpe_api_main_t * am,
   mp->route.table_id =
     htonl (mfib_table_get_table_id
 	   (mfib_entry_get_fib_index (mfib_entry_index), pfx->fp_proto));
-  mp->route.n_paths = htonl (path_count);
+  mp->route.n_paths = path_count;
   fp = mp->route.paths;
   vec_foreach (rpath, rpaths)
   {
@@ -747,6 +746,7 @@ api_mroute_add_del_t_handler (vl_api_ip_mroute_add_del_t * mp,
 {
   fib_route_path_t *rpath, *rpaths = NULL;
   fib_node_index_t mfib_entry_index;
+  mfib_entry_flags_t eflags;
   mfib_prefix_t pfx;
   u32 fib_index;
   int rv;
@@ -771,10 +771,11 @@ api_mroute_add_del_t_handler (vl_api_ip_mroute_add_del_t * mp,
 	goto out;
     }
 
+  eflags = mfib_api_path_entry_flags_decode (mp->route.entry_flags);
   mfib_entry_index = mroute_add_del_handler (mp->is_add,
 					     mp->is_add,
 					     fib_index, &pfx,
-					     ntohl (mp->route.entry_flags),
+					     eflags,
 					     ntohl (mp->route.rpf_id),
 					     rpaths);
 
@@ -949,8 +950,8 @@ vl_api_ip_unnumbered_dump_t_handler (vl_api_ip_unnumbered_dump_t * mp)
   else
     {
       /* *INDENT-OFF* */
-      pool_foreach (si, im->sw_interfaces,
-      ({
+      pool_foreach (si, im->sw_interfaces)
+       {
         if ((si->flags & VNET_SW_INTERFACE_FLAG_UNNUMBERED))
           {
             send_ip_unnumbered_details(am, reg,
@@ -958,7 +959,7 @@ vl_api_ip_unnumbered_dump_t_handler (vl_api_ip_unnumbered_dump_t * mp)
                                        si->unnumbered_sw_if_index,
                                        mp->context);
           }
-      }));
+      }
       /* *INDENT-ON* */
     }
 
@@ -984,10 +985,10 @@ vl_api_ip_dump_t_handler (vl_api_ip_dump_t * mp)
   sorted_sis = vec_new (vnet_sw_interface_t, pool_elts (im->sw_interfaces));
   _vec_len (sorted_sis) = 0;
   /* *INDENT-OFF* */
-  pool_foreach (si, im->sw_interfaces,
-  ({
+  pool_foreach (si, im->sw_interfaces)
+   {
     vec_add1 (sorted_sis, si[0]);
-  }));
+  }
   /* *INDENT-ON* */
 
   vec_foreach (si, sorted_sis)
@@ -1428,8 +1429,8 @@ vl_api_ip_table_flush_t_handler (vl_api_ip_table_flush_t * mp)
 
       /* Shut down interfaces in this FIB / clean out intfc routes */
       /* *INDENT-OFF* */
-      pool_foreach (si, im->sw_interfaces,
-      ({
+      pool_foreach (si, im->sw_interfaces)
+       {
         if (fib_index == fib_table_get_index_for_sw_if_index (fproto,
                                                               si->sw_if_index))
           {
@@ -1437,7 +1438,7 @@ vl_api_ip_table_flush_t_handler (vl_api_ip_table_flush_t * mp)
             flags &= ~VNET_SW_INTERFACE_FLAG_ADMIN_UP;
             vnet_sw_interface_set_flags (vnm, si->sw_if_index, flags);
           }
-      }));
+      }
       /* *INDENT-ON* */
 
       fib_table_flush (fib_index, fproto, FIB_SOURCE_API);

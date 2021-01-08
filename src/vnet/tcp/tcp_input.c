@@ -164,7 +164,7 @@ tcp_handle_rst (tcp_connection_t * tc)
       tcp_connection_cleanup (tc);
       break;
     case TCP_STATE_SYN_SENT:
-      session_stream_connect_notify (&tc->connection, 1 /* fail */ );
+      session_stream_connect_notify (&tc->connection, SESSION_E_REFUSED);
       tcp_connection_cleanup (tc);
       break;
     case TCP_STATE_ESTABLISHED:
@@ -404,7 +404,7 @@ tcp_rcv_ack_no_cc (tcp_connection_t * tc, vlib_buffer_t * b, u32 * error)
   if (!(seq_leq (tc->snd_una, vnet_buffer (b)->tcp.ack_number)
 	&& seq_leq (vnet_buffer (b)->tcp.ack_number, tc->snd_nxt)))
     {
-      if (seq_leq (vnet_buffer (b)->tcp.ack_number, tc->snd_una_max)
+      if (seq_leq (vnet_buffer (b)->tcp.ack_number, tc->snd_nxt)
 	  && seq_gt (vnet_buffer (b)->tcp.ack_number, tc->snd_una))
 	{
 	  tc->snd_nxt = vnet_buffer (b)->tcp.ack_number;
@@ -580,13 +580,7 @@ tcp_handle_postponed_dequeues (tcp_worker_ctx_t * wrk)
 
       /* Dequeue the newly ACKed bytes */
       session_tx_fifo_dequeue_drop (&tc->connection, tc->burst_acked);
-      tcp_validate_txf_size (tc, tc->snd_una_max - tc->snd_una);
-
-      if (PREDICT_FALSE (tc->flags & TCP_CONN_PSH_PENDING))
-	{
-	  if (seq_leq (tc->psh_seq, tc->snd_una))
-	    tc->flags &= ~TCP_CONN_PSH_PENDING;
-	}
+      tcp_validate_txf_size (tc, tc->snd_nxt - tc->snd_una);
 
       if (tcp_is_descheduled (tc))
 	tcp_reschedule (tc);
@@ -999,7 +993,7 @@ tcp_rcv_ack (tcp_worker_ctx_t * wrk, tcp_connection_t * tc, vlib_buffer_t * b,
     {
       /* We've probably entered recovery and the peer still has some
        * of the data we've sent. Update snd_nxt and accept the ack */
-      if (seq_leq (vnet_buffer (b)->tcp.ack_number, tc->snd_una_max)
+      if (seq_leq (vnet_buffer (b)->tcp.ack_number, tc->snd_nxt)
 	  && seq_gt (vnet_buffer (b)->tcp.ack_number, tc->snd_una))
 	{
 	  tc->snd_nxt = vnet_buffer (b)->tcp.ack_number;
@@ -1297,6 +1291,10 @@ tcp_segment_rcv (tcp_worker_ctx_t * wrk, tcp_connection_t * tc,
   n_data_bytes = vnet_buffer (b)->tcp.data_len;
   ASSERT (n_data_bytes);
   tc->data_segs_in += 1;
+
+  /* Make sure we don't consume trailing bytes */
+  if (PREDICT_FALSE (b->current_length > n_data_bytes))
+    b->current_length = n_data_bytes;
 
   /* Handle out-of-order data */
   if (PREDICT_FALSE (vnet_buffer (b)->tcp.seq_number != tc->rcv_nxt))
@@ -1963,6 +1961,7 @@ tcp46_syn_sent_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 	      goto cleanup_ho;
 	    }
 
+	  transport_fifos_init_ooo (&new_tc0->connection);
 	  new_tc0->tx_fifo_size =
 	    transport_tx_fifo_size (&new_tc0->connection);
 	  /* Update rtt with the syn-ack sample */
@@ -1986,6 +1985,7 @@ tcp46_syn_sent_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 	      goto cleanup_ho;
 	    }
 
+	  transport_fifos_init_ooo (&new_tc0->connection);
 	  new_tc0->tx_fifo_size =
 	    transport_tx_fifo_size (&new_tc0->connection);
 	  new_tc0->rtt_ts = 0;
@@ -2380,6 +2380,9 @@ tcp46_rcv_process_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 	case TCP_STATE_FIN_WAIT_2:
 	  if (vnet_buffer (b0)->tcp.data_len)
 	    error0 = tcp_segment_rcv (wrk, tc0, b0);
+	  /* Don't accept out of order fins lower */
+	  if (vnet_buffer (b0)->tcp.seq_end != tc0->rcv_nxt)
+	    goto drop;
 	  break;
 	case TCP_STATE_CLOSE_WAIT:
 	case TCP_STATE_CLOSING:
@@ -2575,6 +2578,12 @@ tcp46_listen_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  lc = tcp_lookup_listener (b, tc->c_fib_index, is_ip4);
 	  /* clean up the old session */
 	  tcp_connection_del (tc);
+	  /* listener was cleaned up */
+	  if (!lc)
+	    {
+	      error = TCP_ERROR_NO_LISTENER;
+	      goto done;
+	    }
 	}
 
       /* Make sure connection wasn't just created */
@@ -2636,6 +2645,7 @@ tcp46_listen_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  goto done;
 	}
 
+      transport_fifos_init_ooo (&child->connection);
       child->tx_fifo_size = transport_tx_fifo_size (&child->connection);
 
       tcp_send_synack (child);
@@ -2644,12 +2654,8 @@ tcp46_listen_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 
       if (PREDICT_FALSE (b->flags & VLIB_BUFFER_IS_TRACED))
 	{
-	  tcp_rx_trace_t *t;
-	  t = vlib_add_trace (vm, node, b, sizeof (*t));
-	  clib_memcpy_fast (&t->tcp_header, tcp_buffer_hdr (b),
-			    sizeof (t->tcp_header));
-	  clib_memcpy_fast (&t->tcp_connection, lc,
-			    sizeof (t->tcp_connection));
+	  tcp_rx_trace_t *t = vlib_add_trace (vm, node, b, sizeof (*t));
+	  tcp_set_rx_trace_data (t, lc, tcp_buffer_hdr (b), b, is_ip4);
 	}
 
       n_syns += (error == TCP_ERROR_NONE);

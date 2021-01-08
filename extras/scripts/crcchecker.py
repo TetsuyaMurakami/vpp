@@ -96,19 +96,34 @@ def filelist_from_patchset():
     return set(filelist)
 
 def is_deprecated(d, k):
-    if 'options' in d[k] and 'deprecated' in d[k]['options']:
-        return True
+    if 'options' in d[k]:
+        if 'deprecated' in d[k]['options']:
+            return True
+        # recognize the deprecated format
+        if 'status' in d[k]['options'] and d[k]['options']['status'] == 'deprecated':
+            print("WARNING: please use 'option deprecated;'")
+            return True
     return False
 
 def is_in_progress(d, k):
-    try:
-        if d[k]['options']['status'] == 'in_progress':
+    if 'options' in d[k]:
+        if 'in_progress' in d[k]['options']:
             return True
-    except:
-        return False
+        # recognize the deprecated format
+        if  'status' in d[k]['options'] and d[k]['options']['status'] == 'in_progress':
+            print("WARNING: please use 'option in_progress;'")
+            return True
+    return False
 
-def report(old, new, added, removed, modified, same):
+def report(new, old):
+    added, removed, modified, same = dict_compare(new, old)
     backwards_incompatible = 0
+    # print the full list of in-progress messages
+    # they should eventually either disappear of become supported
+    for k in new.keys():
+        newversion = int(new[k]['version'])
+        if newversion == 0 or is_in_progress(new, k):
+            print(f'in-progress: {k}')
     for k in added:
         print(f'added: {k}')
     for k in removed:
@@ -126,6 +141,17 @@ def report(old, new, added, removed, modified, same):
             print(f'modified: ** {k}')
         else:
             print(f'modified: {k}')
+
+    # check which messages are still there but were marked for deprecation
+    for k in new.keys():
+        newversion = int(new[k]['version'])
+        if newversion > 0 and is_deprecated(new, k):
+            if k in old:
+                if not is_deprecated(old, k):
+                    print(f'deprecated: {k}')
+            else:
+                print(f'added+deprecated: {k}')
+
     return backwards_incompatible
 
 
@@ -150,8 +176,7 @@ def main():
     if args.diff:
         oldcrcs = crc_from_apigen(None, args.diff[0])
         newcrcs = crc_from_apigen(None, args.diff[1])
-        added, removed, modified, same = dict_compare(newcrcs, oldcrcs)
-        backwards_incompatible = report(oldcrcs, newcrcs, added, removed, modified, same)
+        backwards_incompatible = report(newcrcs, oldcrcs)
         sys.exit(0)
 
     # Dump CRC for messages in given files / revision
@@ -186,8 +211,7 @@ def main():
         newcrcs.update(crc_from_apigen(None, f))
         oldcrcs.update(crc_from_apigen(revision, f))
 
-    added, removed, modified, same = dict_compare(newcrcs, oldcrcs)
-    backwards_incompatible = report(oldcrcs, newcrcs, added, removed, modified, same)
+    backwards_incompatible = report(newcrcs, oldcrcs)
 
     if args.check_patchset:
         if backwards_incompatible:

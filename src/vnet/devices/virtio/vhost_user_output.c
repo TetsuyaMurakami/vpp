@@ -34,13 +34,10 @@
 #include <vlib/vlib.h>
 #include <vlib/unix/unix.h>
 
-#include <vnet/ip/ip.h>
-
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/devices/devices.h>
 #include <vnet/feature/feature.h>
 
-#include <vnet/devices/virtio/virtio.h>
 #include <vnet/devices/virtio/vhost_user.h>
 #include <vnet/devices/virtio/vhost_user_inline.h>
 
@@ -122,23 +119,12 @@ vhost_user_name_renumber (vnet_hw_interface_t * hi, u32 new_dev_instance)
 }
 
 /**
- * @brief Try once to lock the vring
- * @return 0 on success, non-zero on failure.
- */
-static_always_inline int
-vhost_user_vring_try_lock (vhost_user_intf_t * vui, u32 qid)
-{
-  return clib_atomic_test_and_set (vui->vring_locks[qid]);
-}
-
-/**
  * @brief Spin until the vring is successfully locked
  */
 static_always_inline void
 vhost_user_vring_lock (vhost_user_intf_t * vui, u32 qid)
 {
-  while (vhost_user_vring_try_lock (vui, qid))
-    ;
+  clib_spinlock_lock_if_init (&vui->vrings[qid].vring_lock);
 }
 
 /**
@@ -147,7 +133,7 @@ vhost_user_vring_lock (vhost_user_intf_t * vui, u32 qid)
 static_always_inline void
 vhost_user_vring_unlock (vhost_user_intf_t * vui, u32 qid)
 {
-  clib_atomic_release (vui->vring_locks[qid]);
+  clib_spinlock_unlock_if_init (&vui->vrings[qid].vring_lock);
 }
 
 static_always_inline void
@@ -166,18 +152,18 @@ vhost_user_tx_trace (vhost_trace_t * t,
   t->qid = qid;
 
   hdr_desc = &rxvq->desc[desc_current];
-  if (rxvq->desc[desc_current].flags & VIRTQ_DESC_F_INDIRECT)
+  if (rxvq->desc[desc_current].flags & VRING_DESC_F_INDIRECT)
     {
       t->virtio_ring_flags |= 1 << VIRTIO_TRACE_F_INDIRECT;
       /* Header is the first here */
       hdr_desc = map_guest_mem (vui, rxvq->desc[desc_current].addr, &hint);
     }
-  if (rxvq->desc[desc_current].flags & VIRTQ_DESC_F_NEXT)
+  if (rxvq->desc[desc_current].flags & VRING_DESC_F_NEXT)
     {
       t->virtio_ring_flags |= 1 << VIRTIO_TRACE_F_SIMPLE_CHAINED;
     }
-  if (!(rxvq->desc[desc_current].flags & VIRTQ_DESC_F_NEXT) &&
-      !(rxvq->desc[desc_current].flags & VIRTQ_DESC_F_INDIRECT))
+  if (!(rxvq->desc[desc_current].flags & VRING_DESC_F_NEXT) &&
+      !(rxvq->desc[desc_current].flags & VRING_DESC_F_INDIRECT))
     {
       t->virtio_ring_flags |= 1 << VIRTIO_TRACE_F_SINGLE_DESC;
     }
@@ -257,18 +243,12 @@ vhost_user_handle_tx_offload (vhost_user_intf_t * vui, vlib_buffer_t * b,
       hdr->flags = VIRTIO_NET_HDR_F_NEEDS_CSUM;
       hdr->csum_start = gho.l4_hdr_offset;
       hdr->csum_offset = offsetof (udp_header_t, checksum);
-      udp_header_t *udp =
-	(udp_header_t *) (vlib_buffer_get_current (b) + gho.l4_hdr_offset);
-      udp->checksum = 0;
     }
   else if (b->flags & VNET_BUFFER_F_OFFLOAD_TCP_CKSUM)
     {
       hdr->flags = VIRTIO_NET_HDR_F_NEEDS_CSUM;
       hdr->csum_start = gho.l4_hdr_offset;
       hdr->csum_offset = offsetof (tcp_header_t, checksum);
-      tcp_header_t *tcp =
-	(tcp_header_t *) (vlib_buffer_get_current (b) + gho.l4_hdr_offset);
-      tcp->checksum = 0;
     }
 
   /* GSO offload */
@@ -277,19 +257,19 @@ vhost_user_handle_tx_offload (vhost_user_intf_t * vui, vlib_buffer_t * b,
       if (b->flags & VNET_BUFFER_F_OFFLOAD_TCP_CKSUM)
 	{
 	  if (is_ip4 &&
-	      (vui->features & (1ULL << FEAT_VIRTIO_NET_F_GUEST_TSO4)))
+	      (vui->features & VIRTIO_FEATURE (VIRTIO_NET_F_GUEST_TSO4)))
 	    {
 	      hdr->gso_size = vnet_buffer2 (b)->gso_size;
 	      hdr->gso_type = VIRTIO_NET_HDR_GSO_TCPV4;
 	    }
 	  else if (is_ip6 &&
-		   (vui->features & (1ULL << FEAT_VIRTIO_NET_F_GUEST_TSO6)))
+		   (vui->features & VIRTIO_FEATURE (VIRTIO_NET_F_GUEST_TSO6)))
 	    {
 	      hdr->gso_size = vnet_buffer2 (b)->gso_size;
 	      hdr->gso_type = VIRTIO_NET_HDR_GSO_TCPV6;
 	    }
 	}
-      else if ((vui->features & (1ULL << FEAT_VIRTIO_NET_F_GUEST_UFO)) &&
+      else if ((vui->features & VIRTIO_FEATURE (VIRTIO_NET_F_GUEST_UFO)) &&
 	       (b->flags & VNET_BUFFER_F_OFFLOAD_UDP_CKSUM))
 	{
 	  hdr->gso_size = vnet_buffer2 (b)->gso_size;
@@ -299,7 +279,8 @@ vhost_user_handle_tx_offload (vhost_user_intf_t * vui, vlib_buffer_t * b,
 }
 
 static_always_inline void
-vhost_user_mark_desc_available (vlib_main_t * vm, vhost_user_vring_t * rxvq,
+vhost_user_mark_desc_available (vlib_main_t * vm, vhost_user_intf_t * vui,
+				vhost_user_vring_t * rxvq,
 				u16 * n_descs_processed, u8 chained,
 				vlib_frame_t * frame, u32 n_left)
 {
@@ -312,10 +293,10 @@ vhost_user_mark_desc_available (vlib_main_t * vm, vhost_user_vring_t * rxvq,
 
   if (rxvq->used_wrap_counter)
     flags = desc_table[last_used_idx & rxvq->qsz_mask].flags |
-      (VIRTQ_DESC_F_AVAIL | VIRTQ_DESC_F_USED);
+      (VRING_DESC_F_AVAIL | VRING_DESC_F_USED);
   else
     flags = desc_table[last_used_idx & rxvq->qsz_mask].flags &
-      ~(VIRTQ_DESC_F_AVAIL | VIRTQ_DESC_F_USED);
+      ~(VRING_DESC_F_AVAIL | VRING_DESC_F_USED);
 
   vhost_user_advance_last_used_idx (rxvq);
 
@@ -323,10 +304,10 @@ vhost_user_mark_desc_available (vlib_main_t * vm, vhost_user_vring_t * rxvq,
     {
       if (rxvq->used_wrap_counter)
 	desc_table[rxvq->last_used_idx & rxvq->qsz_mask].flags |=
-	  (VIRTQ_DESC_F_AVAIL | VIRTQ_DESC_F_USED);
+	  (VRING_DESC_F_AVAIL | VRING_DESC_F_USED);
       else
 	desc_table[rxvq->last_used_idx & rxvq->qsz_mask].flags &=
-	  ~(VIRTQ_DESC_F_AVAIL | VIRTQ_DESC_F_USED);
+	  ~(VRING_DESC_F_AVAIL | VRING_DESC_F_USED);
       vhost_user_advance_last_used_idx (rxvq);
     }
 
@@ -339,7 +320,7 @@ vhost_user_mark_desc_available (vlib_main_t * vm, vhost_user_vring_t * rxvq,
       vring_packed_desc_t *desc_table = rxvq->packed_desc;
 
       while (desc_table[rxvq->last_used_idx & rxvq->qsz_mask].flags &
-	     VIRTQ_DESC_F_NEXT)
+	     VRING_DESC_F_NEXT)
 	vhost_user_advance_last_used_idx (rxvq);
 
       /* Advance past the current chained table entries */
@@ -354,7 +335,7 @@ vhost_user_mark_desc_available (vlib_main_t * vm, vhost_user_vring_t * rxvq,
 
       rxvq->n_since_last_int += frame->n_vectors - n_left;
       if (rxvq->n_since_last_int > vum->coalesce_frames)
-	vhost_user_send_call (vm, rxvq);
+	vhost_user_send_call (vm, vui, rxvq);
     }
 }
 
@@ -374,19 +355,19 @@ vhost_user_tx_trace_packed (vhost_trace_t * t, vhost_user_intf_t * vui,
   t->qid = qid;
 
   hdr_desc = &rxvq->packed_desc[desc_current];
-  if (rxvq->packed_desc[desc_current].flags & VIRTQ_DESC_F_INDIRECT)
+  if (rxvq->packed_desc[desc_current].flags & VRING_DESC_F_INDIRECT)
     {
       t->virtio_ring_flags |= 1 << VIRTIO_TRACE_F_INDIRECT;
       /* Header is the first here */
       hdr_desc = map_guest_mem (vui, rxvq->packed_desc[desc_current].addr,
 				&hint);
     }
-  if (rxvq->packed_desc[desc_current].flags & VIRTQ_DESC_F_NEXT)
+  if (rxvq->packed_desc[desc_current].flags & VRING_DESC_F_NEXT)
     {
       t->virtio_ring_flags |= 1 << VIRTIO_TRACE_F_SIMPLE_CHAINED;
     }
-  if (!(rxvq->packed_desc[desc_current].flags & VIRTQ_DESC_F_NEXT) &&
-      !(rxvq->packed_desc[desc_current].flags & VIRTQ_DESC_F_INDIRECT))
+  if (!(rxvq->packed_desc[desc_current].flags & VRING_DESC_F_NEXT) &&
+      !(rxvq->packed_desc[desc_current].flags & VRING_DESC_F_INDIRECT))
     {
       t->virtio_ring_flags |= 1 << VIRTIO_TRACE_F_SINGLE_DESC;
     }
@@ -463,7 +444,7 @@ retry:
        * Go deeper in case of indirect descriptor.
        * To test it, turn off mrg_rxbuf.
        */
-      if (desc_table[desc_head].flags & VIRTQ_DESC_F_INDIRECT)
+      if (desc_table[desc_head].flags & VRING_DESC_F_INDIRECT)
 	{
 	  indirect = 1;
 	  if (PREDICT_FALSE (desc_table[desc_head].len <
@@ -482,7 +463,7 @@ retry:
 	    }
 	  desc_index = 0;
 	}
-      else if (rxvq->packed_desc[desc_head].flags & VIRTQ_DESC_F_NEXT)
+      else if (rxvq->packed_desc[desc_head].flags & VRING_DESC_F_NEXT)
 	chained = 1;
 
       desc_len = vui->virtio_net_hdr_sz;
@@ -502,7 +483,7 @@ retry:
 
       /* Guest supports csum offload and buffer requires checksum offload? */
       if (or_flags &&
-	  (vui->features & (1ULL << FEAT_VIRTIO_NET_F_GUEST_CSUM)))
+	  (vui->features & VIRTIO_FEATURE (VIRTIO_NET_F_GUEST_CSUM)))
 	vhost_user_handle_tx_offload (vui, b0, &hdr->hdr);
 
       /* Prepare a copy order executed later for the header */
@@ -529,7 +510,7 @@ retry:
 		   * Test it with both indirect and mrg_rxbuf off
 		   */
 		  if (PREDICT_FALSE (!(desc_table[desc_index].flags &
-				       VIRTQ_DESC_F_NEXT)))
+				       VRING_DESC_F_NEXT)))
 		    {
 		      /*
 		       * Last descriptor in chain.
@@ -665,7 +646,7 @@ retry:
 	  copy_len = 0;
 
 	  /* give buffers back to driver */
-	  vhost_user_mark_desc_available (vm, rxvq, &n_descs_processed,
+	  vhost_user_mark_desc_available (vm, vui, rxvq, &n_descs_processed,
 					  chained, frame, n_left);
 	}
 
@@ -680,8 +661,8 @@ done:
 	vlib_error_count (vm, node->node_index,
 			  VHOST_USER_TX_FUNC_ERROR_MMAP_FAIL, 1);
 
-      vhost_user_mark_desc_available (vm, rxvq, &n_descs_processed, chained,
-				      frame, n_left);
+      vhost_user_mark_desc_available (vm, vui, rxvq, &n_descs_processed,
+				      chained, frame, n_left);
     }
 
   /*
@@ -801,7 +782,7 @@ retry:
 
       /* Go deeper in case of indirect descriptor
        * I don't know of any driver providing indirect for RX. */
-      if (PREDICT_FALSE (rxvq->desc[desc_head].flags & VIRTQ_DESC_F_INDIRECT))
+      if (PREDICT_FALSE (rxvq->desc[desc_head].flags & VRING_DESC_F_INDIRECT))
 	{
 	  if (PREDICT_FALSE
 	      (rxvq->desc[desc_head].len < sizeof (vring_desc_t)))
@@ -838,7 +819,7 @@ retry:
 
 	/* Guest supports csum offload and buffer requires checksum offload? */
 	if (or_flags
-	    && (vui->features & (1ULL << FEAT_VIRTIO_NET_F_GUEST_CSUM)))
+	    && (vui->features & VIRTIO_FEATURE (VIRTIO_NET_F_GUEST_CSUM)))
 	  vhost_user_handle_tx_offload (vui, b0, &hdr->hdr);
 
 	// Prepare a copy order executed later for the header
@@ -858,7 +839,7 @@ retry:
 	{
 	  if (buffer_len == 0)
 	    {			//Get new output
-	      if (desc_table[desc_index].flags & VIRTQ_DESC_F_NEXT)
+	      if (desc_table[desc_index].flags & VRING_DESC_F_NEXT)
 		{
 		  //Next one is chained
 		  desc_index = desc_table[desc_index].next;
@@ -898,7 +879,7 @@ retry:
 		  desc_head = desc_index =
 		    rxvq->avail->ring[rxvq->last_avail_idx & rxvq->qsz_mask];
 		  if (PREDICT_FALSE
-		      (rxvq->desc[desc_head].flags & VIRTQ_DESC_F_INDIRECT))
+		      (rxvq->desc[desc_head].flags & VRING_DESC_F_INDIRECT))
 		    {
 		      //It is seriously unlikely that a driver will put indirect descriptor
 		      //after non-indirect descriptor.
@@ -1039,7 +1020,7 @@ done:
       rxvq->n_since_last_int += frame->n_vectors - n_left;
 
       if (rxvq->n_since_last_int > vum->coalesce_frames)
-	vhost_user_send_call (vm, rxvq);
+	vhost_user_send_call (vm, vui, rxvq);
     }
 
   vhost_user_vring_unlock (vui, qid);
@@ -1060,7 +1041,7 @@ done3:
 
 static __clib_unused clib_error_t *
 vhost_user_interface_rx_mode_change (vnet_main_t * vnm, u32 hw_if_index,
-				     u32 qid, vnet_hw_interface_rx_mode mode)
+				     u32 qid, vnet_hw_if_rx_mode mode)
 {
   vlib_main_t *vm = vnm->vlib_main;
   vnet_hw_interface_t *hif = vnet_get_hw_interface (vnm, hw_if_index);
@@ -1069,15 +1050,15 @@ vhost_user_interface_rx_mode_change (vnet_main_t * vnm, u32 hw_if_index,
     pool_elt_at_index (vum->vhost_user_interfaces, hif->dev_instance);
   vhost_user_vring_t *txvq = &vui->vrings[VHOST_VRING_IDX_TX (qid)];
 
-  if ((mode == VNET_HW_INTERFACE_RX_MODE_INTERRUPT) ||
-      (mode == VNET_HW_INTERFACE_RX_MODE_ADAPTIVE))
+  if ((mode == VNET_HW_IF_RX_MODE_INTERRUPT) ||
+      (mode == VNET_HW_IF_RX_MODE_ADAPTIVE))
     {
       if (txvq->kickfd_idx == ~0)
 	{
 	  // We cannot support interrupt mode if the driver opts out
 	  return clib_error_return (0, "Driver does not support interrupt");
 	}
-      if (txvq->mode == VNET_HW_INTERFACE_RX_MODE_POLLING)
+      if (txvq->mode == VNET_HW_IF_RX_MODE_POLLING)
 	{
 	  vum->ifq_count++;
 	  // Start the timer if this is the first encounter on interrupt
@@ -1089,11 +1070,10 @@ vhost_user_interface_rx_mode_change (vnet_main_t * vnm, u32 hw_if_index,
 				       VHOST_USER_EVENT_START_TIMER, 0);
 	}
     }
-  else if (mode == VNET_HW_INTERFACE_RX_MODE_POLLING)
+  else if (mode == VNET_HW_IF_RX_MODE_POLLING)
     {
-      if (((txvq->mode == VNET_HW_INTERFACE_RX_MODE_INTERRUPT) ||
-	   (txvq->mode == VNET_HW_INTERFACE_RX_MODE_ADAPTIVE)) &&
-	  vum->ifq_count)
+      if (((txvq->mode == VNET_HW_IF_RX_MODE_INTERRUPT) ||
+	   (txvq->mode == VNET_HW_IF_RX_MODE_ADAPTIVE)) && vum->ifq_count)
 	{
 	  vum->ifq_count--;
 	  // Stop the timer if there is no more interrupt interface/queue
@@ -1106,10 +1086,10 @@ vhost_user_interface_rx_mode_change (vnet_main_t * vnm, u32 hw_if_index,
     }
 
   txvq->mode = mode;
-  if (mode == VNET_HW_INTERFACE_RX_MODE_POLLING)
+  if (mode == VNET_HW_IF_RX_MODE_POLLING)
     txvq->used->flags = VRING_USED_F_NO_NOTIFY;
-  else if ((mode == VNET_HW_INTERFACE_RX_MODE_ADAPTIVE) ||
-	   (mode == VNET_HW_INTERFACE_RX_MODE_INTERRUPT))
+  else if ((mode == VNET_HW_IF_RX_MODE_ADAPTIVE) ||
+	   (mode == VNET_HW_IF_RX_MODE_INTERRUPT))
     txvq->used->flags = 0;
   else
     {

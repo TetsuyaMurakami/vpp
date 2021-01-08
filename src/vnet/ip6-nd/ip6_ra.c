@@ -368,11 +368,15 @@ icmp6_router_solicitation (vlib_main_t * vm,
 	  if (PREDICT_TRUE (error0 == ICMP6_ERROR_NONE && o0 != 0 &&
 			    !is_unspecified && !is_link_local))
 	    {
+              /* *INDENT-OFF* */
 	      ip_neighbor_learn_t learn = {
-		.type = IP46_TYPE_IP6,
 		.sw_if_index = sw_if_index0,
-		.ip.ip6 = ip0->src_address,
+		.ip = {
+                  .ip.ip6 = ip0->src_address,
+                  .version = AF_IP6,
+                },
 	      };
+              /* *INDENT-ON* */
 	      memcpy (&learn.mac, o0->ethernet_address, sizeof (learn.mac));
 	      ip_neighbor_learn_dp (&learn);
 	    }
@@ -477,7 +481,7 @@ icmp6_router_solicitation (vlib_main_t * vm,
 
 			  /* copy ll address */
 			  clib_memcpy (&h.ethernet_address[0],
-				       eth_if0->address, 6);
+				       &eth_if0->address, 6);
 
 			  if (vlib_buffer_add_data
 			      (vm, &bi0, (void *) &h,
@@ -521,8 +525,8 @@ icmp6_router_solicitation (vlib_main_t * vm,
 		      ip6_radv_prefix_t *pr_info;
 
 		      /* *INDENT-OFF* */
-		      pool_foreach (pr_info, radv_info->adv_prefixes_pool,
-                      ({
+		      pool_foreach (pr_info, radv_info->adv_prefixes_pool)
+                       {
                         if(pr_info->enabled &&
                            (!pr_info->decrement_lifetime_flag
                             || (pr_info->pref_lifetime_expires >0)))
@@ -585,7 +589,7 @@ icmp6_router_solicitation (vlib_main_t * vm,
                               }
 
                           }
-                      }));
+                      }
 		      /* *INDENT-ON* */
 
 		      /* add additional options before here */
@@ -633,7 +637,7 @@ icmp6_router_solicitation (vlib_main_t * vm,
 			  eth0 = vlib_buffer_get_current (p0);
 			  clib_memcpy (eth0->dst_address, eth0->src_address,
 				       6);
-			  clib_memcpy (eth0->src_address, eth_if0->address,
+			  clib_memcpy (eth0->src_address, &eth_if0->address,
 				       6);
 			  next0 =
 			    is_dropped ? next0 :
@@ -1003,8 +1007,8 @@ icmp6_router_advertisement (vlib_main_t * vm,
 
 				/* look for matching prefix - if we our advertising it, it better be consistant */
 				/* *INDENT-OFF* */
-				pool_foreach (pr_info, radv_info->adv_prefixes_pool,
-                                ({
+				pool_foreach (pr_info, radv_info->adv_prefixes_pool)
+                                 {
 
                                   ip6_address_t mask;
                                   ip6_address_mask_from_width(&mask, pr_info->prefix_len);
@@ -1032,7 +1036,7 @@ icmp6_router_advertisement (vlib_main_t * vm,
                                         }
                                     }
                                   break;
-                                }));
+                                }
 				/* *INDENT-ON* */
 				break;
 			      }
@@ -1274,12 +1278,12 @@ send_rs_process (vlib_main_t * vm, vlib_node_runtime_t * rt,
 	{
 	  due_time = current_time + 1e9;
         /* *INDENT-OFF* */
-        pool_foreach (radv_info, ip6_ra_pool,
-        ({
+        pool_foreach (radv_info, ip6_ra_pool)
+         {
 	    if (check_send_rs (vm, radv_info, current_time, &dt)
 		&& (dt < due_time))
 	      due_time = dt;
-        }));
+        }
         /* *INDENT-ON* */
 	  current_time = vlib_time_now (vm);
 	}
@@ -1436,10 +1440,10 @@ ip6_ra_update_secondary_radv_info (ip6_address_t * address, u8 prefix_len,
 
   vec_reset_length (radv_indices);
   /* *INDENT-OFF* */
-  pool_foreach (radv_info, ip6_ra_pool,
-  ({
+  pool_foreach (radv_info, ip6_ra_pool)
+   {
     vec_add1 (radv_indices, radv_info - ip6_ra_pool);
-  }));
+  }
   /* *INDENT-ON* */
 
   /*
@@ -1456,8 +1460,8 @@ ip6_ra_update_secondary_radv_info (ip6_address_t * address, u8 prefix_len,
 	continue;
 
       /* *INDENT-OFF* */
-      pool_foreach (this_prefix, radv_info->adv_prefixes_pool,
-      ({
+      pool_foreach (this_prefix, radv_info->adv_prefixes_pool)
+       {
         if (this_prefix->prefix_len == prefix_len
             && ip6_address_is_equal_masked (&this_prefix->prefix, address,
                                             &mask))
@@ -1477,7 +1481,7 @@ ip6_ra_update_secondary_radv_info (ip6_address_t * address, u8 prefix_len,
             if (rv != 0)
               clib_warning ("ip6_neighbor_ra_prefix returned %d", rv);
           }
-      }));
+      }
       /* *INDENT-ON*/
     }
 }
@@ -1500,8 +1504,8 @@ ip6_ra_process_timer_event (vlib_main_t * vm,
 
   /* Interface ip6 radv info list */
   /* *INDENT-OFF* */
-  pool_foreach (radv_info, ip6_ra_pool,
-  ({
+  pool_foreach (radv_info, ip6_ra_pool)
+   {
     if( !vnet_sw_interface_is_admin_up (vnm, radv_info->sw_if_index))
       {
         radv_info->initial_adverts_sent = radv_info->initial_adverts_count-1;
@@ -1588,7 +1592,7 @@ ip6_ra_process_timer_event (vlib_main_t * vm,
             f = 0;
           }
       }
-  }));
+  }
   /* *INDENT-ON* */
 
   if (f)
@@ -1601,19 +1605,23 @@ ip6_ra_process_timer_event (vlib_main_t * vm,
 }
 
 static void
-ip6_ra_handle_report (const ip6_ra_report_t * rap)
+ip6_ra_handle_report (ip6_ra_report_t * rap)
 {
   u32 ii;
 
   vec_foreach_index (ii, ip6_ra_listeners) ip6_ra_listeners[ii] (rap);
+  vec_free (rap->prefixes);
+  clib_mem_free (rap);
 }
 
 static uword
 ip6_ra_event_process (vlib_main_t * vm,
 		      vlib_node_runtime_t * node, vlib_frame_t * frame)
 {
-  ip6_ra_report_t *r, *rs;
+  ip6_ra_report_t *r;
   uword event_type;
+  uword *event_data = 0;
+  int i;
 
   /* init code here */
 
@@ -1621,9 +1629,9 @@ ip6_ra_event_process (vlib_main_t * vm,
     {
       vlib_process_wait_for_event_or_clock (vm, 1. /* seconds */ );
 
-      rs = vlib_process_get_event_data (vm, &event_type);
+      event_type = vlib_process_get_events (vm, &event_data);
 
-      if (NULL == rs)
+      if (event_type == ~0)
 	{
 	  /* No events found: timer expired. */
 	  /* process interface list and send RAs as appropriate, update timer info */
@@ -1631,17 +1639,25 @@ ip6_ra_event_process (vlib_main_t * vm,
 	}
       else
 	{
-	  vec_foreach (r, rs) ip6_ra_handle_report (r);
-	  vec_reset_length (rs);
+	  for (i = 0; i < vec_len (event_data); i++)
+	    {
+	      r = (void *) (event_data[i]);
+	      ip6_ra_handle_report (r);
+	    }
+	  vec_reset_length (event_data);
 	}
     }
   return frame->n_vectors;
 }
 
+/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (ip6_ra_process_node) =
 {
-.function = ip6_ra_event_process,.name = "ip6-ra-process",.type =
-    VLIB_NODE_TYPE_PROCESS,};
+ .function = ip6_ra_event_process,
+ .name = "ip6-ra-process",
+ .type = VLIB_NODE_TYPE_PROCESS,
+};
+/* *INDENT-ON* */
 
 static void
 ip6_ra_signal_report (ip6_ra_report_t * r)
@@ -1652,10 +1668,10 @@ ip6_ra_signal_report (ip6_ra_report_t * r)
   if (!vec_len (ip6_ra_listeners))
     return;
 
-  q = vlib_process_signal_event_data (vm,
-				      ip6_ra_process_node.index,
-				      0, 1, sizeof *q);
+  q = clib_mem_alloc (sizeof (*q));
   *q = *r;
+
+  vlib_process_signal_event (vm, ip6_ra_process_node.index, 0, (uword) q);
 }
 
 static int
@@ -2102,12 +2118,12 @@ format_ip6_ra (u8 * s, va_list * args)
   indent += 2;
 
   /* *INDENT-OFF* */
-  pool_foreach (p, radv_info->adv_prefixes_pool,
-  ({
+  pool_foreach (p, radv_info->adv_prefixes_pool)
+   {
     s = format (s, "%Uprefix %U, length %d\n",
                 format_white_space, indent+2,
                 format_ip6_address, &p->prefix, p->prefix_len);
-  }));
+  }
   /* *INDENT-ON* */
 
   s = format (s, "%UMTU is %d\n",

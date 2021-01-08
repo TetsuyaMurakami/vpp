@@ -412,7 +412,6 @@ cryptodev_mark_frame_err_status (vnet_crypto_async_frame_t * f,
 
   for (i = 0; i < n_elts; i++)
     f->elts[i].status = s;
-  f->state = VNET_CRYPTO_FRAME_STATE_ELT_ERROR;
 }
 
 static_always_inline rte_iova_t
@@ -706,7 +705,8 @@ cryptodev_get_ring_head (struct rte_ring * ring)
 }
 
 static_always_inline vnet_crypto_async_frame_t *
-cryptodev_frame_dequeue (vlib_main_t * vm)
+cryptodev_frame_dequeue (vlib_main_t * vm, u32 * nb_elts_processed,
+			 u32 * enqueue_thread_idx)
 {
   cryptodev_main_t *cmt = &cryptodev_main;
   cryptodev_numa_data_t *numa = cmt->per_numa_data + vm->numa_node;
@@ -768,7 +768,8 @@ cryptodev_frame_dequeue (vlib_main_t * vm)
     VNET_CRYPTO_FRAME_STATE_SUCCESS : VNET_CRYPTO_FRAME_STATE_ELT_ERROR;
 
   rte_mempool_put_bulk (numa->cop_pool, (void **) cet->cops, frame->n_elts);
-
+  *nb_elts_processed = frame->n_elts;
+  *enqueue_thread_idx = frame->enqueue_thread_index;
   return frame;
 }
 
@@ -1077,6 +1078,9 @@ cryptodev_count_queue (u32 numa)
 	      "as %u, ignored", info.device->name, numa);
 	  continue;
 	}
+      /* only device support symmetric crypto is used */
+      if (!(info.feature_flags & RTE_CRYPTODEV_FF_SYMMETRIC_CRYPTO))
+	continue;
       q_count += info.max_nb_queue_pairs;
     }
 
@@ -1094,13 +1098,17 @@ cryptodev_configure (vlib_main_t *vm, uint32_t cryptodev_id)
   u32 i;
   int ret;
 
-  cdev = rte_cryptodev_pmd_get_dev (cryptodev_id);
   rte_cryptodev_info_get (cryptodev_id, &info);
+
+  /* do not configure the device that does not support symmetric crypto */
+  if (!(info.feature_flags & RTE_CRYPTODEV_FF_SYMMETRIC_CRYPTO))
+    return 0;
 
   ret = check_cryptodev_alg_support (cryptodev_id);
   if (ret != 0)
     return ret;
 
+  cdev = rte_cryptodev_pmd_get_dev (cryptodev_id);
   /** If the device is already started, we reuse it, otherwise configure
    *  both the device and queue pair.
    **/
@@ -1134,7 +1142,7 @@ cryptodev_configure (vlib_main_t *vm, uint32_t cryptodev_id)
       rte_cryptodev_start (i);
     }
 
-  for (i = 0; i < info.max_nb_queue_pairs; i++)
+  for (i = 0; i < cdev->data->nb_queue_pairs; i++)
     {
       cryptodev_inst_t *cdev_inst;
       vec_add2(cmt->cryptodev_inst, cdev_inst, 1);
@@ -1145,38 +1153,6 @@ cryptodev_configure (vlib_main_t *vm, uint32_t cryptodev_id)
       snprintf (cdev_inst->desc, strlen (info.device->name) + 9,
 		"%s_q%u", info.device->name, i);
     }
-
-  return 0;
-}
-
-static int
-cryptodev_create_device (vlib_main_t *vm, u32 n_queues)
-{
-  char name[RTE_CRYPTODEV_NAME_MAX_LEN], args[128];
-  u32 dev_id = 0;
-  int ret;
-
-  /* find an unused name to create the device */
-  while (dev_id < RTE_CRYPTO_MAX_DEVS)
-    {
-      snprintf (name, RTE_CRYPTODEV_NAME_MAX_LEN - 1, "%s%u",
-		RTE_STR (CRYPTODEV_DEF_DRIVE), dev_id);
-      if (rte_cryptodev_get_dev_id (name) < 0)
-	break;
-      dev_id++;
-    }
-
-  if (dev_id == RTE_CRYPTO_MAX_DEVS)
-    return -1;
-
-  snprintf (args, 127, "socket_id=%u,max_nb_queue_pairs=%u",
-	    vm->numa_node, n_queues);
-
-  ret = rte_vdev_init(name, args);
-  if (ret < 0)
-    return ret;
-
-  clib_warning ("Created cryptodev device %s (%s)", name, args);
 
   return 0;
 }
@@ -1202,14 +1178,9 @@ cryptodev_probe (vlib_main_t *vm, u32 n_workers)
   u32 i;
   int ret;
 
-  /* create an AESNI_MB PMD so the service is available */
+  /* If there is not enough queues, exit */
   if (n_queues < n_workers)
-    {
-      u32 q_num = max_pow2 (n_workers - n_queues);
-      ret = cryptodev_create_device (vm, q_num);
-      if (ret < 0)
-	return ret;
-    }
+      return -1;
 
   for (i = 0; i < rte_cryptodev_count (); i++)
     {
@@ -1227,18 +1198,9 @@ static int
 cryptodev_get_session_sz (vlib_main_t *vm, uint32_t n_workers)
 {
   u32 sess_data_sz = 0, i;
-  int ret;
 
   if (rte_cryptodev_count () == 0)
-    {
-      clib_warning ("No cryptodev device available, creating...");
-      ret = cryptodev_create_device (vm, max_pow2 (n_workers));
-      if (ret < 0)
-	{
-	  clib_warning ("Failed");
-	  return ret;
-	}
-    }
+    return -1;
 
   for (i = 0; i < rte_cryptodev_count (); i++)
     {

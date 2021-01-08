@@ -17,36 +17,6 @@
 
 #include <vnet/ipsec/ipsec.h>
 
-/* *INDENT-OFF* */
-typedef CLIB_PACKED(struct {
-  /*
-   * Key fields: remote ip and spi on incoming packet
-   * all fields in NET byte order
-   */
-  union {
-    struct {
-      ip4_address_t remote_ip;
-      u32 spi;
-    };
-    u64 as_u64;
-  };
-}) ipsec4_tunnel_key_t;
-/* *INDENT-ON* */
-
-/* *INDENT-OFF* */
-typedef CLIB_PACKED(struct {
-  /*
-   * Key fields: remote ip and spi on incoming packet
-   * all fields in NET byte order
-   */
-  ip6_address_t remote_ip;
-  u32 spi;
-}) ipsec6_tunnel_key_t;
-/* *INDENT-ON* */
-
-extern u8 *format_ipsec4_tunnel_key (u8 * s, va_list * args);
-extern u8 *format_ipsec6_tunnel_key (u8 * s, va_list * args);
-
 #define foreach_ipsec_protect_flags \
   _(L2, 1, "l2")                    \
   _(ENCAPED, 2, "encapped")         \
@@ -61,6 +31,69 @@ typedef enum ipsec_protect_flags_t_
 } __clib_packed ipsec_protect_flags_t;
 
 extern u8 *format_ipsec_tun_protect_flags (u8 * s, va_list * args);
+
+/**
+ * result of a lookup in the protection bihash
+ */
+typedef struct ipsec_tun_lkup_result_t_
+{
+  u32 tun_index;
+  u32 sa_index;
+  u32 sw_if_index;
+  ipsec_protect_flags_t flags;
+  u8 __pad[3];
+} ipsec_tun_lkup_result_t;
+
+typedef struct ipsec4_tunnel_kv_t
+{
+  /*
+   * Key fields: remote ip and spi on incoming packet
+   * all fields in NET byte order
+   */
+  u64 key;
+  ipsec_tun_lkup_result_t value;
+} __clib_packed ipsec4_tunnel_kv_t;
+
+STATIC_ASSERT_SIZEOF (ipsec4_tunnel_kv_t, sizeof (clib_bihash_kv_8_16_t));
+STATIC_ASSERT_OFFSET_OF (ipsec4_tunnel_kv_t, value,
+			 STRUCT_OFFSET_OF (clib_bihash_kv_8_16_t, value));
+
+static inline void
+ipsec4_tunnel_mk_key (ipsec4_tunnel_kv_t * k,
+		      const ip4_address_t * ip, u32 spi)
+{
+  k->key = (((u64) ip->as_u32) << 32 | spi);
+}
+
+static inline void
+ipsec4_tunnel_extract_key (const ipsec4_tunnel_kv_t * k,
+			   ip4_address_t * ip, u32 * spi)
+{
+  *spi = (u32) k->key;
+  (*ip).as_u32 = k->key >> 32;
+}
+
+typedef struct ipsec6_tunnel_kv_t_
+{
+  /*
+   * Key fields: remote ip and spi on incoming packet
+   * all fields in NET byte order
+   */
+  struct
+  {
+    ip6_address_t remote_ip;
+    u32 spi;
+    u32 __pad;
+  } key;
+  ipsec_tun_lkup_result_t value;
+} __clib_packed ipsec6_tunnel_kv_t;
+
+STATIC_ASSERT_SIZEOF (ipsec6_tunnel_kv_t, sizeof (clib_bihash_kv_24_16_t));
+STATIC_ASSERT_OFFSET_OF (ipsec6_tunnel_kv_t, value,
+			 STRUCT_OFFSET_OF (clib_bihash_kv_24_16_t, value));
+
+extern u8 *format_ipsec4_tunnel_kv (u8 * s, va_list * args);
+extern u8 *format_ipsec6_tunnel_kv (u8 * s, va_list * args);
 
 typedef struct ipsec_ep_t_
 {
@@ -110,16 +143,9 @@ typedef struct ipsec_tun_protect_t_
   }                                                        \
 }
 
-extern int ipsec_tun_protect_update_one (u32 sw_if_index,
-					 const ip_address_t * nh,
-					 u32 sa_out, u32 sa_in);
 extern int ipsec_tun_protect_update (u32 sw_if_index,
 				     const ip_address_t * nh,
 				     u32 sa_out, u32 * sa_ins);
-extern int ipsec_tun_protect_update_in (u32 sw_if_index,
-					const ip_address_t * nh, u32 sa_in);
-extern int ipsec_tun_protect_update_out (u32 sw_if_index,
-					 const ip_address_t * nh, u32 sa_out);
 
 extern int ipsec_tun_protect_del (u32 sw_if_index, const ip_address_t * nh);
 
@@ -144,19 +170,6 @@ extern vlib_node_registration_t ipsec6_tun_input_node;
  * DP API
  */
 extern ipsec_tun_protect_t *ipsec_tun_protect_pool;
-
-typedef struct ipsec_tun_lkup_result_t_
-{
-  union
-  {
-    struct
-    {
-      u32 tun_index;
-      u32 sa_index;
-    };
-    u64 as_u64;
-  };
-} ipsec_tun_lkup_result_t;
 
 always_inline ipsec_tun_protect_t *
 ipsec_tun_protect_get (u32 index)

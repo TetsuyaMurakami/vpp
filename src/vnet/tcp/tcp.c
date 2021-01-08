@@ -680,7 +680,6 @@ tcp_init_snd_vars (tcp_connection_t * tc)
   tc->iss = tcp_generate_random_iss (tc);
   tc->snd_una = tc->iss;
   tc->snd_nxt = tc->iss + 1;
-  tc->snd_una_max = tc->snd_nxt;
   tc->srtt = 0.1 * THZ;		/* 100 ms */
 
   if (!tcp_cfg.csum_offload)
@@ -841,9 +840,10 @@ format_tcp_listener_session (u8 * s, va_list * args)
   u32 __clib_unused thread_index = va_arg (*args, u32);
   u32 verbose = va_arg (*args, u32);
   tcp_connection_t *tc = tcp_listener_get (tci);
-  s = format (s, "%-50U", format_tcp_connection_id, tc);
+  s = format (s, "%-" SESSION_CLI_ID_LEN "U", format_tcp_connection_id, tc);
   if (verbose)
-    s = format (s, "%-15U", format_tcp_state, tc->state);
+    s = format (s, "%-" SESSION_CLI_STATE_LEN "U", format_tcp_state,
+		tc->state);
   return s;
 }
 
@@ -877,7 +877,7 @@ tcp_session_cal_goal_size (tcp_connection_t * tc)
 {
   u16 goal_size = tc->snd_mss;
 
-  goal_size = TCP_MAX_GSO_SZ - tc->snd_mss % TCP_MAX_GSO_SZ;
+  goal_size = tcp_cfg.max_gso_size - tc->snd_mss % tcp_cfg.max_gso_size;
   goal_size = clib_min (goal_size, tc->snd_wnd / 2);
 
   return goal_size > tc->snd_mss ? goal_size : tc->snd_mss;
@@ -915,7 +915,10 @@ tcp_snd_space_inline (tcp_connection_t * tc)
 {
   int snd_space;
 
-  if (PREDICT_FALSE (tcp_in_fastrecovery (tc)
+  /* Fast path is disabled when recovery is on. @ref tcp_session_custom_tx
+   * controls both retransmits and the sending of new data while congested
+   */
+  if (PREDICT_FALSE (tcp_in_cong_recovery (tc)
 		     || tc->state == TCP_STATE_CLOSED))
     return 0;
 
@@ -1100,7 +1103,7 @@ tcp_dispatch_pending_timers (tcp_worker_ctx_t * wrk)
 	continue;
 
       /* Skip if the timer is not pending. Probably it was reset while
-       * wating for dispatch */
+       * waiting for dispatch */
       if (PREDICT_FALSE (!(tc->pending_timers & (1 << timer_id))))
 	continue;
 
@@ -1145,7 +1148,7 @@ tcp_update_time (f64 now, u8 thread_index)
 
   tcp_set_time_now (wrk);
   tcp_handle_cleanups (wrk, now);
-  tw_timer_expire_timers_16t_2w_512sl (&wrk->timer_wheel, now);
+  tcp_timer_expire_timers (&wrk->timer_wheel, now);
   tcp_dispatch_pending_timers (wrk);
 }
 
@@ -1267,21 +1270,6 @@ tcp_expired_timers_dispatch (u32 * expired_timers)
 }
 
 static void
-tcp_initialize_timer_wheels (tcp_main_t * tm)
-{
-  vlib_main_t *vm = vlib_get_main ();
-  tw_timer_wheel_16t_2w_512sl_t *tw;
-  /* *INDENT-OFF* */
-  foreach_vlib_main (({
-    tw = &tm->wrk_ctx[ii].timer_wheel;
-    tw_timer_wheel_init_16t_2w_512sl (tw, tcp_expired_timers_dispatch,
-                                      TCP_TIMER_TICK, ~0);
-    tw->last_run_time = vlib_time_now (vm);
-  }));
-  /* *INDENT-ON* */
-}
-
-static void
 tcp_initialize_iss_seed (tcp_main_t * tm)
 {
   u32 default_seed = random_default_seed ();
@@ -1356,6 +1344,10 @@ tcp_main_enable (vlib_main_t * vm)
        */
       if ((thread > 0 || num_threads == 1) && prealloc_conn_per_wrk)
 	pool_init_fixed (wrk->connections, prealloc_conn_per_wrk);
+
+      tcp_timer_initialize_wheel (&wrk->timer_wheel,
+				  tcp_expired_timers_dispatch,
+				  vlib_time_now (vm));
     }
 
   /*
@@ -1370,7 +1362,6 @@ tcp_main_enable (vlib_main_t * vm)
       clib_spinlock_init (&tm->half_open_lock);
     }
 
-  tcp_initialize_timer_wheels (tm);
   tcp_initialize_iss_seed (tm);
 
   tm->bytes_per_buffer = vlib_buffer_get_default_data_size (vm);
@@ -1430,15 +1421,17 @@ tcp_configuration_init (void)
   tcp_cfg.csum_offload = 1;
   tcp_cfg.cc_algo = TCP_CC_CUBIC;
   tcp_cfg.rwnd_min_update_ack = 1;
+  tcp_cfg.max_gso_size = TCP_MAX_GSO_SZ;
 
-  /* Time constants defined as timer tick (100ms) multiples */
-  tcp_cfg.delack_time = 1;	/* 0.1s */
-  tcp_cfg.closewait_time = 20;	/* 2s */
-  tcp_cfg.timewait_time = 100;	/* 10s */
-  tcp_cfg.finwait1_time = 600;	/* 60s */
-  tcp_cfg.lastack_time = 300;	/* 30s */
-  tcp_cfg.finwait2_time = 300;	/* 30s */
-  tcp_cfg.closing_time = 300;	/* 30s */
+  /* Time constants defined as timer tick (100us) multiples */
+  tcp_cfg.closewait_time = 20000;	/* 2s */
+  tcp_cfg.timewait_time = 100000;	/* 10s */
+  tcp_cfg.finwait1_time = 600000;	/* 60s */
+  tcp_cfg.lastack_time = 300000;	/* 30s */
+  tcp_cfg.finwait2_time = 300000;	/* 30s */
+  tcp_cfg.closing_time = 300000;	/* 30s */
+
+  /* This value is seconds */
   tcp_cfg.cleanup_time = 0.1;	/* 100ms */
 }
 

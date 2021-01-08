@@ -91,6 +91,7 @@ typedef struct
 #define FILTER_FLAG_NONE    0
 #define FILTER_FLAG_INCLUDE 1
 #define FILTER_FLAG_EXCLUDE 2
+#define FILTER_FLAG_POST_MORTEM 3
   u32 filter_count;
 
   /* set on trace add, cleared on clear trace */
@@ -113,6 +114,13 @@ typedef struct
 format_function_t format_vlib_trace;
 
 void trace_apply_filter (struct vlib_main_t *vm);
+int trace_time_cmp (void *a1, void *a2);
+void vlib_trace_stop_and_clear (void);
+int vlib_enable_disable_pkt_trace_filter (int enable) __attribute__ ((weak));
+void trace_update_capture_options (u32 add, u32 node_index,
+				   u32 filter, u8 verbose);
+void trace_filter_set (u32 node_index, u32 flag, u32 count);
+void clear_trace_buffer (void);
 
 #endif /* included_vlib_trace_h */
 

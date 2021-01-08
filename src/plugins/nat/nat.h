@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016 Cisco and/or its affiliates.
+ * Copyright (c) 2020 Cisco and/or its affiliates.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at:
@@ -36,17 +36,47 @@
 #include <nat/lib/lib.h>
 #include <nat/lib/inlines.h>
 
-/* default session timeouts */
-#define SNAT_UDP_TIMEOUT 300
-#define SNAT_TCP_TRANSITORY_TIMEOUT 240
-#define SNAT_TCP_ESTABLISHED_TIMEOUT 7440
-#define SNAT_ICMP_TIMEOUT 60
-
 /* number of worker handoff frame queue elements */
 #define NAT_FQ_NELTS 64
 
 /* NAT buffer flags */
 #define SNAT_FLAG_HAIRPINNING (1 << 0)
+
+/* NAT44 API Configuration flags */
+#define foreach_nat44_config_flag  \
+  _(0x00, IS_ENDPOINT_INDEPENDENT) \
+  _(0x01, IS_ENDPOINT_DEPENDENT)   \
+  _(0x02, IS_STATIC_MAPPING_ONLY)  \
+  _(0x04, IS_CONNECTION_TRACKING)  \
+  _(0x08, IS_OUT2IN_DPO)
+
+typedef enum nat44_config_flags_t_
+{
+#define _(n,f) NAT44_API_##f = n,
+  foreach_nat44_config_flag
+#undef _
+} nat44_config_flags_t;
+
+typedef struct
+{
+  /* nat44 plugin features */
+  u8 static_mapping_only;
+  u8 connection_tracking;
+  u8 endpoint_dependent;
+  u8 out2in_dpo;
+
+  u32 inside_vrf;
+  u32 outside_vrf;
+
+  /* maximum number of users */
+  u32 users;
+
+  /* maximum number of sessions */
+  u32 sessions;
+
+  /* maximum number of ssessions per user */
+  u32 user_sessions;
+} nat44_config_t;
 
 typedef enum
 {
@@ -54,9 +84,11 @@ typedef enum
   NAT_NEXT_ICMP_ERROR,
   NAT_NEXT_IN2OUT_ED_FAST_PATH,
   NAT_NEXT_IN2OUT_ED_SLOW_PATH,
+  NAT_NEXT_IN2OUT_ED_OUTPUT_FAST_PATH,
   NAT_NEXT_IN2OUT_ED_OUTPUT_SLOW_PATH,
   NAT_NEXT_OUT2IN_ED_FAST_PATH,
   NAT_NEXT_OUT2IN_ED_SLOW_PATH,
+  NAT_NEXT_OUT2IN_ED_HANDOFF,
   NAT_NEXT_IN2OUT_CLASSIFY,
   NAT_NEXT_OUT2IN_CLASSIFY,
   NAT_N_NEXT,
@@ -81,24 +113,6 @@ typedef struct
     u64 as_u64;
   };
 } snat_user_key_t;
-
-/* NAT API Configuration flags */
-#define foreach_nat_config_flag \
-  _(0x01, IS_TWICE_NAT)         \
-  _(0x02, IS_SELF_TWICE_NAT)    \
-  _(0x04, IS_OUT2IN_ONLY)       \
-  _(0x08, IS_ADDR_ONLY)         \
-  _(0x10, IS_OUTSIDE)           \
-  _(0x20, IS_INSIDE)            \
-  _(0x40, IS_STATIC)            \
-  _(0x80, IS_EXT_HOST_VALID)    \
-
-typedef enum nat_config_flags_t_
-{
-#define _(n,f) NAT_API_##f = n,
-  foreach_nat_config_flag
-#undef _
-} nat_config_flags_t;
 
 /* External address and port allocation modes */
 #define foreach_nat_addr_and_port_alloc_alg \
@@ -149,6 +163,19 @@ typedef enum
     NAT_IN2OUT_ED_N_ERROR,
 } nat_in2out_ed_error_t;
 
+#define foreach_nat44_handoff_error                       \
+_(CONGESTION_DROP, "congestion drop")                     \
+_(SAME_WORKER, "same worker")                             \
+_(DO_HANDOFF, "do handoff")
+
+typedef enum
+{
+#define _(sym,str) NAT44_HANDOFF_ERROR_##sym,
+  foreach_nat44_handoff_error
+#undef _
+    NAT44_HANDOFF_N_ERROR,
+} nat44_handoff_error_t;
+
 #define foreach_nat_out2in_ed_error                     \
 _(UNSUPPORTED_PROTOCOL, "unsupported protocol")         \
 _(OUT_OF_PORTS, "out of ports")                         \
@@ -186,17 +213,18 @@ typedef enum
 #define SNAT_SESSION_FLAG_ENDPOINT_DEPENDENT   16
 #define SNAT_SESSION_FLAG_FWD_BYPASS           32
 #define SNAT_SESSION_FLAG_AFFINITY             64
-#define SNAT_SESSION_FLAG_OUTPUT_FEATURE       128
+#define SNAT_SESSION_FLAG_EXACT_ADDRESS        128
 
 /* NAT interface flags */
 #define NAT_INTERFACE_FLAG_IS_INSIDE 1
 #define NAT_INTERFACE_FLAG_IS_OUTSIDE 2
 
 /* Static mapping flags */
-#define NAT_STATIC_MAPPING_FLAG_ADDR_ONLY    1
-#define NAT_STATIC_MAPPING_FLAG_OUT2IN_ONLY  2
-#define NAT_STATIC_MAPPING_FLAG_IDENTITY_NAT 4
-#define NAT_STATIC_MAPPING_FLAG_LB           8
+#define NAT_STATIC_MAPPING_FLAG_ADDR_ONLY      1
+#define NAT_STATIC_MAPPING_FLAG_OUT2IN_ONLY    2
+#define NAT_STATIC_MAPPING_FLAG_IDENTITY_NAT   4
+#define NAT_STATIC_MAPPING_FLAG_LB             8
+#define NAT_STATIC_MAPPING_FLAG_EXACT_ADDRESS  16
 
 /* *INDENT-OFF* */
 typedef CLIB_PACKED(struct
@@ -294,8 +322,8 @@ typedef struct
   u32 fib_index;
 /* *INDENT-OFF* */
 #define _(N, i, n, s) \
-  u16 busy_##n##_ports; \
-  u16 * busy_##n##_ports_per_thread; \
+  u32 busy_##n##_ports; \
+  u32 * busy_##n##_ports_per_thread; \
   u32 busy_##n##_port_refcounts[65535];
   foreach_nat_protocol
 #undef _
@@ -350,6 +378,8 @@ typedef enum
 
 typedef struct
 {
+  /* prefered pool address */
+  ip4_address_t pool_addr;
   /* local IP address */
   ip4_address_t local_addr;
   /* external IP address */
@@ -388,6 +418,7 @@ typedef struct
 typedef struct
 {
   ip4_address_t l_addr;
+  ip4_address_t pool_addr;
   u16 l_port;
   u16 e_port;
   u32 sw_if_index;
@@ -399,6 +430,7 @@ typedef struct
   int is_add;
   int out2in_only;
   int identity_nat;
+  int exact;
   u8 *tag;
 } snat_static_map_resolve_t;
 
@@ -562,16 +594,24 @@ typedef struct snat_main_s
   u32 pre_out2in_node_index;
   u32 pre_in2out_node_index;
 
+  u32 out2in_node_index;
   u32 in2out_node_index;
   u32 in2out_output_node_index;
+
   u32 in2out_fast_node_index;
   u32 in2out_slowpath_node_index;
   u32 in2out_slowpath_output_node_index;
-  u32 ed_in2out_node_index;
-  u32 ed_in2out_slowpath_node_index;
-  u32 out2in_node_index;
   u32 out2in_fast_node_index;
+
+  u32 ei_out2in_node_index;
+  u32 ei_in2out_node_index;
+  u32 ei_in2out_output_node_index;
+
   u32 ed_out2in_node_index;
+  u32 ed_in2out_node_index;
+  u32 ed_in2out_output_node_index;
+
+  u32 ed_in2out_slowpath_node_index;
   u32 ed_out2in_slowpath_node_index;
 
   u32 hairpinning_node_index;
@@ -581,25 +621,28 @@ typedef struct snat_main_s
   u32 ed_hairpin_dst_node_index;
   u32 ed_hairpin_src_node_index;
 
+  nat44_config_t rconfig;
+  //nat44_config_t cconfig;
+
   /* If forwarding is enabled */
   u8 forwarding_enabled;
 
   /* Config parameters */
+  u8 endpoint_dependent;
+
+  u8 out2in_dpo;
+  /* static mapping config */
   u8 static_mapping_only;
   u8 static_mapping_connection_tracking;
-  u8 out2in_dpo;
-  u8 endpoint_dependent;
 
   /* Is translation memory size calculated or user defined */
   u8 translation_memory_size_set;
 
   u32 translation_buckets;
-  uword translation_memory_size;
   u32 max_translations_per_thread;
   u32 *max_translations_per_fib;
   u32 max_users_per_thread;
   u32 user_buckets;
-  uword user_memory_size;
   u32 max_translations_per_user;
 
   u32 outside_vrf_id;
@@ -607,17 +650,12 @@ typedef struct snat_main_s
   u32 inside_vrf_id;
   u32 inside_fib_index;
 
-  /* values of various timeouts */
-  // proto timeouts
-  u32 udp_timeout;
-  u32 tcp_transitory_timeout;
-  u32 tcp_established_timeout;
-  u32 icmp_timeout;
+  nat_timeouts_t timeouts;
 
   /* TCP MSS clamping */
   u16 mss_clamping;
 
-  /* counters/gauges */
+  /* counters */
   vlib_simple_counter_main_t total_users;
   vlib_simple_counter_main_t total_sessions;
   vlib_simple_counter_main_t user_limit_reached;
@@ -684,10 +722,17 @@ typedef struct snat_main_s
   u8 log_level;
 
   /* convenience */
-  vnet_main_t *vnet_main;
+  api_main_t *api_main;
   ip4_main_t *ip4_main;
   ip_lookup_main_t *ip4_lookup_main;
-  api_main_t *api_main;
+
+  fib_source_t fib_src_hi;
+  fib_source_t fib_src_low;
+
+  /* nat44 plugin enabled */
+  u8 enabled;
+
+  vnet_main_t *vnet_main;
 } snat_main_t;
 
 typedef struct
@@ -776,6 +821,12 @@ unformat_function_t unformat_nat_protocol;
 */
 #define is_affinity_sessions(s) (s->flags & SNAT_SESSION_FLAG_AFFINITY)
 
+/** \brief Check if exact pool address should be used.
+    @param s SNAT session
+    @return 1 if exact pool address or 0
+*/
+#define is_exact_address_session(s) (s->flags & SNAT_SESSION_FLAG_EXACT_ADDRESS)
+
 /** \brief Check if NAT interface is inside.
     @param i NAT interface
     @return 1 if inside interface
@@ -817,6 +868,12 @@ unformat_function_t unformat_nat_protocol;
     @return 1 if load-balancing
 */
 #define is_lb_static_mapping(sm) (sm->flags & NAT_STATIC_MAPPING_FLAG_LB)
+
+/** \brief Check if exact pool address should be used.
+    @param s SNAT session
+    @return 1 if exact pool address or 0
+*/
+#define is_exact_address(s) (s->flags & NAT_STATIC_MAPPING_FLAG_EXACT_ADDRESS)
 
 /** \brief Check if client initiating TCP connection (received SYN from client)
     @param t TCP header
@@ -1086,6 +1143,23 @@ int nat44_o2i_ed_is_idle_session_cb (clib_bihash_kv_16_8_t * kv, void *arg);
 int nat44_i2o_is_idle_session_cb (clib_bihash_kv_8_8_t * kv, void *arg);
 int nat44_o2i_is_idle_session_cb (clib_bihash_kv_8_8_t * kv, void *arg);
 
+
+/**
+ * @brief Enable NAT44 plugin
+ *
+ * @param c         nat44_config_t
+ *
+ * @return 0 on success, non-zero value otherwise
+ */
+int nat44_plugin_enable (nat44_config_t c);
+
+/**
+ * @brief Disable NAT44 plugin
+ *
+ * @return 0 on success, non-zero value otherwise
+ */
+int nat44_plugin_disable ();
+
 /**
  * @brief Add external address to NAT44 pool
  *
@@ -1138,6 +1212,8 @@ void nat44_add_del_address_dpo (ip4_address_t addr, u8 is_add);
  * @param out2in_only  if 1 rule match only out2in direction
  * @param tag          opaque string tag
  * @param identity_nat identity NAT
+ * @param pool_addr    pool IPv4 address
+ * @param exact        1 = exact pool address
  *
  * @return 0 on success, non-zero value otherwise
  */
@@ -1146,7 +1222,8 @@ int snat_add_static_mapping (ip4_address_t l_addr, ip4_address_t e_addr,
 			     int addr_only, u32 sw_if_index,
 			     nat_protocol_t proto, int is_add,
 			     twice_nat_type_t twice_nat, u8 out2in_only,
-			     u8 * tag, u8 identity_nat);
+			     u8 * tag, u8 identity_nat,
+			     ip4_address_t pool_addr, int exact);
 
 /**
  * @brief Add/delete static mapping with load-balancing (multiple backends)
@@ -1174,7 +1251,7 @@ int nat44_lb_static_mapping_add_del_local (ip4_address_t e_addr, u16 e_port,
 					   nat_protocol_t proto, u32 vrf_id,
 					   u8 probability, u8 is_add);
 
-clib_error_t *snat_api_init (vlib_main_t * vm, snat_main_t * sm);
+clib_error_t *nat44_api_hookup (vlib_main_t * vm);
 
 /**
  * @brief Set NAT plugin workers
@@ -1278,16 +1355,6 @@ int nat44_set_session_limit (u32 session_limit, u32 vrf_id);
  * @return 0 on success, non-zero value otherwise
  */
 int nat44_update_session_limit (u32 session_limit, u32 vrf_id);
-/**
- * @brief Free NAT44 ED session data (lookup keys, external address port)
- *
- * @param s            NAT session
- * @param thread_index thread index
- * @param is_ha        is HA event
- */
-void
-nat44_free_session_data (snat_main_t * sm, snat_session_t * s,
-			 u32 thread_index, u8 is_ha);
 
 /**
  * @brief Initialize NAT44 data
@@ -1303,6 +1370,9 @@ void nat44_db_init (snat_main_per_thread_data_t * tsm);
  */
 void nat44_db_free (snat_main_per_thread_data_t * tsm);
 
+/**
+ * @brief Free all NAT44 sessions
+ */
 void nat44_sessions_clear ();
 
 /**
@@ -1334,29 +1404,6 @@ snat_session_t *nat_session_alloc_or_recycle (snat_main_t * sm,
 					      u32 thread_index, f64 now);
 
 /**
- * @brief Set address and port assignment algorithm for MAP-E CE
- *
- * @param psid        Port Set Identifier value
- * @param psid_offset number of offset bits
- * @param psid_length length of PSID
- */
-void nat_set_alloc_addr_and_port_mape (u16 psid, u16 psid_offset,
-				       u16 psid_length);
-
-/**
- * @brief Set address and port assignment algorithm for port range
- *
- * @param start_port beginning of the port range
- * @param end_port   end of the port range
- */
-void nat_set_alloc_addr_and_port_range (u16 start_port, u16 end_port);
-
-/**
- * @brief Set address and port assignment algorithm to default/standard
- */
-void nat_set_alloc_addr_and_port_default (void);
-
-/**
  * @brief Free outside address and port pair
  *
  * @param addresses    vector of outside addresses
@@ -1369,41 +1416,23 @@ snat_free_outside_address_and_port (snat_address_t * addresses,
 				    ip4_address_t * addr,
 				    u16 port, nat_protocol_t protocol);
 
-/**
- * @brief Alloc outside address and port
- *
- * @param addresses         vector of outside addresses
- * @param fib_index         FIB table index
- * @param thread_index      thread index
- * @param port_per_thread   number of ports per thread
- * @param snat_thread_index NAT thread index
- *
- * @return 0 on success, non-zero value otherwise
- */
-int snat_alloc_outside_address_and_port (snat_address_t * addresses,
-					 u32 fib_index,
-					 u32 thread_index,
-					 nat_protocol_t proto,
-					 ip4_address_t * addr,
-					 u16 * port,
-					 u16 port_per_thread,
-					 u32 snat_thread_index);
-
 void expire_per_vrf_sessions (u32 fib_index);
 
 /**
  * @brief Match NAT44 static mapping.
  *
- * @param key           address and port to match
- * @param addr          external/local address of the matched mapping
- * @param port          port of the matched mapping
- * @param fib_index     fib index of the matched mapping
- * @param by_external   if 0 match by local address otherwise match by external
- *                      address
- * @param is_addr_only  1 if matched mapping is address only
- * @param twice_nat     matched mapping is twice NAT type
- * @param lb            1 if matched mapping is load-balanced
- * @param ext_host_addr external host address
+ * @param key             address and port to match
+ * @param addr            external/local address of the matched mapping
+ * @param port            port of the matched mapping
+ * @param fib_index       fib index of the matched mapping
+ * @param by_external     if 0 match by local address otherwise match by external
+ *                        address
+ * @param is_addr_only    1 if matched mapping is address only
+ * @param twice_nat       matched mapping is twice NAT type
+ * @param lb              1 if matched mapping is load-balanced
+ * @param ext_host_addr   external host address
+ * @param is_identity_nat 1 if indentity mapping
+ * @param out             if !=0 set to pointer of the mapping structure
  *
  * @returns 0 if match found otherwise 1.
  */
@@ -1420,7 +1449,8 @@ int snat_static_mapping_match (snat_main_t * sm,
 			       twice_nat_type_t * twice_nat,
 			       lb_nat_type_t * lb,
 			       ip4_address_t * ext_host_addr,
-			       u8 * is_identity_nat);
+			       u8 * is_identity_nat,
+			       snat_static_mapping_t ** out);
 
 /**
  * @brief Add/del NAT address to FIB.
@@ -1436,6 +1466,30 @@ int snat_static_mapping_match (snat_main_t * sm,
  */
 void snat_add_del_addr_to_fib (ip4_address_t * addr,
 			       u8 p_len, u32 sw_if_index, int is_add);
+
+#if 0
+void
+nat_ha_sadd_ed_cb (ip4_address_t * in_addr, u16 in_port,
+		   ip4_address_t * out_addr, u16 out_port,
+		   ip4_address_t * eh_addr, u16 eh_port,
+		   ip4_address_t * ehn_addr, u16 ehn_port, u8 proto,
+		   u32 fib_index, u16 flags, u32 thread_index);
+
+void
+nat_ha_sdel_ed_cb (ip4_address_t * out_addr, u16 out_port,
+		   ip4_address_t * eh_addr, u16 eh_port, u8 proto,
+		   u32 fib_index, u32 ti);
+
+void
+nat_ha_sref_ed_cb (ip4_address_t * out_addr, u16 out_port,
+		   ip4_address_t * eh_addr, u16 eh_port, u8 proto,
+		   u32 fib_index, u32 total_pkts, u64 total_bytes,
+		   u32 thread_index);
+#endif
+
+int nat_set_outside_address_and_port (snat_address_t *addresses,
+				      u32 thread_index, ip4_address_t addr,
+				      u16 port, nat_protocol_t protocol);
 
 /*
  * Why is this here? Because we don't need to touch this layer to

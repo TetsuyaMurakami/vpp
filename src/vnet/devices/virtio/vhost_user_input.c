@@ -33,13 +33,11 @@
 #include <vlib/vlib.h>
 #include <vlib/unix/unix.h>
 
-#include <vnet/ip/ip.h>
-
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/devices/devices.h>
 #include <vnet/feature/feature.h>
+#include <vnet/udp/udp_packet.h>
 
-#include <vnet/devices/virtio/virtio.h>
 #include <vnet/devices/virtio/vhost_user.h>
 #include <vnet/devices/virtio/vhost_user_inline.h>
 
@@ -108,18 +106,18 @@ vhost_user_rx_trace (vhost_trace_t * t,
   t->qid = qid;
 
   hdr_desc = &txvq->desc[desc_current];
-  if (txvq->desc[desc_current].flags & VIRTQ_DESC_F_INDIRECT)
+  if (txvq->desc[desc_current].flags & VRING_DESC_F_INDIRECT)
     {
       t->virtio_ring_flags |= 1 << VIRTIO_TRACE_F_INDIRECT;
       /* Header is the first here */
       hdr_desc = map_guest_mem (vui, txvq->desc[desc_current].addr, &hint);
     }
-  if (txvq->desc[desc_current].flags & VIRTQ_DESC_F_NEXT)
+  if (txvq->desc[desc_current].flags & VRING_DESC_F_NEXT)
     {
       t->virtio_ring_flags |= 1 << VIRTIO_TRACE_F_SIMPLE_CHAINED;
     }
-  if (!(txvq->desc[desc_current].flags & VIRTQ_DESC_F_NEXT) &&
-      !(txvq->desc[desc_current].flags & VIRTQ_DESC_F_INDIRECT))
+  if (!(txvq->desc[desc_current].flags & VRING_DESC_F_NEXT) &&
+      !(txvq->desc[desc_current].flags & VRING_DESC_F_INDIRECT))
     {
       t->virtio_ring_flags |= 1 << VIRTIO_TRACE_F_SINGLE_DESC;
     }
@@ -293,15 +291,11 @@ vhost_user_handle_rx_offload (vlib_buffer_t * b0, u8 * b0_data,
       tcp_header_t *tcp = (tcp_header_t *)
 	(b0_data + vnet_buffer (b0)->l4_hdr_offset);
       l4_hdr_sz = tcp_header_bytes (tcp);
-      tcp->checksum = 0;
       b0->flags |= VNET_BUFFER_F_OFFLOAD_TCP_CKSUM;
     }
   else if (l4_proto == IP_PROTOCOL_UDP)
     {
-      udp_header_t *udp =
-	(udp_header_t *) (b0_data + vnet_buffer (b0)->l4_hdr_offset);
-      l4_hdr_sz = sizeof (*udp);
-      udp->checksum = 0;
+      l4_hdr_sz = sizeof (udp_header_t);
       b0->flags |= VNET_BUFFER_F_OFFLOAD_UDP_CKSUM;
     }
 
@@ -326,16 +320,17 @@ vhost_user_handle_rx_offload (vlib_buffer_t * b0, u8 * b0_data,
 }
 
 static_always_inline void
-vhost_user_input_do_interrupt (vlib_main_t * vm, vhost_user_vring_t * txvq,
+vhost_user_input_do_interrupt (vlib_main_t * vm, vhost_user_intf_t * vui,
+			       vhost_user_vring_t * txvq,
 			       vhost_user_vring_t * rxvq)
 {
   f64 now = vlib_time_now (vm);
 
   if ((txvq->n_since_last_int) && (txvq->int_deadline < now))
-    vhost_user_send_call (vm, txvq);
+    vhost_user_send_call (vm, vui, txvq);
 
   if ((rxvq->n_since_last_int) && (rxvq->int_deadline < now))
-    vhost_user_send_call (vm, rxvq);
+    vhost_user_send_call (vm, vui, rxvq);
 }
 
 static_always_inline void
@@ -381,7 +376,7 @@ vhost_user_if_input (vlib_main_t * vm,
 		     vhost_user_main_t * vum,
 		     vhost_user_intf_t * vui,
 		     u16 qid, vlib_node_runtime_t * node,
-		     vnet_hw_interface_rx_mode mode, u8 enable_csum)
+		     vnet_hw_if_rx_mode mode, u8 enable_csum)
 {
   vhost_user_vring_t *txvq = &vui->vrings[VHOST_VRING_IDX_TX (qid)];
   vnet_feature_main_t *fm = &feature_main;
@@ -406,7 +401,7 @@ vhost_user_if_input (vlib_main_t * vm,
   {
     /* do we have pending interrupts ? */
     vhost_user_vring_t *rxvq = &vui->vrings[VHOST_VRING_IDX_RX (qid)];
-    vhost_user_input_do_interrupt (vm, txvq, rxvq);
+    vhost_user_input_do_interrupt (vm, vui, txvq, rxvq);
   }
 
   /*
@@ -416,7 +411,7 @@ vhost_user_if_input (vlib_main_t * vm,
    * When the traffic subsides, the scheduler switches the node back to
    * interrupt mode. We must tell the driver we want interrupt.
    */
-  if (PREDICT_FALSE (mode == VNET_HW_INTERFACE_RX_MODE_ADAPTIVE))
+  if (PREDICT_FALSE (mode == VNET_HW_IF_RX_MODE_ADAPTIVE))
     {
       if ((node->flags &
 	   VLIB_NODE_FLAG_SWITCH_FROM_POLLING_TO_INTERRUPT_MODE) ||
@@ -546,10 +541,10 @@ vhost_user_if_input (vlib_main_t * vm,
       b_head->total_length_not_including_first_buffer = 0;
       b_head->flags |= VLIB_BUFFER_TOTAL_LENGTH_VALID;
 
-      if (PREDICT_FALSE (n_trace))
+      if (PREDICT_FALSE
+	  (n_trace > 0 && vlib_trace_buffer (vm, node, next_index, b_head,
+					     /* follow_chain */ 0)))
 	{
-	  vlib_trace_buffer (vm, node, next_index, b_head,
-			     /* follow_chain */ 0);
 	  vhost_trace_t *t0 =
 	    vlib_add_trace (vm, node, b_head, sizeof (t0[0]));
 	  vhost_user_rx_trace (t0, vui, qid, b_head, txvq, last_avail_idx);
@@ -560,7 +555,7 @@ vhost_user_if_input (vlib_main_t * vm,
       /* This depends on the setup but is very consistent
        * So I think the CPU branch predictor will make a pretty good job
        * at optimizing the decision. */
-      if (txvq->desc[desc_current].flags & VIRTQ_DESC_F_INDIRECT)
+      if (txvq->desc[desc_current].flags & VRING_DESC_F_INDIRECT)
 	{
 	  desc_table = map_guest_mem (vui, txvq->desc[desc_current].addr,
 				      &map_hint);
@@ -591,7 +586,7 @@ vhost_user_if_input (vlib_main_t * vm,
 	  if (hdr->hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM)
 	    {
 	      if ((desc_data_offset == desc_table[desc_current].len) &&
-		  (desc_table[desc_current].flags & VIRTQ_DESC_F_NEXT))
+		  (desc_table[desc_current].flags & VRING_DESC_F_NEXT))
 		{
 		  current = desc_table[desc_current].next;
 		  b_data = map_guest_mem (vui, desc_table[current].addr,
@@ -617,7 +612,7 @@ vhost_user_if_input (vlib_main_t * vm,
 	  if (desc_data_offset == desc_table[desc_current].len)
 	    {
 	      if (PREDICT_FALSE (desc_table[desc_current].flags &
-				 VIRTQ_DESC_F_NEXT))
+				 VRING_DESC_F_NEXT))
 		{
 		  desc_current = desc_table[desc_current].next;
 		  desc_data_offset = 0;
@@ -748,7 +743,7 @@ stop:
       txvq->n_since_last_int += n_rx_packets;
 
       if (txvq->n_since_last_int > vum->coalesce_frames)
-	vhost_user_send_call (vm, txvq);
+	vhost_user_send_call (vm, vui, txvq);
     }
 
   /* increase rx counters */
@@ -776,10 +771,10 @@ vhost_user_mark_desc_consumed (vhost_user_intf_t * vui,
     {
       if (txvq->used_wrap_counter)
 	desc_table[(desc_head + desc_idx) & mask].flags |=
-	  (VIRTQ_DESC_F_AVAIL | VIRTQ_DESC_F_USED);
+	  (VRING_DESC_F_AVAIL | VRING_DESC_F_USED);
       else
 	desc_table[(desc_head + desc_idx) & mask].flags &=
-	  ~(VIRTQ_DESC_F_AVAIL | VIRTQ_DESC_F_USED);
+	  ~(VRING_DESC_F_AVAIL | VRING_DESC_F_USED);
       vhost_user_advance_last_used_idx (txvq);
     }
 }
@@ -799,18 +794,18 @@ vhost_user_rx_trace_packed (vhost_trace_t * t, vhost_user_intf_t * vui,
   t->qid = qid;
 
   hdr_desc = &txvq->packed_desc[desc_current];
-  if (txvq->packed_desc[desc_current].flags & VIRTQ_DESC_F_INDIRECT)
+  if (txvq->packed_desc[desc_current].flags & VRING_DESC_F_INDIRECT)
     {
       t->virtio_ring_flags |= 1 << VIRTIO_TRACE_F_INDIRECT;
       /* Header is the first here */
       hdr_desc = map_guest_mem (vui, txvq->packed_desc[desc_current].addr,
 				&hint);
     }
-  if (txvq->packed_desc[desc_current].flags & VIRTQ_DESC_F_NEXT)
+  if (txvq->packed_desc[desc_current].flags & VRING_DESC_F_NEXT)
     t->virtio_ring_flags |= 1 << VIRTIO_TRACE_F_SIMPLE_CHAINED;
 
-  if (!(txvq->packed_desc[desc_current].flags & VIRTQ_DESC_F_NEXT) &&
-      !(txvq->packed_desc[desc_current].flags & VIRTQ_DESC_F_INDIRECT))
+  if (!(txvq->packed_desc[desc_current].flags & VRING_DESC_F_NEXT) &&
+      !(txvq->packed_desc[desc_current].flags & VRING_DESC_F_INDIRECT))
     t->virtio_ring_flags |= 1 << VIRTIO_TRACE_F_SINGLE_DESC;
 
   t->first_desc_len = hdr_desc ? hdr_desc->len : 0;
@@ -1018,7 +1013,7 @@ vhost_user_compute_chained_desc_len (vhost_user_intf_t * vui,
   u32 desc_len = 0;
   u16 mask = txvq->qsz_mask;
 
-  while (desc_table[*current].flags & VIRTQ_DESC_F_NEXT)
+  while (desc_table[*current].flags & VRING_DESC_F_NEXT)
     {
       desc_len += desc_table[*current].len;
       (*n_left)++;
@@ -1089,7 +1084,7 @@ static_always_inline u32
 vhost_user_if_input_packed (vlib_main_t * vm, vhost_user_main_t * vum,
 			    vhost_user_intf_t * vui, u16 qid,
 			    vlib_node_runtime_t * node,
-			    vnet_hw_interface_rx_mode mode, u8 enable_csum)
+			    vnet_hw_if_rx_mode mode, u8 enable_csum)
 {
   vhost_user_vring_t *txvq = &vui->vrings[VHOST_VRING_IDX_TX (qid)];
   vnet_feature_main_t *fm = &feature_main;
@@ -1122,7 +1117,7 @@ vhost_user_if_input_packed (vlib_main_t * vm, vhost_user_main_t * vum,
 
   /* do we have pending interrupts ? */
   vhost_user_vring_t *rxvq = &vui->vrings[VHOST_VRING_IDX_RX (qid)];
-  vhost_user_input_do_interrupt (vm, txvq, rxvq);
+  vhost_user_input_do_interrupt (vm, vui, txvq, rxvq);
 
   /*
    * For adaptive mode, it is optimized to reduce interrupts.
@@ -1131,7 +1126,7 @@ vhost_user_if_input_packed (vlib_main_t * vm, vhost_user_main_t * vum,
    * When the traffic subsides, the scheduler switches the node back to
    * interrupt mode. We must tell the driver we want interrupt.
    */
-  if (PREDICT_FALSE (mode == VNET_HW_INTERFACE_RX_MODE_ADAPTIVE))
+  if (PREDICT_FALSE (mode == VNET_HW_IF_RX_MODE_ADAPTIVE))
     {
       if ((node->flags &
 	   VLIB_NODE_FLAG_SWITCH_FROM_POLLING_TO_INTERRUPT_MODE) ||
@@ -1177,7 +1172,7 @@ vhost_user_if_input_packed (vlib_main_t * vm, vhost_user_main_t * vum,
   while (vhost_user_packed_desc_available (txvq, current) &&
 	 (n_left < VLIB_FRAME_SIZE))
     {
-      if (desc_table[current].flags & VIRTQ_DESC_F_INDIRECT)
+      if (desc_table[current].flags & VRING_DESC_F_INDIRECT)
 	{
 	  buffers_required +=
 	    vhost_user_compute_indirect_desc_len (vui, txvq, buffer_data_size,
@@ -1244,7 +1239,7 @@ vhost_user_if_input_packed (vlib_main_t * vm, vhost_user_main_t * vum,
       desc_data_offset = vui->virtio_net_hdr_sz;
       n_descs_to_process = 1;
 
-      if (desc_table[desc_idx].flags & VIRTQ_DESC_F_INDIRECT)
+      if (desc_table[desc_idx].flags & VRING_DESC_F_INDIRECT)
 	{
 	  n_descs = desc_table[desc_idx].len >> 4;
 	  desc_table = map_guest_mem (vui, desc_table[desc_idx].addr,
@@ -1298,7 +1293,7 @@ vhost_user_if_input_packed (vlib_main_t * vm, vhost_user_main_t * vum,
 	   * loop. So count how many descriptors in the chain.
 	   */
 	  n_descs_to_process = 1;
-	  while (desc_table[desc_idx].flags & VIRTQ_DESC_F_NEXT)
+	  while (desc_table[desc_idx].flags & VRING_DESC_F_NEXT)
 	    {
 	      vhost_user_assemble_packet (desc_table, &desc_idx, b_head,
 					  &b_current, &next, &b, &bi_current,
@@ -1368,17 +1363,19 @@ vhost_user_if_input_packed (vlib_main_t * vm, vhost_user_main_t * vum,
       b = cpu->rx_buffers_pdesc;
       while (n_trace && left)
 	{
-	  vhost_trace_t *t0;
-
-	  vlib_trace_buffer (vm, node, next_index, b[0],
-			     /* follow_chain */ 0);
-	  t0 = vlib_add_trace (vm, node, b[0], sizeof (t0[0]));
-	  b++;
-	  vhost_user_rx_trace_packed (t0, vui, qid, txvq, last_used_idx);
-	  last_used_idx = (last_used_idx + 1) & mask;
-	  n_trace--;
+	  if (PREDICT_TRUE
+	      (vlib_trace_buffer
+	       (vm, node, next_index, b[0], /* follow_chain */ 0)))
+	    {
+	      vhost_trace_t *t0;
+	      t0 = vlib_add_trace (vm, node, b[0], sizeof (t0[0]));
+	      vhost_user_rx_trace_packed (t0, vui, qid, txvq, last_used_idx);
+	      last_used_idx = (last_used_idx + 1) & mask;
+	      n_trace--;
+	      vlib_set_trace_count (vm, node, n_trace);
+	    }
 	  left--;
-	  vlib_set_trace_count (vm, node, n_trace);
+	  b++;
 	}
     }
 
@@ -1393,7 +1390,7 @@ vhost_user_if_input_packed (vlib_main_t * vm, vhost_user_main_t * vum,
     {
       txvq->n_since_last_int += n_rx_packets;
       if (txvq->n_since_last_int > vum->coalesce_frames)
-	vhost_user_send_call (vm, txvq);
+	vhost_user_send_call (vm, vui, txvq);
     }
 
   /* increase rx counters */
@@ -1431,7 +1428,7 @@ VLIB_NODE_FN (vhost_user_input_node) (vlib_main_t * vm,
 	  pool_elt_at_index (vum->vhost_user_interfaces, dq->dev_instance);
 	if (vhost_user_is_packed_ring_supported (vui))
 	  {
-	    if (vui->features & (1ULL << FEAT_VIRTIO_NET_F_CSUM))
+	    if (vui->features & VIRTIO_FEATURE (VIRTIO_NET_F_CSUM))
 	      n_rx_packets += vhost_user_if_input_packed (vm, vum, vui,
 							  dq->queue_id, node,
 							  dq->mode, 1);
@@ -1442,7 +1439,7 @@ VLIB_NODE_FN (vhost_user_input_node) (vlib_main_t * vm,
 	  }
 	else
 	  {
-	    if (vui->features & (1ULL << FEAT_VIRTIO_NET_F_CSUM))
+	    if (vui->features & VIRTIO_FEATURE (VIRTIO_NET_F_CSUM))
 	      n_rx_packets += vhost_user_if_input (vm, vum, vui, dq->queue_id,
 						   node, dq->mode, 1);
 	    else

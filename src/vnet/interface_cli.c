@@ -112,8 +112,8 @@ show_or_clear_hw_interfaces (vlib_main_t * vm,
 
   /* Gather interfaces. */
   if (vec_len (hw_if_indices) == 0)
-    pool_foreach (hi, im->hw_interfaces,
-		  vec_add1 (hw_if_indices, hi - im->hw_interfaces));
+    pool_foreach (hi, im->hw_interfaces)
+      vec_add1 (hw_if_indices, hi - im->hw_interfaces);
 
   if (verbose < 0)
     verbose = 1;		/* default to verbose (except bond) */
@@ -139,12 +139,12 @@ show_or_clear_hw_interfaces (vlib_main_t * vm,
 			       hi, verbose);
 
               /* *INDENT-OFF* */
-	      clib_bitmap_foreach (hw_idx, hi->bond_info,
-              ({
+	      clib_bitmap_foreach (hw_idx, hi->bond_info)
+               {
                 shi = vnet_get_hw_interface(vnm, hw_idx);
                 vlib_cli_output (vm, "%U\n",
                                  format_vnet_hw_interface, vnm, shi, verbose);
-              }));
+              }
               /* *INDENT-ON* */
 	    }
 	}
@@ -342,14 +342,7 @@ show_sw_interfaces (vlib_main_t * vm,
   if (show_features)
     {
       vnet_interface_features_show (vm, sw_if_index, verbose);
-
-      l2_input_config_t *l2_input = l2input_intf_config (sw_if_index);
-      u32 fb = l2_input->feature_bitmap;
-      /* intf input features are masked by bridge domain */
-      if (l2_input->bridge)
-	fb &= l2input_bd_config (l2_input->bd_index)->feature_bitmap;
-      vlib_cli_output (vm, "\nl2-input:\n%U", format_l2_input_features, fb,
-		       1);
+      vlib_cli_output (vm, "%U", format_l2_input_features, sw_if_index, 1);
 
       l2_output_config_t *l2_output = l2output_intf_config (sw_if_index);
       vlib_cli_output (vm, "\nl2-output:");
@@ -402,12 +395,12 @@ show_sw_interfaces (vlib_main_t * vm,
 	vec_new (vnet_sw_interface_t, pool_elts (im->sw_interfaces));
       _vec_len (sorted_sis) = 0;
       /* *INDENT-OFF* */
-      pool_foreach (si, im->sw_interfaces,
-      ({
+      pool_foreach (si, im->sw_interfaces)
+       {
         int visible = vnet_swif_is_api_visible (si);
         if (visible)
-          vec_add1 (sorted_sis, si[0]);}
-        ));
+          vec_add1 (sorted_sis, si[0]);
+        }
       /* *INDENT-ON* */
       /* Sort by name. */
       vec_sort_with_function (sorted_sis, sw_interface_name_compare);
@@ -448,19 +441,7 @@ show_sw_interfaces (vlib_main_t * vm,
 	     (si->flags & VNET_SW_INTERFACE_FLAG_ADMIN_UP) ? "up" : "dn");
 
 	/* Display any L2 info */
-	l2_input_config_t *l2_input = l2input_intf_config (si->sw_if_index);
-	if (l2_input->bridge)
-	  {
-	    bd_main_t *bdm = &bd_main;
-	    u32 bd_id = l2input_main.bd_configs[l2_input->bd_index].bd_id;
-	    vlib_cli_output (vm, "  L2 bridge bd-id %d idx %d shg %d %s",
-			     bd_id, bd_find_index (bdm, bd_id), l2_input->shg,
-			     l2_input->bvi ? "bvi" : " ");
-	  }
-	else if (l2_input->xconnect)
-	  vlib_cli_output (vm, "  L2 xconnect %U",
-			   format_vnet_sw_if_index_name, vnm,
-			   l2_input->output_sw_if_index);
+	vlib_cli_output (vm, "%U", format_l2_input, si->sw_if_index);
 
 	/* *INDENT-OFF* */
 	/* Display any IP4 addressing info */
@@ -1226,12 +1207,12 @@ show_interface_sec_mac_addr_fn (vlib_main_t * vm, unformat_input_t * input,
 	vec_new (vnet_sw_interface_t, pool_elts (im->sw_interfaces));
       _vec_len (sorted_sis) = 0;
       /* *INDENT-OFF* */
-      pool_foreach (si, im->sw_interfaces,
-      ({
+      pool_foreach (si, im->sw_interfaces)
+       {
         int visible = vnet_swif_is_api_visible (si);
         if (visible)
-          vec_add1 (sorted_sis, si[0]);}
-        ));
+          vec_add1 (sorted_sis, si[0]);
+        }
       /* *INDENT-ON* */
       /* Sort by name. */
       vec_sort_with_function (sorted_sis, sw_interface_name_compare);
@@ -1252,11 +1233,11 @@ show_interface_sec_mac_addr_fn (vlib_main_t * vm, unformat_input_t * input,
 
     if (ei && ei->secondary_addrs)
       {
-	mac_address_t *sec_addr;
+	ethernet_interface_address_t *sec_addr;
 
 	vec_foreach (sec_addr, ei->secondary_addrs)
 	{
-	  vlib_cli_output (vm, "  %U", format_mac_address_t, sec_addr);
+	  vlib_cli_output (vm, "  %U", format_mac_address_t, &sec_addr->mac);
 	}
       }
   }
@@ -1496,16 +1477,16 @@ VLIB_CLI_COMMAND (set_ip_directed_broadcast_command, static) = {
 
 static clib_error_t *
 set_hw_interface_rx_mode (vnet_main_t * vnm, u32 hw_if_index,
-			  u32 queue_id, vnet_hw_interface_rx_mode mode)
+			  u32 queue_id, vnet_hw_if_rx_mode mode)
 {
   vnet_hw_interface_t *hw = vnet_get_hw_interface (vnm, hw_if_index);
   vnet_device_class_t *dev_class =
     vnet_get_device_class (vnm, hw->dev_class_index);
   clib_error_t *error;
-  vnet_hw_interface_rx_mode old_mode;
+  vnet_hw_if_rx_mode old_mode;
   int rv;
 
-  if (mode == VNET_HW_INTERFACE_RX_MODE_DEFAULT)
+  if (mode == VNET_HW_IF_RX_MODE_DEFAULT)
     mode = hw->default_rx_mode;
 
   rv = vnet_hw_interface_get_rx_mode (vnm, hw_if_index, queue_id, &old_mode);
@@ -1552,7 +1533,7 @@ set_hw_interface_rx_mode (vnet_main_t * vnm, u32 hw_if_index,
 clib_error_t *
 set_hw_interface_change_rx_mode (vnet_main_t * vnm, u32 hw_if_index,
 				 u8 queue_id_valid, u32 queue_id,
-				 vnet_hw_interface_rx_mode mode)
+				 vnet_hw_if_rx_mode mode)
 {
   clib_error_t *error = 0;
   vnet_hw_interface_t *hw;
@@ -1585,7 +1566,7 @@ set_interface_rx_mode (vlib_main_t * vm, unformat_input_t * input,
   vnet_main_t *vnm = vnet_get_main ();
   u32 hw_if_index = (u32) ~ 0;
   u32 queue_id = (u32) ~ 0;
-  vnet_hw_interface_rx_mode mode = VNET_HW_INTERFACE_RX_MODE_UNKNOWN;
+  vnet_hw_if_rx_mode mode = VNET_HW_IF_RX_MODE_UNKNOWN;
   u8 queue_id_valid = 0;
 
   if (!unformat_user (input, unformat_line_input, line_input))
@@ -1599,11 +1580,11 @@ set_interface_rx_mode (vlib_main_t * vm, unformat_input_t * input,
       else if (unformat (line_input, "queue %d", &queue_id))
 	queue_id_valid = 1;
       else if (unformat (line_input, "polling"))
-	mode = VNET_HW_INTERFACE_RX_MODE_POLLING;
+	mode = VNET_HW_IF_RX_MODE_POLLING;
       else if (unformat (line_input, "interrupt"))
-	mode = VNET_HW_INTERFACE_RX_MODE_INTERRUPT;
+	mode = VNET_HW_IF_RX_MODE_INTERRUPT;
       else if (unformat (line_input, "adaptive"))
-	mode = VNET_HW_INTERFACE_RX_MODE_ADAPTIVE;
+	mode = VNET_HW_IF_RX_MODE_ADAPTIVE;
       else
 	{
 	  error = clib_error_return (0, "parse error: '%U'",
@@ -1618,7 +1599,7 @@ set_interface_rx_mode (vlib_main_t * vm, unformat_input_t * input,
   if (hw_if_index == (u32) ~ 0)
     return clib_error_return (0, "please specify valid interface name");
 
-  if (mode == VNET_HW_INTERFACE_RX_MODE_UNKNOWN)
+  if (mode == VNET_HW_IF_RX_MODE_UNKNOWN)
     return clib_error_return (0, "please specify valid rx-mode");
 
   error = set_hw_interface_change_rx_mode (vnm, hw_if_index, queue_id_valid,
@@ -1682,8 +1663,8 @@ show_interface_rx_placement_fn (vlib_main_t * vm, unformat_input_t * input,
 
   /* *INDENT-OFF* */
   foreach_vlib_main (({
-    clib_bitmap_foreach (si, pn->sibling_bitmap,
-      ({
+    clib_bitmap_foreach (si, pn->sibling_bitmap)
+       {
         rt = vlib_node_get_runtime_data (this_vlib_main, si);
 
         if (vec_len (rt->devices_and_queues))
@@ -1696,9 +1677,9 @@ show_interface_rx_placement_fn (vlib_main_t * vm, unformat_input_t * input,
 	    s = format (s, "    %U queue %u (%U)\n",
 			format_vnet_sw_if_index_name, vnm, hi->sw_if_index,
 			dq->queue_id,
-			format_vnet_hw_interface_rx_mode, dq->mode);
+			format_vnet_hw_if_rx_mode, dq->mode);
 	  }
-      }));
+      }
     if (vec_len (s) > 0)
       {
         vlib_cli_output(vm, "Thread %u (%s):\n%v", index,
@@ -1753,7 +1734,7 @@ set_hw_interface_rx_placement (u32 hw_if_index, u32 queue_id,
   vnet_main_t *vnm = vnet_get_main ();
   vnet_device_main_t *vdm = &vnet_device_main;
   clib_error_t *error = 0;
-  vnet_hw_interface_rx_mode mode = VNET_HW_INTERFACE_RX_MODE_UNKNOWN;
+  vnet_hw_if_rx_mode mode = VNET_HW_IF_RX_MODE_UNKNOWN;
   int rv;
 
   if (is_main)
@@ -1886,6 +1867,89 @@ VLIB_CLI_COMMAND (cmd_set_if_rx_placement,static) = {
 };
 /* *INDENT-ON* */
 
+clib_error_t *
+set_interface_rss_queues (vlib_main_t * vm, u32 hw_if_index,
+			  clib_bitmap_t * bitmap)
+{
+  vnet_main_t *vnm = vnet_get_main ();
+  vnet_hw_interface_t *hi = vnet_get_hw_interface (vnm, hw_if_index);
+
+  return vnet_hw_interface_set_rss_queues (vnm, hi, bitmap);
+}
+
+static clib_error_t *
+set_interface_rss_queues_fn (vlib_main_t * vm,
+			     unformat_input_t * input,
+			     vlib_cli_command_t * cmd)
+{
+  clib_error_t *error = 0;
+  unformat_input_t _line_input, *line_input = &_line_input;
+  vnet_main_t *vnm = vnet_get_main ();
+  u32 hw_if_index = (u32) ~ 0;
+  clib_bitmap_t *bitmap = NULL;
+
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat
+	  (line_input, "%U", unformat_vnet_hw_interface, vnm, &hw_if_index))
+	;
+      else
+	if (unformat (line_input, "list %U", unformat_bitmap_list, &bitmap))
+	;
+      else
+	{
+	  error = clib_error_return (0, "parse error: '%U'",
+				     format_unformat_error, line_input);
+	  unformat_free (line_input);
+	  goto done;
+	}
+    }
+
+  unformat_free (line_input);
+
+  if (hw_if_index == (u32) ~ 0)
+    {
+      error = clib_error_return (0, "please specify valid interface name");
+      goto done;
+    }
+
+  if (bitmap == NULL)
+    {
+      error = clib_error_return (0, "please specify the valid rss queues");
+      goto done;
+    }
+
+  error = set_interface_rss_queues (vm, hw_if_index, bitmap);
+
+done:
+  if (bitmap)
+    clib_bitmap_free (bitmap);
+
+  return (error);
+}
+
+/*?
+ * This command is used to set the rss queues of a given interface
+ * Not all the interfaces support this operation.
+ * To display the current rss queues, use the command
+ * '<em>show hardware-interfaces</em>'.
+ *
+ * @cliexpar
+ * Example of how to set the rss queues to 0,2-5,7 of an interface:
+ * @cliexstart{set interface rss queues VirtualFunctionEthernet18/1/0 list 0,2-5,7}
+ * @cliexend
+?*/
+/* *INDENT-OFF* */
+VLIB_CLI_COMMAND (cmd_set_interface_rss_queues,static) = {
+    .path = "set interface rss queues",
+    .short_help = "set interface rss queues <interface> <list <queue-list>>",
+    .function = set_interface_rss_queues_fn,
+};
+/* *INDENT-ON* */
+
 static u8 *
 format_vnet_pcap (u8 * s, va_list * args)
 {
@@ -1928,7 +1992,6 @@ vnet_pcap_dispatch_trace_configure (vnet_pcap_dispatch_trace_args_t * a)
   vnet_pcap_t *pp = &vm->pcap;
   pcap_main_t *pm = &pp->pcap_main;
   vnet_classify_main_t *cm = &vnet_classify_main;
-  vnet_classify_filter_set_t *set = 0;
 
   if (a->status)
     {
@@ -1964,11 +2027,9 @@ vnet_pcap_dispatch_trace_configure (vnet_pcap_dispatch_trace_args_t * a)
       && (pm->n_packets_to_capture != a->packets_to_capture))
     return VNET_API_ERROR_INVALID_VALUE_2;
 
-  set = pool_elt_at_index (cm->filter_sets, cm->filter_set_by_sw_if_index[0]);
-
   /* Classify filter specified, but no classify filter configured */
   if ((a->rx_enable + a->tx_enable + a->drop_enable) && a->filter &&
-      (set->table_indices == 0 || set->table_indices[0] == ~0))
+      cm->classify_table_index_by_sw_if_index[0] == ~0)
     return VNET_API_ERROR_NO_SUCH_LABEL;
 
   if (a->rx_enable + a->tx_enable + a->drop_enable)
@@ -2007,7 +2068,7 @@ vnet_pcap_dispatch_trace_configure (vnet_pcap_dispatch_trace_args_t * a)
 	    stem = format (stem, "tx");
 	  if (a->drop_enable)
 	    stem = format (stem, "drop");
-	  a->filename = format (0, "/tmp/%s.pcap%c", stem, 0);
+	  a->filename = format (0, "/tmp/%v.pcap%c", stem, 0);
 	  vec_free (stem);
 	}
 
@@ -2025,7 +2086,8 @@ vnet_pcap_dispatch_trace_configure (vnet_pcap_dispatch_trace_args_t * a)
       pm->n_packets_to_capture = a->packets_to_capture;
       pp->pcap_sw_if_index = a->sw_if_index;
       if (a->filter)
-	pp->filter_classify_table_index = set->table_indices[0];
+	pp->filter_classify_table_index =
+	  cm->classify_table_index_by_sw_if_index[0];
       else
 	pp->filter_classify_table_index = ~0;
       pp->pcap_rx_enable = a->rx_enable;

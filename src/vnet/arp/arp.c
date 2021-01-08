@@ -189,12 +189,16 @@ always_inline u32
 arp_learn (u32 sw_if_index,
 	   const ethernet_arp_ip4_over_ethernet_address_t * addr)
 {
+  /* *INDENT-OFF* */
   ip_neighbor_learn_t l = {
-    .ip.ip4 = addr->ip4,
-    .type = IP46_TYPE_IP4,
+    .ip = {
+      .ip.ip4 = addr->ip4,
+      .version = AF_IP4,
+    },
     .mac = addr->mac,
     .sw_if_index = sw_if_index,
   };
+  /* *INDENT-ON* */
 
   ip_neighbor_learn_dp (&l);
 
@@ -543,6 +547,8 @@ arp_reply (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 	  dst_fei = ip4_fib_table_lookup (ip4_fib_get (fib_index0),
 					  &arp0->ip4_over_ethernet[1].ip4,
 					  32);
+	  conn_sw_if_index0 = fib_entry_get_any_resolving_interface (dst_fei);
+
 	  switch (arp_dst_fib_check (dst_fei, &dst_flags))
 	    {
 	    case ARP_DST_FIB_ADJ:
@@ -554,10 +560,12 @@ arp_reply (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 	       * from spamming us with gratuitous ARPS that might otherwise
 	       * blow our ARP cache
 	       */
-	      if (arp0->ip4_over_ethernet[0].ip4.as_u32 ==
-		  arp0->ip4_over_ethernet[1].ip4.as_u32)
-		error0 =
-		  arp_learn (sw_if_index0, &arp0->ip4_over_ethernet[0]);
+	      if (conn_sw_if_index0 != sw_if_index0)
+		error0 = ETHERNET_ARP_ERROR_l3_dst_address_not_local;
+	      else if (arp0->ip4_over_ethernet[0].ip4.as_u32 ==
+		       arp0->ip4_over_ethernet[1].ip4.as_u32)
+		error0 = arp_learn (sw_if_index0,
+				    &arp0->ip4_over_ethernet[0]);
 	      goto drop;
 	    case ARP_DST_FIB_CONN:
 	      /* destination is connected, continue to process */
@@ -615,7 +623,6 @@ arp_reply (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 	    }
 
 	  /* Honor unnumbered interface, if any */
-	  conn_sw_if_index0 = fib_entry_get_resolving_interface (dst_fei);
 	  if (sw_if_index0 != conn_sw_if_index0 ||
 	      sw_if_index0 != fib_entry_get_resolving_interface (src_fei))
 	    {
@@ -852,17 +859,8 @@ static clib_error_t *
 vnet_arp_add_del_sw_interface (vnet_main_t * vnm, u32 sw_if_index, u32 is_add)
 {
   ethernet_arp_main_t *am = &ethernet_arp_main;
-
-  if (!is_add && sw_if_index != ~0)
-    {
-      arp_disable (am, sw_if_index);
-    }
-  else if (is_add)
-    {
-      vnet_feature_enable_disable ("arp", "arp-disabled",
-				   sw_if_index, 1, NULL, 0);
-    }
-
+  if (is_add)
+    arp_disable (am, sw_if_index);
   return (NULL);
 }
 
@@ -912,7 +910,7 @@ ethernet_arp_init (vlib_main_t * vm)
     vec_add1 (im->enable_disable_interface_callbacks, cb);
   }
 
-  ip_neighbor_register (IP46_TYPE_IP4, &arp_vft);
+  ip_neighbor_register (AF_IP4, &arp_vft);
 
   return 0;
 }

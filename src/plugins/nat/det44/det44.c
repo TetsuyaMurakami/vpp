@@ -151,12 +151,12 @@ snat_det_add_map (ip4_address_t * in_addr, u8 in_plen,
 
   /* Add/del external address range to FIB */
   /* *INDENT-OFF* */
-  pool_foreach (i, dm->interfaces, ({
+  pool_foreach (i, dm->interfaces)  {
     if (det44_interface_is_inside(i))
       continue;
     det44_add_del_addr_to_fib(out_addr, out_plen, i->sw_if_index, is_add);
     goto out;
-  }));
+  }
   /* *INDENT-ON* */
 out:
   return 0;
@@ -188,10 +188,7 @@ void
 det44_reset_timeouts ()
 {
   det44_main_t *dm = &det44_main;
-  dm->timeouts.udp = 300;
-  dm->timeouts.tcp.established = 7440;
-  dm->timeouts.tcp.transitory = 240;
-  dm->timeouts.icmp = 60;
+  nat_reset_timeouts (&dm->timeouts);
 }
 
 int
@@ -207,13 +204,13 @@ det44_interface_add_del (u32 sw_if_index, u8 is_inside, int is_del)
   // then register nodes
 
   /* *INDENT-OFF* */
-  pool_foreach (tmp, dm->interfaces, ({
+  pool_foreach (tmp, dm->interfaces)  {
     if (tmp->sw_if_index == sw_if_index)
       {
         i = tmp;
         goto out;
       }
-  }));
+  }
   /* *INDENT-ON* */
 out:
 
@@ -305,10 +302,10 @@ out:
       // add/del outside address to FIB
       snat_det_map_t *mp;
       /* *INDENT-OFF* */
-      pool_foreach (mp, dm->det_maps, ({
+      pool_foreach (mp, dm->det_maps)  {
         det44_add_del_addr_to_fib(&mp->out_addr,
                                   mp->out_plen, sw_if_index, !is_del);
-      }));
+      }
       /* *INDENT-ON* */
     }
   return 0;
@@ -331,14 +328,14 @@ det44_expire_walk_fn (vlib_main_t * vm, vlib_node_runtime_t * rt,
   vlib_process_get_events (vm, NULL);
   u32 now = (u32) vlib_time_now (vm);
   /* *INDENT-OFF* */
-  pool_foreach (mp, dm->det_maps, ({
+  pool_foreach (mp, dm->det_maps)  {
     vec_foreach(ses, mp->sessions)
       {
         /* Delete if session expired */
         if (ses->in_port && (ses->expire < now))
           snat_det_ses_close (mp, ses);
       }
-  }));
+  }
   /* *INDENT-ON* */
   return 0;
 }
@@ -432,10 +429,10 @@ det44_plugin_disable ()
   vec_free (interfaces);
 
   /* *INDENT-OFF* */
-  pool_foreach (mp, dm->det_maps,
-  ({
+  pool_foreach (mp, dm->det_maps)
+   {
     vec_free (mp->sessions);
-  }));
+  }
   /* *INDENT-ON* */
 
   det44_reset_timeouts ();
@@ -471,15 +468,15 @@ det44_update_outside_fib (ip4_main_t * im,
     return;
 
   /* *INDENT-OFF* */
-  pool_foreach (i, dm->interfaces,
-    ({
+  pool_foreach (i, dm->interfaces)
+     {
       if (i->sw_if_index == sw_if_index)
         {
           if (!(det44_interface_is_outside (i)))
 	    return;
           match = 1;
         }
-    }));
+    }
   /* *INDENT-ON* */
 
   if (!match)

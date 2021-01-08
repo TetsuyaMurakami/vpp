@@ -43,6 +43,7 @@
 #include <vnet/ip/ip_packet.h>	/* for ip_csum_t */
 #include <vnet/tcp/tcp_packet.h>	/* for tcp_header_t */
 #include <vppinfra/byte_order.h>	/* for clib_net_to_host_u16 */
+#include <vppinfra/warnings.h>	/* for WARN_OFF/WARN_ON macro */
 
 /* IP4 address which can be accessed either as 4 bytes
    or as a 32-bit number. */
@@ -197,8 +198,15 @@ ip4_next_header (ip4_header_t * i)
   return (void *) i + ip4_header_bytes (i);
 }
 
-always_inline u16
-ip4_header_checksum (ip4_header_t * i)
+/* Turn off array bounds check due to ip4_header_t
+   option field operations. */
+
+/* *INDENT-OFF* */
+WARN_OFF(array-bounds)
+/* *INDENT-ON* */
+
+static_always_inline u16
+ip4_header_checksum_inline (ip4_header_t * i, int with_checksum)
 {
   int option_len = (i->ip_version_and_header_length & 0xf) - 5;
   uword sum = 0;
@@ -207,7 +215,7 @@ ip4_header_checksum (ip4_header_t * i)
 
   sum += iphdr[0];
   sum += iphdr[1];
-  sum += *(u16 *) (iphdr + 2);
+  sum += with_checksum ? iphdr[2] : *(u16 *) (iphdr + 2);
   /* skip checksum */
   sum += iphdr[3];
   sum += iphdr[4];
@@ -248,7 +256,8 @@ ip4_header_checksum (ip4_header_t * i)
   sum += iphdr[2];
   sum += iphdr[3];
   sum += iphdr[4];
-  /* skip checksum */
+  if (with_checksum)
+    sum += iphdr[5];
   sum += iphdr[6];
   sum += iphdr[7];
   sum += iphdr[8];
@@ -295,6 +304,16 @@ ip4_header_checksum (ip4_header_t * i)
   sum = ((u16) sum) + (sum >> 16);
   sum = ((u16) sum) + (sum >> 16);
   return ~((u16) sum);
+}
+
+/* *INDENT-OFF* */
+WARN_ON(array-bounds)
+/* *INDENT-ON* */
+
+always_inline u16
+ip4_header_checksum (ip4_header_t * i)
+{
+  return ip4_header_checksum_inline (i, /* with_checksum */ 0);
 }
 
 always_inline void
@@ -364,7 +383,7 @@ ip4_header_get_df (const ip4_header_t * ip4)
 static inline uword
 ip4_header_checksum_is_valid (ip4_header_t * i)
 {
-  return i->checksum == ip4_header_checksum (i);
+  return ip4_header_checksum_inline (i, /* with_checksum */ 1) == 0;
 }
 
 #define ip4_partial_header_checksum_x1(ip0,sum0)			\

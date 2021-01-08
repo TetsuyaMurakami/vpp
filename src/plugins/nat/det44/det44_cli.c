@@ -75,8 +75,8 @@ det44_show_mappings_command_fn (vlib_main_t * vm,
   snat_det_map_t *mp;
   vlib_cli_output (vm, "NAT44 deterministic mappings:");
   /* *INDENT-OFF* */
-  pool_foreach (mp, dm->det_maps,
-  ({
+  pool_foreach (mp, dm->det_maps)
+   {
     vlib_cli_output (vm, " in %U/%d out %U/%d\n",
                      format_ip4_address, &mp->in_addr, mp->in_plen,
                      format_ip4_address, &mp->out_addr, mp->out_plen);
@@ -85,7 +85,7 @@ det44_show_mappings_command_fn (vlib_main_t * vm,
     vlib_cli_output (vm, "  number of ports per inside host: %d\n",
                      mp->ports_per_host);
     vlib_cli_output (vm, "  sessions number: %d\n", mp->ses_num);
-  }));
+  }
   /* *INDENT-ON* */
   return 0;
 }
@@ -188,8 +188,8 @@ det44_show_sessions_command_fn (vlib_main_t * vm,
   snat_det_map_t *mp;
   vlib_cli_output (vm, "NAT44 deterministic sessions:");
   /* *INDENT-OFF* */
-  pool_foreach (mp, dm->det_maps,
-  ({
+  pool_foreach (mp, dm->det_maps)
+   {
     int i;
     vec_foreach_index (i, mp->sessions)
       {
@@ -197,7 +197,7 @@ det44_show_sessions_command_fn (vlib_main_t * vm,
         if (ses->in_port)
           vlib_cli_output (vm, "  %U", format_det_map_ses, mp, ses, &i);
       }
-  }));
+  }
   /* *INDENT-ON* */
   return 0;
 }
@@ -487,14 +487,14 @@ det44_show_interfaces_command_fn (vlib_main_t * vm, unformat_input_t * input,
   det44_interface_t *i;
   vlib_cli_output (vm, "DET44 interfaces:");
   /* *INDENT-OFF* */
-  pool_foreach (i, dm->interfaces,
-  ({
+  pool_foreach (i, dm->interfaces)
+   {
     vlib_cli_output (vm, " %U %s", format_vnet_sw_if_index_name, vnm,
                      i->sw_if_index,
                      (det44_interface_is_inside(i) &&
                       det44_interface_is_outside(i)) ? "in out" :
                      (det44_interface_is_inside(i) ? "in" : "out"));
-  }));
+  }
   /* *INDENT-ON* */
   return 0;
 }
@@ -611,7 +611,6 @@ VLIB_CLI_COMMAND (det44_close_session_in_command, static) = {
                 "<in_addr>:<in_port> <ext_addr>:<ext_port>",
   .function = det44_close_session_in_fn,
 };
-/* *INDENT-ON* */
 
 /*?
  * @cliexpar
@@ -624,10 +623,11 @@ VLIB_CLI_COMMAND (det44_close_session_in_command, static) = {
 ?*/
 VLIB_CLI_COMMAND (det44_set_timeouts_command, static) =
 {
-.path = "set det44 timeouts",.short_help =
-    "set det44 timeouts <[udp <sec>] [tcp established <sec>] "
-    "[tcp transitory <sec>] [icmp <sec>]|reset>",.function =
-    det44_set_timeouts_command_fn,};
+  .path = "set det44 timeouts",
+  .short_help = "set det44 timeouts <[udp <sec>] [tcp established <sec>] "
+                "[tcp transitory <sec>] [icmp <sec>]|reset>",
+  .function = det44_set_timeouts_command_fn,
+};
 
 /*?
  * @cliexpar
@@ -642,8 +642,10 @@ VLIB_CLI_COMMAND (det44_set_timeouts_command, static) =
 ?*/
 VLIB_CLI_COMMAND (det44_show_timeouts_command, static) =
 {
-.path = "show det44 timeouts",.short_help =
-    "show det44 timeouts",.function = det44_show_timeouts_command_fn,};
+  .path = "show det44 timeouts",
+  .short_help = "show det44 timeouts",
+  .function = det44_show_timeouts_command_fn,
+};
 
 /*?
  * @cliexpar
@@ -653,9 +655,10 @@ VLIB_CLI_COMMAND (det44_show_timeouts_command, static) =
 ?*/
 VLIB_CLI_COMMAND (det44_plugin_enable_disable_command, static) =
 {
-.path = "det44 plugin",.short_help =
-    "det44 plugin <enable [inside vrf] [outside vrf]|disable>",.function =
-    det44_plugin_enable_disable_command_fn,};
+  .path = "det44 plugin",
+  .short_help = "det44 plugin <enable [inside vrf] [outside vrf]|disable>",
+  .function = det44_plugin_enable_disable_command_fn,
+};
 
 /*?
  * @cliexpar
@@ -669,9 +672,10 @@ VLIB_CLI_COMMAND (det44_plugin_enable_disable_command, static) =
 ?*/
 VLIB_CLI_COMMAND (det44_feature_command, static) =
 {
-.path = "set interface det44",.short_help =
-    "set interface det44 inside <intfc> outside <intfc> [del]",.function =
-    det44_feature_command_fn,};
+  .path = "set interface det44",
+  .short_help = "set interface det44 inside <intfc> outside <intfc> [del]",
+  .function = det44_feature_command_fn,
+};
 
 /*?
  * @cliexpar
@@ -685,8 +689,11 @@ VLIB_CLI_COMMAND (det44_feature_command, static) =
 ?*/
 VLIB_CLI_COMMAND (det44_show_interfaces_command, static) =
 {
-.path = "show det44 interfaces",.short_help =
-    "show det44 interfaces",.function = det44_show_interfaces_command_fn,};
+  .path = "show det44 interfaces",
+  .short_help = "show det44 interfaces",
+  .function = det44_show_interfaces_command_fn,
+};
+/* *INDENT-ON* */
 
 /*
  * fd.io coding-style-patch-verification: ON

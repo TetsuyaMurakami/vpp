@@ -19,6 +19,7 @@
 #define included_l2learn_h
 
 #include <vlib/vlib.h>
+#include <vppinfra/bihash_8_8.h>
 #include <vnet/ethernet/ethernet.h>
 
 
@@ -33,6 +34,9 @@ typedef struct
 
   /* maximum number of dynamically learned mac entries */
   u32 global_learn_limit;
+
+  /* maximum number of dynamically learned mac entries per bridge domain */
+  u32 bd_default_learn_limit;
 
   /* client waiting for L2 MAC events for learned and aged MACs */
   u32 client_pid;

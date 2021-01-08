@@ -20,9 +20,10 @@
 #include <vnet/ip/ip.h>
 #include <vnet/ip-neighbor/ip_neighbor_dp.h>
 
-#include <vnet/fib/ip6_fib.h>
 #include <vnet/ip/ip6_link.h>
 #include <vnet/ip/ip6_ll_table.h>
+
+#include <vnet/ethernet/ethernet.h>
 
 /**
  * @file
@@ -326,8 +327,8 @@ ip6_neighbor_send_mldpv2_report (u32 sw_if_index)
   rh0->icmp.checksum = 0;
 
   /* *INDENT-OFF* */
-  pool_foreach (m, imd->mldp_group_pool,
-  ({
+  pool_foreach (m, imd->mldp_group_pool)
+   {
     rr.type = m->type;
     rr.aux_data_len_u32s = 0;
     rr.num_sources = clib_host_to_net_u16 (m->num_sources);
@@ -343,7 +344,7 @@ ip6_neighbor_send_mldpv2_report (u32 sw_if_index)
       }
 
     payload_length += sizeof( icmp6_multicast_address_record_t);
-  }));
+  }
   /* *INDENT-ON* */
 
   rh0->rsvd = 0;
@@ -388,8 +389,8 @@ ip6_mld_timer_event (vlib_main_t * vm,
 
   /* Interface ip6 radv info list */
   /* *INDENT-OFF* */
-  pool_foreach (imd, ip6_mld_pool,
-  ({
+  pool_foreach (imd, ip6_mld_pool)
+   {
     if (!vnet_sw_interface_is_admin_up (vnm, imd->sw_if_index))
       {
         imd->all_routers_mcast = 0;
@@ -403,7 +404,7 @@ ip6_mld_timer_event (vlib_main_t * vm,
         ip6_neighbor_send_mldpv2_report(imd->sw_if_index);
         imd->all_routers_mcast = 1;
       }
-  }));
+  }
   /* *INDENT-ON* */
 
   return 0;
@@ -453,13 +454,13 @@ format_ip6_mld (u8 * s, va_list * args)
   s = format (s, "%UJoined group address(es):\n", format_white_space, indent);
 
   /* *INDENT-OFF* */
-  pool_foreach (m, imd->mldp_group_pool,
-  ({
+  pool_foreach (m, imd->mldp_group_pool)
+   {
     s = format (s, "%U%U\n",
                 format_white_space, indent+2,
                 format_ip6_address,
                 &m->mcast_address);
-  }));
+  }
   /* *INDENT-ON* */
 
   return (s);

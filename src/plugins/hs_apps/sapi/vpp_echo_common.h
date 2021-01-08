@@ -38,6 +38,7 @@
 #define TIMEOUT 10.0
 #define LOGGING_BATCH (100)
 #define LOG_EVERY_N_IDLE_CYCLES (1e8)
+#define ECHO_MQ_SEG_HANDLE	((u64) ~0 - 1)
 
 #define foreach_echo_fail_code                                          \
   _(ECHO_FAIL_NONE, "ECHO_FAIL_NONE")                                   \
@@ -300,7 +301,7 @@ typedef struct
   uword *shared_segment_handles;	/* Hash table : segment_names -> 1 */
   clib_spinlock_t segment_handles_lock;	/* Hash table lock */
   echo_proto_cb_vft_t *proto_cb_vft;
-  svm_msg_q_t *rpc_msq_queue;	/* MQ between quic_echo threads */
+  svm_msg_q_t rpc_msq_queue; /* MQ between quic_echo threads */
   fifo_segment_main_t segment_main;
 
   /* State of the connection, shared between msg RX thread and main thread */
@@ -439,9 +440,14 @@ void echo_session_print_stats (echo_main_t * em, echo_session_t * session);
 u8 *echo_format_crypto_engine (u8 * s, va_list * args);
 uword echo_unformat_crypto_engine (unformat_input_t * input, va_list * args);
 u8 *echo_format_bytes_per_sec (u8 * s, va_list * args);
-int echo_ssvm_segment_attach (char *name, ssvm_segment_type_t type, int fd);
-void echo_segment_handle_add_del (echo_main_t * em, u64 segment_handle,
-				  u8 add);
+int echo_segment_attach (u64 segment_handle, char *name,
+			 ssvm_segment_type_t type, int fd);
+u32 echo_segment_lookup (u64 segment_handle);
+void echo_segment_detach (u64 segment_handle);
+int echo_attach_session (uword segment_handle, uword rxf_offset,
+			 uword mq_offset, uword txf_offset, echo_session_t *s);
+int echo_segment_attach_mq (uword segment_handle, uword mq_offset,
+			    u32 mq_index, svm_msg_q_t **mq);
 
 /* Binary API */
 

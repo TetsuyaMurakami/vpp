@@ -62,14 +62,14 @@ vmxnet3_interface_admin_up_down (vnet_main_t * vnm, u32 hw_if_index,
 
 static clib_error_t *
 vmxnet3_interface_rx_mode_change (vnet_main_t * vnm, u32 hw_if_index, u32 qid,
-				  vnet_hw_interface_rx_mode mode)
+				  vnet_hw_if_rx_mode mode)
 {
   vmxnet3_main_t *vmxm = &vmxnet3_main;
   vnet_hw_interface_t *hw = vnet_get_hw_interface (vnm, hw_if_index);
   vmxnet3_device_t *vd = pool_elt_at_index (vmxm->devices, hw->dev_instance);
   vmxnet3_rxq_t *rxq = vec_elt_at_index (vd->rxqs, qid);
 
-  if (mode == VNET_HW_INTERFACE_RX_MODE_POLLING)
+  if (mode == VNET_HW_IF_RX_MODE_POLLING)
     rxq->int_mode = 0;
   else
     rxq->int_mode = 1;
@@ -661,7 +661,7 @@ vmxnet3_create_if (vlib_main_t * vm, vmxnet3_create_if_args_t * args)
     }
 
   /* *INDENT-OFF* */
-  pool_foreach (vd, vmxm->devices, ({
+  pool_foreach (vd, vmxm->devices)  {
     if (vd->pci_addr.as_u32 == args->addr.as_u32)
       {
 	args->rv = VNET_API_ERROR_ADDRESS_IN_USE;
@@ -672,7 +672,7 @@ vmxnet3_create_if (vlib_main_t * vm, vmxnet3_create_if_args_t * args)
 		  format_vlib_pci_addr, &args->addr, "pci address in use");
 	return;
       }
-  }));
+  }
   /* *INDENT-ON* */
 
   if (args->bind)
@@ -809,7 +809,8 @@ vmxnet3_create_if (vlib_main_t * vm, vmxnet3_create_if_args_t * args)
   vnet_hw_interface_t *hw = vnet_get_hw_interface (vnm, vd->hw_if_index);
   hw->flags |= VNET_HW_INTERFACE_FLAG_SUPPORTS_INT_MODE;
   if (vd->gso_enable)
-    hw->flags |= VNET_HW_INTERFACE_FLAG_SUPPORTS_GSO;
+    hw->flags |= (VNET_HW_INTERFACE_FLAG_SUPPORTS_GSO |
+		  VNET_HW_INTERFACE_FLAG_SUPPORTS_TX_L4_CKSUM_OFFLOAD);
 
   vnet_hw_interface_set_input_node (vnm, vd->hw_if_index,
 				    vmxnet3_input_node.index);

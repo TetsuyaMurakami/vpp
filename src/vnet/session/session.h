@@ -20,7 +20,7 @@
 #include <vnet/session/session_lookup.h>
 #include <vnet/session/session_debug.h>
 #include <svm/message_queue.h>
-#include <svm/ssvm.h>
+#include <svm/fifo_segment.h>
 
 #define foreach_session_input_error                                    	\
 _(NO_SESSION, "No session drops")                                       \
@@ -142,8 +142,8 @@ typedef struct session_main_
   /** Worker contexts */
   session_worker_t *wrk;
 
-  /** Event queues memfd segment initialized only if so configured */
-  ssvm_private_t evt_qs_segment;
+  /** Event queues memfd segment */
+  fifo_segment_t evt_qs_segment;
 
   /** Unique segment name counter */
   u32 unique_segment_name_counter;
@@ -164,8 +164,15 @@ typedef struct session_main_
 
   /** Session manager is enabled */
   u8 is_enabled;
+
+  /** Session manager initialized (not necessarily enabled) */
+  u8 is_initialized;
+
   /** Enable session manager at startup */
   u8 session_enable_asap;
+
+  /** Poll session node in main thread */
+  u8 poll_main;
 
   /** vpp fifo event queue configured length */
   u32 configured_event_queue_length;
@@ -174,7 +181,6 @@ typedef struct session_main_
   uword session_baseva;
   uword session_va_space_size;
   uword evt_qs_segment_size;
-  u8 evt_qs_use_memfd_seg;
 
   /** Session table size parameters */
   u32 configured_v4_session_table_buckets;
@@ -546,6 +552,12 @@ transport_us_time_now (u32 thread_index)
   return session_main.wrk[thread_index].last_vlib_us_time;
 }
 
+always_inline clib_time_type_t
+transport_seconds_per_loop (u32 thread_index)
+{
+  return session_main.wrk[thread_index].vm->seconds_per_loop;
+}
+
 always_inline void
 transport_add_tx_event (transport_connection_t * tc)
 {
@@ -667,7 +679,7 @@ session_add_pending_tx_buffer (u32 thread_index, u32 bi, u32 next_node)
   vec_add1 (wrk->pending_tx_nexts, next_node);
 }
 
-ssvm_private_t *session_main_get_evt_q_segment (void);
+fifo_segment_t *session_main_get_evt_q_segment (void);
 void session_node_enable_disable (u8 is_en);
 clib_error_t *vnet_session_enable_disable (vlib_main_t * vm, u8 is_en);
 

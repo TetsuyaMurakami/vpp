@@ -65,19 +65,6 @@ vl_api_lb_conf_t_handler
  REPLY_MACRO (VL_API_LB_CONF_REPLY);
 }
 
-static void *vl_api_lb_conf_t_print
-(vl_api_lb_conf_t *mp, void * handle)
-{
-  u8 * s;
-  s = format (0, "SCRIPT: lb_conf ");
-  s = format (s, "%U ", format_ip4_address, (ip4_address_t *)&mp->ip4_src_address);
-  s = format (s, "%U ", format_ip6_address, (ip6_address_t *)&mp->ip6_src_address);
-  s = format (s, "%u ", mp->sticky_buckets_per_core);
-  s = format (s, "%u ", mp->flow_timeout);
-  FINISH;
-}
-
-
 static void
 vl_api_lb_add_del_vip_t_handler
 (vl_api_lb_add_del_vip_t * mp)
@@ -142,38 +129,6 @@ vl_api_lb_add_del_vip_t_handler
  REPLY_MACRO (VL_API_LB_ADD_DEL_VIP_REPLY);
 }
 
-static void *vl_api_lb_add_del_vip_t_print
-(vl_api_lb_add_del_vip_t *mp, void * handle)
-{
-  u8 * s;
-  s = format (0, "SCRIPT: lb_add_del_vip ");
-  s = format (s, "%U", format_vl_api_prefix,
-       &mp->pfx);
-
-  s = format (s, "%s ", (mp->encap == LB_API_ENCAP_TYPE_GRE4)? "gre4"
-              : (mp->encap == LB_API_ENCAP_TYPE_GRE6)? "gre6"
-              : (mp->encap == LB_API_ENCAP_TYPE_NAT4)? "nat4"
-              : (mp->encap == LB_API_ENCAP_TYPE_NAT6)? "nat6"
-              : "l3dsr");
-
-  if (mp->encap==LB_API_ENCAP_TYPE_L3DSR)
-    {
-      s = format (s, "dscp %u ", mp->dscp);
-    }
-
-  if ((mp->encap==LB_API_ENCAP_TYPE_NAT4)
-      || (mp->encap==LB_API_ENCAP_TYPE_NAT6))
-    {
-      s = format (s, "type %u ", mp->type);
-      s = format (s, "port %u ", mp->port);
-      s = format (s, "target_port %u ", mp->target_port);
-    }
-
-  s = format (s, "%u ", mp->new_flows_table_length);
-  s = format (s, "%s ", mp->is_del?"del":"add");
-  FINISH;
-}
-
 static void
 vl_api_lb_add_del_as_t_handler
 (vl_api_lb_add_del_as_t * mp)
@@ -206,25 +161,6 @@ done:
  REPLY_MACRO (VL_API_LB_ADD_DEL_AS_REPLY);
 }
 
-static void *vl_api_lb_add_del_as_t_print
-(vl_api_lb_add_del_as_t *mp, void * handle)
-{
-  u8 * s;
-  ip46_address_t address;
-  s = format (0, "SCRIPT: lb_add_del_as ");
-  s = format (s, "%U ", format_vl_api_prefix,
-       &mp->pfx);
-  s = format(s, "%u ", mp->protocol);
-  if (ip_address_decode (&mp->as_address, &address) == IP46_TYPE_IP6)
-  s = format (s, "%U ", format_ip6_address,
-		(ip6_address_t *) & address.ip6);
-  else
-  s = format (s, "%U ", format_ip4_address,
-		(ip6_address_t *) & address.ip4);
-  s = format (s, "%s ", mp->is_del?"del":"add");
-  FINISH;
-}
-
 static void
 vl_api_lb_vip_dump_t_handler
 (vl_api_lb_vip_dump_t * mp)
@@ -241,7 +177,7 @@ vl_api_lb_vip_dump_t_handler
   lb_vip_t *vip = 0;
 
   /* construct vip list */
-  pool_foreach(vip, lbm->vips, {
+  pool_foreach (vip, lbm->vips) {
       /* Hide placeholder VIP */
       if (vip != lbm->vips) {
         msg_size = sizeof (*rmp);
@@ -263,7 +199,7 @@ vl_api_lb_vip_dump_t_handler
 
         vl_api_send_msg (reg, (u8 *) rmp);
       }
-  });
+  }
 
 
 }
@@ -280,7 +216,7 @@ static void send_lb_as_details
   /* construct as list under this vip */
   lb_as_t *as;
 
-  pool_foreach(as_index, vip->as_indexes, {
+  pool_foreach (as_index, vip->as_indexes) {
       /* Hide placeholder As for specific VIP */
       if (*as_index != 0) {
         as = &lbm->ass[*as_index];
@@ -301,7 +237,7 @@ static void send_lb_as_details
         vl_api_send_msg (reg, (u8 *) rmp);
         asindex++;
       }
-  });
+  }
 
 
 }
@@ -325,8 +261,8 @@ vl_api_lb_as_dump_t_handler
   dump_all = (prefix.ip6.as_u64[0] == 0) && (prefix.ip6.as_u64[1] == 0);
 
   /* *INDENT-OFF* */
-  pool_foreach(vip, lbm->vips,
-  ({
+  pool_foreach (vip, lbm->vips)
+   {
     if ( dump_all
         || ((prefix.as_u64[0] == vip->prefix.as_u64[0])
         && (prefix.as_u64[1] == vip->prefix.as_u64[1])
@@ -335,7 +271,7 @@ vl_api_lb_as_dump_t_handler
       {
         send_lb_as_details(reg, mp->context, vip);
       }
-  }));
+  }
   /* *INDENT-ON* */
 }
 
@@ -405,19 +341,6 @@ static void vl_api_lb_add_del_intf_nat6_t_handler
   BAD_SW_IF_INDEX_LABEL;
 
   REPLY_MACRO (VL_API_LB_ADD_DEL_INTF_NAT6_REPLY);
-}
-
-static void *vl_api_lb_flush_vip_t_print
-(vl_api_lb_flush_vip_t *mp, void * handle)
-{
-  u8 * s;
-  s = format (0, "SCRIPT: lb_add_del_vip ");
-  s = format (s, "%U/%d", format_vl_api_address,
-       &mp->pfx.address, mp->pfx.len);
-  s = format (s, "protocol %u ", mp->protocol);
-  s = format (s, "port %u ", mp->port);
-
-  FINISH;
 }
 
 #include <lb/lb.api.c>

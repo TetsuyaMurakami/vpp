@@ -157,12 +157,17 @@ icmp6_neighbor_solicitation_or_advertisement (vlib_main_t * vm,
 	  if (PREDICT_TRUE (error0 == ICMP6_ERROR_NONE && o0 != 0 &&
 			    !ip6_sadd_unspecified))
 	    {
+              /* *INDENT-OFF* */
 	      ip_neighbor_learn_t learn = {
 		.sw_if_index = sw_if_index0,
-		.type = IP46_TYPE_IP6,
-		.ip.ip6 = (is_solicitation ?
-			   ip0->src_address : h0->target_address),
+		.ip = {
+                  .version = AF_IP6,
+                  .ip.ip6 = (is_solicitation ?
+                             ip0->src_address :
+                             h0->target_address),
+                }
 	      };
+              /* *INDENT-ON* */
 	      memcpy (&learn.mac, o0->ethernet_address, sizeof (learn.mac));
 	      ip_neighbor_learn_dp (&learn);
 	    }
@@ -263,7 +268,7 @@ icmp6_neighbor_solicitation_or_advertisement (vlib_main_t * vm,
 		ethernet_get_interface (&ethernet_main, sw_if0->hw_if_index);
 	      if (eth_if0 && o0)
 		{
-		  clib_memcpy (o0->ethernet_address, eth_if0->address, 6);
+		  clib_memcpy (o0->ethernet_address, &eth_if0->address, 6);
 		  o0->header.type =
 		    ICMP6_NEIGHBOR_DISCOVERY_OPTION_target_link_layer_address;
 		}
@@ -284,7 +289,7 @@ icmp6_neighbor_solicitation_or_advertisement (vlib_main_t * vm,
 	      eth0 = vlib_buffer_get_current (p0);
 	      clib_memcpy (eth0->dst_address, eth0->src_address, 6);
 	      if (eth_if0)
-		clib_memcpy (eth0->src_address, eth_if0->address, 6);
+		clib_memcpy (eth0->src_address, &eth_if0->address, 6);
 
 	      /* Setup input and output sw_if_index for packet */
 	      ASSERT (vnet_buffer (p0)->sw_if_index[VLIB_RX] == sw_if_index0);
@@ -459,7 +464,7 @@ ip6_nd_init (vlib_main_t * vm)
   icmp6_register_type (vm, ICMP6_neighbor_advertisement,
 		       ip6_icmp_neighbor_advertisement_node.index);
 
-  ip_neighbor_register (IP46_TYPE_IP6, &ip6_nd_impl_vft);
+  ip_neighbor_register (AF_IP6, &ip6_nd_impl_vft);
 
   ip6_nd_delegate_id = ip6_link_delegate_register (&ip6_nd_delegate_vft);
 

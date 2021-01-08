@@ -16,14 +16,46 @@
 #include <stdbool.h>
 #include <vlib/vlib.h>
 #include <vlib/log.h>
+#include <vlib/unix/unix.h>
 #include <syslog.h>
+#include <vppinfra/elog.h>
 
 vlib_log_main_t log_main = {
   .default_log_level = VLIB_LOG_LEVEL_NOTICE,
   .default_syslog_log_level = VLIB_LOG_LEVEL_WARNING,
   .unthrottle_time = 3,
   .size = 512,
+  .add_to_elog = 1,
   .default_rate_limit = 50,
+};
+
+/* *INDENT-OFF* */
+VLIB_REGISTER_LOG_CLASS (log_log, static) = {
+  .class_name = "log",
+};
+/* *INDENT-ON* */
+
+static const int colors[] = {
+  [VLIB_LOG_LEVEL_EMERG] = 1,	/* red */
+  [VLIB_LOG_LEVEL_ALERT] = 1,	/* red */
+  [VLIB_LOG_LEVEL_CRIT] = 1,	/* red */
+  [VLIB_LOG_LEVEL_ERR] = 1,	/* red */
+  [VLIB_LOG_LEVEL_WARNING] = 3,	/* yellow */
+  [VLIB_LOG_LEVEL_NOTICE] = 2,	/* green */
+  [VLIB_LOG_LEVEL_INFO] = 4,	/* blue */
+  [VLIB_LOG_LEVEL_DEBUG] = 6,	/* cyan */
+};
+
+static const int log_level_to_syslog_priority[] = {
+  [VLIB_LOG_LEVEL_EMERG] = LOG_EMERG,
+  [VLIB_LOG_LEVEL_ALERT] = LOG_ALERT,
+  [VLIB_LOG_LEVEL_CRIT] = LOG_CRIT,
+  [VLIB_LOG_LEVEL_ERR] = LOG_ERR,
+  [VLIB_LOG_LEVEL_WARNING] = LOG_WARNING,
+  [VLIB_LOG_LEVEL_NOTICE] = LOG_NOTICE,
+  [VLIB_LOG_LEVEL_INFO] = LOG_INFO,
+  [VLIB_LOG_LEVEL_DEBUG] = LOG_DEBUG,
+  [VLIB_LOG_LEVEL_DISABLED] = LOG_DEBUG,
 };
 
 int
@@ -53,22 +85,6 @@ get_subclass_data (vlib_log_class_t ci)
   return vec_elt_at_index (c->subclasses, (ci & 0xffff));
 }
 
-static int
-vlib_log_level_to_syslog_priority (vlib_log_level_t level)
-{
-  switch (level)
-    {
-#define LOG_DISABLED LOG_DEBUG
-#define _(n,uc,lc) \
-    case VLIB_LOG_LEVEL_##uc:\
-      return LOG_##uc;
-      foreach_vlib_log_level
-#undef _
-#undef LOG_DISABLED
-    }
-  return LOG_DEBUG;
-}
-
 u8 *
 format_vlib_log_class (u8 * s, va_list * args)
 {
@@ -82,6 +98,34 @@ format_vlib_log_class (u8 * s, va_list * args)
     return format (s, "%v", c->name, 0);
 }
 
+u8 *
+format_indent (u8 * s, va_list * args)
+{
+  u8 *v = va_arg (*args, u8 *);
+  u32 indent = va_arg (*args, u32);
+  u8 *c;
+
+  /* *INDENT-OFF* */
+  vec_foreach (c, v)
+    {
+      vec_add (s, c, 1);
+      if (c[0] == '\n')
+	for (u32 i = 0; i < indent; i++)
+	  vec_add1 (s, (u8) ' ');
+    }
+  /* *INDENT-ON* */
+  return s;
+}
+
+static int
+log_level_is_enabled (vlib_log_level_t level, vlib_log_level_t configured)
+{
+  if (configured == VLIB_LOG_LEVEL_DISABLED)
+    return 0;
+  if (level > configured)
+    return 0;
+  return 1;
+}
 
 void
 vlib_log (vlib_log_level_t level, vlib_log_class_t class, char *fmt, ...)
@@ -93,19 +137,18 @@ vlib_log (vlib_log_level_t level, vlib_log_class_t class, char *fmt, ...)
   va_list va;
   f64 t = vlib_time_now (vm);
   f64 delta = t - sc->last_event_timestamp;
+  int log_enabled = log_level_is_enabled (level, sc->level);
+  int syslog_enabled = log_level_is_enabled (level, sc->syslog_level);
   u8 *s = 0;
-  bool use_formatted_log_entry = true;
 
-  vec_validate (lm->entries, lm->size);
   /* make sure we are running on the main thread to avoid use in dataplane
      code, for dataplane logging consider use of event-logger */
   ASSERT (vlib_get_thread_index () == 0);
 
-  if (level > sc->level)
-    {
-      use_formatted_log_entry = false;
-      goto syslog;
-    }
+  if ((log_enabled || syslog_enabled) == 0)
+    return;
+
+  vec_validate (lm->entries, lm->size);
 
   if ((delta > lm->unthrottle_time) ||
       (sc->is_throttling == 0 && (delta > 1)))
@@ -122,7 +165,7 @@ vlib_log (vlib_log_level_t level, vlib_log_class_t class, char *fmt, ...)
       else if (sc->last_sec_count == sc->rate_limit)
 	{
 	  vec_reset_length (s);
-	  s = format (0, "--- message(s) throttled ---");
+	  s = format (s, "--- message(s) throttled ---");
 	  sc->is_throttling = 1;
 	}
     }
@@ -134,42 +177,89 @@ vlib_log (vlib_log_level_t level, vlib_log_class_t class, char *fmt, ...)
       va_end (va);
     }
 
-  e = vec_elt_at_index (lm->entries, lm->next);
-  vec_free (e->string);
-  e->level = level;
-  e->class = class;
-  e->string = s;
-  e->timestamp = t;
-
-  lm->next = (lm->next + 1) % lm->size;
-  if (lm->size > lm->count)
-    lm->count++;
-
-syslog:
-  if (sc->syslog_level != VLIB_LOG_LEVEL_DISABLED &&
-      level <= sc->syslog_level)
+  if (syslog_enabled)
     {
-      u8 *tmp = format (NULL, "%U", format_vlib_log_class, class);
-      if (use_formatted_log_entry)
+      u8 *l = 0;
+      if (unix_main.flags & (UNIX_FLAG_INTERACTIVE | UNIX_FLAG_NOSYSLOG))
 	{
-	  syslog (vlib_log_level_to_syslog_priority (level), "%.*s: %.*s",
-		  (int) vec_len (tmp), tmp,
-		  (int) (vec_len (s) -
-			 (vec_c_string_is_terminated (s) ? 1 : 0)), s);
+	  int indent = 0;
+	  int with_colors = (unix_main.flags & UNIX_FLAG_NOCOLOR) == 0;
+	  u8 *fmt;
+	  if (with_colors)
+	    {
+	      l = format (l, "\x1b[%um", 90 + colors[level]);
+	      indent = vec_len (l);
+	    }
+	  fmt = format (0, "%%-%uU [%%-6U]: ", lm->max_class_name_length);
+	  vec_terminate_c_string (fmt);
+	  l = format (l, (char *) fmt, format_vlib_log_class, class,
+		      format_vlib_log_level, level);
+	  vec_free (fmt);
+	  indent = vec_len (l) - indent;
+	  if (with_colors)
+	    l = format (l, "\x1b[0m");
+	  l = format (l, "%U", format_indent, s, indent);
+	  fformat (stderr, "%v\n", l);
+	  fflush (stderr);
 	}
       else
 	{
-	  tmp = format (tmp, ": ");
-	  va_start (va, fmt);
-	  tmp = va_format (tmp, fmt, &va);
-	  va_end (va);
-	  syslog (vlib_log_level_to_syslog_priority (level), "%.*s",
-		  (int) (vec_len (tmp) -
-			 (vec_c_string_is_terminated (tmp) ? 1 : 0)), tmp);
+	  l = format (l, "%U", format_vlib_log_class, class);
+	  int prio = log_level_to_syslog_priority[level];
+	  int is_term = vec_c_string_is_terminated (l) ? 1 : 0;
+
+	  syslog (prio, "%.*s: %.*s", (int) vec_len (l), l,
+		  (int) vec_len (s) - is_term, s);
 	}
-      vec_free (tmp);
+      vec_free (l);
     }
 
+  if (log_enabled)
+    {
+      e = vec_elt_at_index (lm->entries, lm->next);
+      vec_free (e->string);
+      e->level = level;
+      e->class = class;
+      e->string = s;
+      e->timestamp = t;
+      s = 0;
+
+      if (lm->add_to_elog)
+	{
+          /* *INDENT-OFF* */
+          ELOG_TYPE_DECLARE(ee) =
+            {
+             .format = "log-%s: %s",
+             .format_args = "t4T4",
+             .n_enum_strings = 9,
+             .enum_strings = {
+                "emerg",
+                "alert",
+                "crit",
+                "err",
+                "warn",
+                "notice",
+                "info",
+                "debug",
+                "disabled",
+                },
+            };
+          struct {
+            u32 log_level;
+            u32 string_index;
+          } *ed;
+          /* *INDENT-ON* */
+	  ed = ELOG_DATA (&vm->elog_main, ee);
+	  ed->log_level = level;
+	  ed->string_index = elog_string (&vm->elog_main, "%v", e->string);
+	}
+
+      lm->next = (lm->next + 1) % lm->size;
+      if (lm->size > lm->count)
+	lm->count++;
+    }
+
+  vec_free (s);
 }
 
 static vlib_log_class_t
@@ -179,6 +269,19 @@ vlib_log_register_class_internal (char *class, char *subclass, u32 limit)
   vlib_log_class_data_t *c = NULL;
   vlib_log_subclass_data_t *s;
   vlib_log_class_data_t *tmp;
+  vlib_log_class_config_t *cc = 0, *scc = 0;
+  uword *p;
+  u8 *str;
+  u32 length = 0;
+
+  if ((p = hash_get_mem (lm->config_index_by_name, class)))
+    cc = vec_elt_at_index (lm->configs, p[0]);
+
+  str = format (0, "%s/%s%c", class, subclass, 0);
+  if ((p = hash_get_mem (lm->config_index_by_name, (char *) str)))
+    scc = vec_elt_at_index (lm->configs, p[0]);
+  vec_free (str);
+
   vec_foreach (tmp, lm->classes)
   {
     if (vec_len (tmp->name) != strlen (class))
@@ -195,13 +298,39 @@ vlib_log_register_class_internal (char *class, char *subclass, u32 limit)
       c->index = c - lm->classes;
       c->name = format (0, "%s", class);
     }
+  length = vec_len (c->name);
 
   vec_add2 (c->subclasses, s, 1);
   s->index = s - c->subclasses;
   s->name = subclass ? format (0, "%s", subclass) : 0;
-  s->rate_limit = (limit == 0) ? lm->default_rate_limit : limit;
-  s->level = lm->default_log_level;
-  s->syslog_level = lm->default_syslog_log_level;
+
+  if (scc && scc->rate_limit != ~0)
+    s->rate_limit = scc->rate_limit;
+  else if (cc && cc->rate_limit != ~0)
+    s->rate_limit = cc->rate_limit;
+  else if (limit)
+    s->rate_limit = limit;
+  else
+    s->rate_limit = lm->default_rate_limit;
+
+  if (scc && scc->level != ~0)
+    s->level = scc->level;
+  else if (cc && cc->level != ~0)
+    s->level = cc->level;
+  else
+    s->level = lm->default_log_level;
+
+  if (scc && scc->syslog_level != ~0)
+    s->syslog_level = scc->syslog_level;
+  else if (cc && cc->syslog_level != ~0)
+    s->syslog_level = cc->syslog_level;
+  else
+    s->syslog_level = lm->default_syslog_log_level;
+
+  if (subclass)
+    length += 1 + vec_len (s->name);
+  if (length > lm->max_class_name_length)
+    lm->max_class_name_length = length;
   return (c->index << 16) | (s->index);
 }
 
@@ -227,7 +356,7 @@ format_vlib_log_level (u8 * s, va_list * args)
 
   switch (i)
     {
-#define _(v,uc,lc) case VLIB_LOG_LEVEL_##uc: t = #lc; break;
+#define _(uc,lc) case VLIB_LOG_LEVEL_##uc: t = #lc; break;
       foreach_vlib_log_level
 #undef _
     default:
@@ -236,26 +365,33 @@ format_vlib_log_level (u8 * s, va_list * args)
   return format (s, "%s", t);
 }
 
-u32
-vlib_log_get_indent ()
-{
-  return log_main.indent;
-}
-
 static clib_error_t *
 vlib_log_init (vlib_main_t * vm)
 {
   vlib_log_main_t *lm = &log_main;
+  vlib_log_class_registration_t *r = lm->registrations;
 
   gettimeofday (&lm->time_zero_timeval, 0);
   lm->time_zero = vlib_time_now (vm);
 
   vec_validate (lm->entries, lm->size);
-  lm->log_class = vlib_log_register_class ("log", 0);
-  u8 *tmp = format (NULL, "%U %-10U %-10U ", format_time_float, 0, (f64) 0,
-		    format_white_space, 255, format_white_space, 255);
-  log_main.indent = vec_len (tmp);
-  vec_free (tmp);
+
+  while (r)
+    {
+      r->class = vlib_log_register_class (r->class_name, r->subclass_name);
+      if (r->default_level)
+	get_subclass_data (r->class)->level = r->default_level;
+      if (r->default_syslog_level)
+	get_subclass_data (r->class)->syslog_level = r->default_syslog_level;
+      r = r->next;
+    }
+
+  r = lm->registrations;
+  while (r)
+    {
+      vlib_log_debug (r->class, "initialized");
+      r = r->next;
+    }
   return 0;
 }
 
@@ -364,7 +500,7 @@ clear_log (vlib_main_t * vm,
 
   lm->count = 0;
   lm->next = 0;
-  vlib_log_info (lm->log_class, "log cleared");
+  vlib_log_info (log_log.class, "log cleared");
   return error;
 }
 
@@ -384,11 +520,11 @@ unformat_vlib_log_level (unformat_input_t * input, va_list * args)
   uword rv = 1;
   if (unformat (input, "%s", &level_str))
     {
-#define _(v, uc, lc)                                   \
+#define _(uc, lc)                                      \
   const char __##uc[] = #lc;                           \
-  if (!strcmp ((const char *) level_str, __##uc))	\
+  if (!strcmp ((const char *) level_str, __##uc))      \
     {                                                  \
-      *level = VLIB_LOG_LEVEL_##uc;                 \
+      *level = VLIB_LOG_LEVEL_##uc;                    \
       rv = 1;                                          \
       goto done;                                       \
     }
@@ -660,9 +796,50 @@ VLIB_CLI_COMMAND (cli_test_log, static) = {
 /* *INDENT-ON* */
 
 static clib_error_t *
+log_config_class (vlib_main_t * vm, char *name, unformat_input_t * input)
+{
+  vlib_log_main_t *lm = &log_main;
+  vlib_log_class_config_t *cc, tmp;
+  uword *p;
+
+  if (lm->config_index_by_name == 0)
+    lm->config_index_by_name = hash_create_string (0, sizeof (uword));
+
+  p = hash_get_mem (lm->config_index_by_name, name);
+
+  if (p)
+    return clib_error_return (0, "logging class '%s' already configured",
+			      name);
+
+  clib_memset_u8 (&tmp, 0xff, sizeof (vlib_log_class_config_t));
+
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (input, "level %U", unformat_vlib_log_level, &tmp.level))
+	;
+      else if (unformat (input, "syslog-level %U", unformat_vlib_log_level,
+			 &tmp.syslog_level))
+	;
+      else if (unformat (input, "rate-limit %u", &tmp.rate_limit))
+	;
+      else
+	return clib_error_return (0, "unknown input '%U'",
+				  format_unformat_error, input);
+    }
+
+  vec_add2 (lm->configs, cc, 1);
+  clib_memcpy_fast (cc, &tmp, sizeof (vlib_log_class_config_t));
+  cc->name = name;
+  hash_set_mem (lm->config_index_by_name, name, cc - lm->configs);
+  return 0;
+}
+
+static clib_error_t *
 log_config (vlib_main_t * vm, unformat_input_t * input)
 {
   vlib_log_main_t *lm = &log_main;
+  unformat_input_t sub_input;
+  u8 *class = 0;
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
     {
@@ -677,6 +854,18 @@ log_config (vlib_main_t * vm, unformat_input_t * input)
 			 unformat_vlib_log_level,
 			 &lm->default_syslog_log_level))
 	;
+      else if (unformat (input, "add-to-elog"))
+	lm->add_to_elog = 1;
+      else if (unformat (input, "class %s %U", &class,
+			 unformat_vlib_cli_sub_input, &sub_input))
+	{
+	  clib_error_t *err;
+	  err = log_config_class (vm, (char *) class, &sub_input);
+	  class = 0;
+	  unformat_free (&sub_input);
+	  if (err)
+	    return err;
+	}
       else
 	{
 	  return unformat_parse_error (input);

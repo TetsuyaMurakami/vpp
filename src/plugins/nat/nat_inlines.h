@@ -21,7 +21,7 @@
 
 #include <vnet/fib/ip4_fib.h>
 #include <nat/nat.h>
-#include <nat/nat_ha.h>
+//#include <nat/nat44-ei/nat44_ei_ha.h>
 
 always_inline u64
 calc_nat_key (ip4_address_t addr, u16 port, u32 fib_index, u8 proto)
@@ -227,16 +227,6 @@ is_interface_addr (snat_main_t * sm, vlib_node_runtime_t * node,
     return 0;
 }
 
-always_inline u8
-maximum_sessions_exceeded (snat_main_t * sm, u32 thread_index)
-{
-  if (pool_elts (sm->per_thread_data[thread_index].sessions) >=
-      sm->max_translations_per_thread)
-    return 1;
-
-  return 0;
-}
-
 always_inline void
 user_session_increment (snat_main_t * sm, snat_user_t * u, u8 is_static)
 {
@@ -309,10 +299,7 @@ nat44_delete_session (snat_main_t * sm, snat_session_t * ses,
     }
 }
 
-/** \brief Set TCP session state.
-    @return 1 if session was closed, otherwise 0
-*/
-always_inline int
+always_inline void
 nat44_set_tcp_session_state_i2o (snat_main_t * sm, f64 now,
 				 snat_session_t * ses, vlib_buffer_t * b,
 				 u32 thread_index)
@@ -342,7 +329,7 @@ nat44_set_tcp_session_state_i2o (snat_main_t * sm, f64 now,
 	  ses->state |= NAT44_SES_O2I_FIN_ACK;
 	  if (nat44_is_ses_closed (ses))
 	    {			// if session is now closed, save the timestamp
-	      ses->tcp_closed_timestamp = now + sm->tcp_transitory_timeout;
+	      ses->tcp_closed_timestamp = now + sm->timeouts.tcp.transitory;
 	      ses->last_lru_update = now;
 	    }
 	}
@@ -359,10 +346,9 @@ nat44_set_tcp_session_state_i2o (snat_main_t * sm, f64 now,
     }
   clib_dlist_remove (tsm->lru_pool, ses->lru_index);
   clib_dlist_addtail (tsm->lru_pool, ses->lru_head_index, ses->lru_index);
-  return 0;
 }
 
-always_inline int
+always_inline void
 nat44_set_tcp_session_state_o2i (snat_main_t * sm, f64 now,
 				 snat_session_t * ses, u8 tcp_flags,
 				 u32 tcp_ack_number, u32 tcp_seq_number,
@@ -389,7 +375,7 @@ nat44_set_tcp_session_state_o2i (snat_main_t * sm, f64 now,
 	ses->state |= NAT44_SES_I2O_FIN_ACK;
       if (nat44_is_ses_closed (ses))
 	{			// if session is now closed, save the timestamp
-	  ses->tcp_closed_timestamp = now + sm->tcp_transitory_timeout;
+	  ses->tcp_closed_timestamp = now + sm->timeouts.tcp.transitory;
 	  ses->last_lru_update = now;
 	}
     }
@@ -404,7 +390,6 @@ nat44_set_tcp_session_state_o2i (snat_main_t * sm, f64 now,
     }
   clib_dlist_remove (tsm->lru_pool, ses->lru_index);
   clib_dlist_addtail (tsm->lru_pool, ses->lru_head_index, ses->lru_index);
-  return 0;
 }
 
 always_inline u32
@@ -413,18 +398,18 @@ nat44_session_get_timeout (snat_main_t * sm, snat_session_t * s)
   switch (s->nat_proto)
     {
     case NAT_PROTOCOL_ICMP:
-      return sm->icmp_timeout;
+      return sm->timeouts.icmp;
     case NAT_PROTOCOL_UDP:
-      return sm->udp_timeout;
+      return sm->timeouts.udp;
     case NAT_PROTOCOL_TCP:
       {
 	if (s->state)
-	  return sm->tcp_transitory_timeout;
+	  return sm->timeouts.tcp.transitory;
 	else
-	  return sm->tcp_established_timeout;
+	  return sm->timeouts.tcp.established;
       }
     default:
-      return sm->udp_timeout;
+      return sm->timeouts.udp;
     }
 
   return 0;
@@ -437,10 +422,12 @@ nat44_session_update_counters (snat_session_t * s, f64 now, uword bytes,
   s->last_heard = now;
   s->total_pkts++;
   s->total_bytes += bytes;
+#if 0
   nat_ha_sref (&s->out2in.addr, s->out2in.port, &s->ext_host_addr,
 	       s->ext_host_port, s->nat_proto, s->out2in.fib_index,
 	       s->total_pkts, s->total_bytes, thread_index,
 	       &s->ha_last_refreshed, now);
+#endif
 }
 
 /** \brief Per-user LRU list maintenance */
@@ -497,20 +484,6 @@ always_inline u32
 ed_value_get_session_index (clib_bihash_kv_16_8_t * value)
 {
   return value->value & ~(u32) 0;
-}
-
-always_inline void
-split_ed_value (clib_bihash_kv_16_8_t * value, u32 * thread_index,
-		u32 * session_index)
-{
-  if (thread_index)
-    {
-      *thread_index = ed_value_get_thread_index (value);
-    }
-  if (session_index)
-    {
-      *session_index = ed_value_get_session_index (value);
-    }
 }
 
 always_inline void
@@ -742,24 +715,15 @@ snat_not_translate_fast (snat_main_t * sm, vlib_node_runtime_t * node,
 
       snat_interface_t *i;
       /* *INDENT-OFF* */
-      pool_foreach (i, sm->interfaces, ({
+      pool_foreach (i, sm->interfaces)  {
         /* NAT packet aimed at outside interface */
 	if ((nat_interface_is_outside (i)) && (sw_if_index == i->sw_if_index))
           return 0;
-      }));
+      }
       /* *INDENT-ON* */
     }
 
   return 1;
-}
-
-static inline void
-increment_v4_address (ip4_address_t * a)
-{
-  u32 v;
-
-  v = clib_net_to_host_u32 (a->as_u32) + 1;
-  a->as_u32 = clib_host_to_net_u32 (v);
 }
 
 static_always_inline u16

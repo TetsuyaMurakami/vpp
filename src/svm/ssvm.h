@@ -33,7 +33,6 @@
 #include <vppinfra/bitmap.h>
 #include <vppinfra/fifo.h>
 #include <vppinfra/time.h>
-#include <vppinfra/mheap.h>
 #include <vppinfra/heap.h>
 #include <vppinfra/pool.h>
 #include <vppinfra/format.h>
@@ -68,12 +67,12 @@ typedef struct
   uword ssvm_va;
   /* The actual mmap size */
   uword ssvm_size;
-  u32 master_pid;
-  u32 slave_pid;
+  u32 server_pid;
+  u32 client_pid;
   u8 *name;
   void *opaque[SSVM_N_OPAQUE];
 
-  /* Set when the master application thinks it's time to make the donuts */
+  /* Set when server init done */
   volatile u32 ready;
 
   ssvm_segment_type_t type;
@@ -86,8 +85,8 @@ typedef struct
   uword requested_va;
   u32 my_pid;
   u8 *name;
-  u8 numa;			/**< Numa requested at alloc time */
-  int i_am_master;
+  u8 numa;			/**< UNUSED: numa requested at alloc time */
+  int is_server;
 
   union
   {
@@ -143,7 +142,7 @@ ssvm_unlock_non_recursive (ssvm_shared_header_t * h)
 static inline void *
 ssvm_push_heap (ssvm_shared_header_t * sh)
 {
-  u8 *oldheap;
+  clib_mem_heap_t *oldheap;
   oldheap = clib_mem_set_heap (sh->heap);
   return ((void *) oldheap);
 }
@@ -157,7 +156,7 @@ ssvm_pop_heap (void *oldheap)
 static inline void *
 ssvm_mem_alloc (ssvm_private_t * ssvm, uword size)
 {
-  u8 *oldheap;
+  clib_mem_heap_t *oldheap;
   void *rv;
 
   oldheap = clib_mem_set_heap (ssvm->sh->heap);
@@ -168,11 +167,11 @@ ssvm_mem_alloc (ssvm_private_t * ssvm, uword size)
 
 #define foreach_ssvm_api_error                  \
 _(NO_NAME, "No shared segment name", -100)      \
-_(NO_SIZE, "Size not set (master)", -101)       \
+_(NO_SIZE, "Size not set (server)", -101)       \
 _(CREATE_FAILURE, "Create failed", -102)        \
 _(SET_SIZE, "Set size failed", -103)		\
 _(MMAP, "mmap failed", -104)			\
-_(SLAVE_TIMEOUT, "Slave map timeout", -105)
+_(CLIENT_TIMEOUT, "Client map timeout", -105)
 
 typedef enum
 {
@@ -183,20 +182,20 @@ typedef enum
 
 #define SSVM_API_ERROR_NO_NAME	(-10)
 
-int ssvm_master_init (ssvm_private_t * ssvm, ssvm_segment_type_t type);
-int ssvm_slave_init (ssvm_private_t * ssvm, ssvm_segment_type_t type);
+int ssvm_server_init (ssvm_private_t * ssvm, ssvm_segment_type_t type);
+int ssvm_client_init (ssvm_private_t * ssvm, ssvm_segment_type_t type);
 void ssvm_delete (ssvm_private_t * ssvm);
 
-int ssvm_master_init_shm (ssvm_private_t * ssvm);
-int ssvm_slave_init_shm (ssvm_private_t * ssvm);
+int ssvm_server_init_shm (ssvm_private_t * ssvm);
+int ssvm_client_init_shm (ssvm_private_t * ssvm);
 void ssvm_delete_shm (ssvm_private_t * ssvm);
 
-int ssvm_master_init_memfd (ssvm_private_t * memfd);
-int ssvm_slave_init_memfd (ssvm_private_t * memfd);
+int ssvm_server_init_memfd (ssvm_private_t * memfd);
+int ssvm_client_init_memfd (ssvm_private_t * memfd);
 void ssvm_delete_memfd (ssvm_private_t * memfd);
 
-int ssvm_master_init_private (ssvm_private_t * ssvm);
-int ssvm_slave_init_private (ssvm_private_t * ssvm);
+int ssvm_server_init_private (ssvm_private_t * ssvm);
+int ssvm_client_init_private (ssvm_private_t * ssvm);
 void ssvm_delete_private (ssvm_private_t * ssvm);
 
 ssvm_segment_type_t ssvm_type (const ssvm_private_t * ssvm);

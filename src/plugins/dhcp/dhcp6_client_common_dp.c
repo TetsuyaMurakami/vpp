@@ -19,7 +19,8 @@
 #include <dhcp/dhcp6_ia_na_client_dp.h>
 #include <dhcp/dhcp6_pd_client_dp.h>
 #include <dhcp/dhcp6_packet.h>
-#include <vnet/udp/udp.h>
+#include <vnet/udp/udp_local.h>
+#include <vnet/udp/udp_packet.h>
 
 dhcp6_client_common_main_t dhcp6_client_common_main;
 dhcpv6_duid_ll_string_t client_duid;
@@ -61,16 +62,16 @@ generate_client_duid (void)
   ethernet_interface_t *eth_if = 0;
 
   /* *INDENT-OFF* */
-  pool_foreach (hi, im->hw_interfaces,
-  ({
+  pool_foreach (hi, im->hw_interfaces)
+   {
     eth_if = ethernet_get_interface (&ethernet_main, hi->hw_if_index);
     if (eth_if)
       break;
-  }));
+  }
   /* *INDENT-ON* */
 
   if (eth_if)
-    clib_memcpy (client_duid.lla, eth_if->address, 6);
+    clib_memcpy (client_duid.lla, &eth_if->address, 6);
   else
     {
       clib_warning ("Failed to find any Ethernet interface, "

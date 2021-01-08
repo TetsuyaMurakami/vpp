@@ -205,7 +205,7 @@ format_time_interval (u8 * s, va_list * args)
 }
 
 /* Unparse memory size e.g. 100, 100k, 100m, 100g. */
-u8 *
+__clib_export u8 *
 format_memory_size (u8 * s, va_list * va)
 {
   uword size = va_arg (*va, uword);
@@ -234,7 +234,7 @@ format_memory_size (u8 * s, va_list * va)
 }
 
 /* Parse memory size e.g. 100, 100k, 100m, 100g. */
-uword
+__clib_export uword
 unformat_memory_size (unformat_input_t * input, va_list * va)
 {
   uword amount, shift, c;
@@ -268,9 +268,64 @@ unformat_memory_size (unformat_input_t * input, va_list * va)
   return 1;
 }
 
+/* Unparse memory page size e.g. 4K, 2M */
+__clib_export u8 *
+format_log2_page_size (u8 * s, va_list * va)
+{
+  clib_mem_page_sz_t log2_page_sz = va_arg (*va, clib_mem_page_sz_t);
+
+  if (log2_page_sz == CLIB_MEM_PAGE_SZ_UNKNOWN)
+    return format (s, "unknown");
+
+  if (log2_page_sz == CLIB_MEM_PAGE_SZ_DEFAULT)
+    return format (s, "default");
+
+  if (log2_page_sz == CLIB_MEM_PAGE_SZ_DEFAULT_HUGE)
+    return format (s, "default-hugepage");
+
+  if (log2_page_sz >= 30)
+    return format (s, "%uG", 1 << (log2_page_sz - 30));
+
+  if (log2_page_sz >= 20)
+    return format (s, "%uM", 1 << (log2_page_sz - 20));
+
+  if (log2_page_sz >= 10)
+    return format (s, "%uK", 1 << (log2_page_sz - 10));
+
+  return format (s, "%u", 1 << log2_page_sz);
+}
+
+/* Parse memory page size e.g. 4K, 2M */
+__clib_export uword
+unformat_log2_page_size (unformat_input_t * input, va_list * va)
+{
+  uword amount;
+  clib_mem_page_sz_t *result = va_arg (*va, clib_mem_page_sz_t *);
+
+  if (unformat (input, "default-hugepage"))
+    *result = CLIB_MEM_PAGE_SZ_DEFAULT_HUGE;
+  else if (unformat (input, "default"))
+    *result = CLIB_MEM_PAGE_SZ_DEFAULT;
+  else if (unformat (input, "%wdk", &amount))
+    *result = min_log2 (amount) + 10;
+  else if (unformat (input, "%wdK", &amount))
+    *result = min_log2 (amount) + 10;
+  else if (unformat (input, "%wdm", &amount))
+    *result = min_log2 (amount) + 20;
+  else if (unformat (input, "%wdM", &amount))
+    *result = min_log2 (amount) + 20;
+  else if (unformat (input, "%wdg", &amount))
+    *result = min_log2 (amount) + 30;
+  else if (unformat (input, "%wdG", &amount))
+    *result = min_log2 (amount) + 30;
+  else
+    return 0;
+  return 1;
+}
+
 /* Format c identifier: e.g. a_name -> "a name".
    Works for both vector names and null terminated c strings. */
-u8 *
+__clib_export u8 *
 format_c_identifier (u8 * s, va_list * va)
 {
   u8 *id = va_arg (*va, u8 *);
@@ -293,7 +348,7 @@ format_c_identifier (u8 * s, va_list * va)
   return s;
 }
 
-u8 *
+__clib_export u8 *
 format_hexdump (u8 * s, va_list * args)
 {
   u8 *data = va_arg (*args, u8 *);

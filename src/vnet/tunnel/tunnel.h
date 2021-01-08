@@ -43,7 +43,8 @@ extern uword unformat_tunnel_mode (unformat_input_t * input, va_list * args);
   _(ENCAP_SET_DF, "encap-set-df", 0x2)              \
   _(ENCAP_COPY_DSCP, "encap-copy-dscp", 0x4)        \
   _(ENCAP_COPY_ECN, "encap-copy-ecn", 0x8)          \
-  _(DECAP_COPY_ECN, "decap-copy-ecn", 0x10)
+  _(DECAP_COPY_ECN, "decap-copy-ecn", 0x10)         \
+  _(ENCAP_INNER_HASH, "encap-inner-hash", 0x20)
 
 typedef enum tunnel_encap_decap_flags_t_
 {
@@ -55,9 +56,9 @@ typedef enum tunnel_encap_decap_flags_t_
 #define TUNNEL_FLAG_MASK (0x1f)
 
 extern u8 *format_tunnel_encap_decap_flags (u8 * s, va_list * args);
-
+extern uword
+unformat_tunnel_encap_decap_flags (unformat_input_t * input, va_list * args);
 #endif
-
 /*
  * fd.io coding-style-patch-verification: ON
  *

@@ -33,7 +33,6 @@
 #include <vppinfra/bitmap.h>
 #include <vppinfra/fifo.h>
 #include <vppinfra/time.h>
-#include <vppinfra/mheap.h>
 #include <vppinfra/heap.h>
 #include <vppinfra/pool.h>
 #include <vppinfra/format.h>
@@ -96,7 +95,7 @@ setup_signal_handlers (void)
 	}
 
       if (sigaction (i, &sa, 0) < 0)
-	return clib_unix_warning (0, "sigaction %U", format_signal, i);
+	return clib_unix_warning ("sigaction %U", format_signal, i);
     }
 }
 

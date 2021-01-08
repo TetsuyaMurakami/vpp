@@ -207,8 +207,13 @@ u32 vlib_frame_queue_main_init (u32 node_index, u32 frame_queue_nelts);
 void vlib_worker_thread_barrier_sync_int (vlib_main_t * vm,
 					  const char *func_name);
 void vlib_worker_thread_barrier_release (vlib_main_t * vm);
+u8 vlib_worker_thread_barrier_held (void);
 void vlib_worker_thread_initial_barrier_sync_and_release (vlib_main_t * vm);
 void vlib_worker_thread_node_refork (void);
+/**
+ * Wait until each of the workers has been once around the track
+ */
+void vlib_worker_wait_one_loop (void);
 
 static_always_inline uword
 vlib_get_thread_index (void)
@@ -627,7 +632,7 @@ vlib_process_signal_event_mt_helper (vlib_process_signal_event_mt_args_t *
 				     args);
 void vlib_rpc_call_main_thread (void *function, u8 * args, u32 size);
 void vlib_get_thread_core_numa (vlib_worker_thread_t * w, unsigned cpu_id);
-
+vlib_thread_main_t *vlib_get_thread_main_not_inline (void);
 
 #endif /* included_vlib_threads_h */
 

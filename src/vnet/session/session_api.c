@@ -49,8 +49,6 @@ _(SESSION_ENABLE_DISABLE, session_enable_disable)                   	\
 _(APP_NAMESPACE_ADD_DEL, app_namespace_add_del)				\
 _(SESSION_RULE_ADD_DEL, session_rule_add_del)				\
 _(SESSION_RULES_DUMP, session_rules_dump)				\
-_(APPLICATION_TLS_CERT_ADD, application_tls_cert_add)			\
-_(APPLICATION_TLS_KEY_ADD, application_tls_key_add)			\
 _(APP_ADD_CERT_KEY_PAIR, app_add_cert_key_pair)				\
 _(APP_DEL_CERT_KEY_PAIR, app_del_cert_key_pair)				\
 _(APP_WORKER_ADD_DEL, app_worker_add_del)				\
@@ -130,7 +128,8 @@ mq_send_session_accepted_cb (session_t * s)
 {
   app_worker_t *app_wrk = app_worker_get (s->app_wrk_index);
   svm_msg_q_msg_t _msg, *msg = &_msg;
-  svm_msg_q_t *vpp_queue, *app_mq;
+  svm_msg_q_t *app_mq;
+  fifo_segment_t *eq_seg;
   session_t *listener;
   session_accepted_msg_t *mp;
   session_event_t *evt;
@@ -147,10 +146,12 @@ mq_send_session_accepted_cb (session_t * s)
   mp = (session_accepted_msg_t *) evt->data;
   clib_memset (mp, 0, sizeof (*mp));
   mp->context = app->app_index;
-  mp->server_rx_fifo = pointer_to_uword (s->rx_fifo);
-  mp->server_tx_fifo = pointer_to_uword (s->tx_fifo);
+  mp->server_rx_fifo = fifo_segment_fifo_offset (s->rx_fifo);
+  mp->server_tx_fifo = fifo_segment_fifo_offset (s->tx_fifo);
   mp->segment_handle = session_segment_handle (s);
   mp->flags = s->flags;
+
+  eq_seg = session_main_get_evt_q_segment ();
 
   if (session_has_transport (s))
     {
@@ -164,8 +165,9 @@ mq_send_session_accepted_cb (session_t * s)
 	  if (listener)
 	    mp->listener_handle = listen_session_get_handle (listener);
 	}
-      vpp_queue = session_main_get_vpp_event_queue (s->thread_index);
-      mp->vpp_event_queue_address = pointer_to_uword (vpp_queue);
+      mp->vpp_event_queue_address =
+	fifo_segment_msg_q_offset (eq_seg, s->thread_index);
+      mp->mq_index = s->thread_index;
       mp->handle = session_handle (s);
 
       session_get_endpoint (s, &mp->rmt, 0 /* is_lcl */ );
@@ -180,8 +182,9 @@ mq_send_session_accepted_cb (session_t * s)
       mp->rmt.is_ip4 = session_type_is_ip4 (listener->session_type);
       mp->rmt.port = ct->c_rmt_port;
       mp->handle = session_handle (s);
-      vpp_queue = session_main_get_vpp_event_queue (0);
-      mp->vpp_event_queue_address = pointer_to_uword (vpp_queue);
+      mp->vpp_event_queue_address =
+	fifo_segment_msg_q_offset (eq_seg, s->thread_index);
+      mp->mq_index = s->thread_index;
     }
   svm_msg_q_add_and_unlock (app_mq, msg);
 
@@ -221,9 +224,9 @@ mq_notify_close_subscribers (u32 app_index, session_handle_t sh,
   if (!app)
     return;
 
-  for (i = 0; i < f->n_subscribers; i++)
+  for (i = 0; i < f->shr->n_subscribers; i++)
     {
-      if (!(app_wrk = application_get_worker (app, f->subscribers[i])))
+      if (!(app_wrk = application_get_worker (app, f->shr->subscribers[i])))
 	continue;
       mq_send_session_close_evt (app_wrk, sh, SESSION_CTRL_EVT_DISCONNECTED);
     }
@@ -262,8 +265,9 @@ mq_send_session_connected_cb (u32 app_wrk_index, u32 api_context,
 {
   svm_msg_q_msg_t _msg, *msg = &_msg;
   session_connected_msg_t *mp;
-  svm_msg_q_t *vpp_mq, *app_mq;
+  svm_msg_q_t *app_mq;
   transport_connection_t *tc;
+  fifo_segment_t *eq_seg;
   app_worker_t *app_wrk;
   session_event_t *evt;
 
@@ -289,6 +293,8 @@ mq_send_session_connected_cb (u32 app_wrk_index, u32 api_context,
   if (err)
     goto done;
 
+  eq_seg = session_main_get_evt_q_segment ();
+
   if (session_has_transport (s))
     {
       tc = session_get_transport (s);
@@ -299,14 +305,14 @@ mq_send_session_connected_cb (u32 app_wrk_index, u32 api_context,
 	  goto done;
 	}
 
-      vpp_mq = session_main_get_vpp_event_queue (s->thread_index);
       mp->handle = session_handle (s);
-      mp->vpp_event_queue_address = pointer_to_uword (vpp_mq);
+      mp->vpp_event_queue_address =
+	fifo_segment_msg_q_offset (eq_seg, s->thread_index);
 
       session_get_endpoint (s, &mp->lcl, 1 /* is_lcl */ );
 
-      mp->server_rx_fifo = pointer_to_uword (s->rx_fifo);
-      mp->server_tx_fifo = pointer_to_uword (s->tx_fifo);
+      mp->server_rx_fifo = fifo_segment_fifo_offset (s->rx_fifo);
+      mp->server_tx_fifo = fifo_segment_fifo_offset (s->tx_fifo);
       mp->segment_handle = session_segment_handle (s);
     }
   else
@@ -318,14 +324,14 @@ mq_send_session_connected_cb (u32 app_wrk_index, u32 api_context,
       mp->handle = session_handle (s);
       mp->lcl.port = cct->c_lcl_port;
       mp->lcl.is_ip4 = cct->c_is_ip4;
-      vpp_mq = session_main_get_vpp_event_queue (0);
-      mp->vpp_event_queue_address = pointer_to_uword (vpp_mq);
-      mp->server_rx_fifo = pointer_to_uword (s->rx_fifo);
-      mp->server_tx_fifo = pointer_to_uword (s->tx_fifo);
+      mp->vpp_event_queue_address =
+	fifo_segment_msg_q_offset (eq_seg, s->thread_index);
+      mp->server_rx_fifo = fifo_segment_fifo_offset (s->rx_fifo);
+      mp->server_tx_fifo = fifo_segment_fifo_offset (s->tx_fifo);
       mp->segment_handle = session_segment_handle (s);
       ss = ct_session_get_peer (s);
-      mp->ct_rx_fifo = pointer_to_uword (ss->tx_fifo);
-      mp->ct_tx_fifo = pointer_to_uword (ss->rx_fifo);
+      mp->ct_rx_fifo = fifo_segment_fifo_offset (ss->tx_fifo);
+      mp->ct_tx_fifo = fifo_segment_fifo_offset (ss->rx_fifo);
       mp->ct_segment_handle = session_segment_handle (ss);
     }
 
@@ -341,9 +347,10 @@ mq_send_session_bound_cb (u32 app_wrk_index, u32 api_context,
 			  session_handle_t handle, int rv)
 {
   svm_msg_q_msg_t _msg, *msg = &_msg;
-  svm_msg_q_t *app_mq, *vpp_evt_q;
+  svm_msg_q_t *app_mq;
   transport_endpoint_t tep;
   session_bound_msg_t *mp;
+  fifo_segment_t *eq_seg;
   app_worker_t *app_wrk;
   session_event_t *evt;
   app_listener_t *al;
@@ -381,13 +388,14 @@ mq_send_session_bound_cb (u32 app_wrk_index, u32 api_context,
   mp->lcl_is_ip4 = tep.is_ip4;
   clib_memcpy_fast (mp->lcl_ip, &tep.ip, sizeof (tep.ip));
 
-  vpp_evt_q = session_main_get_vpp_event_queue (0);
-  mp->vpp_evt_q = pointer_to_uword (vpp_evt_q);
+  eq_seg = session_main_get_evt_q_segment ();
+  mp->vpp_evt_q = fifo_segment_msg_q_offset (eq_seg, ls->thread_index);
 
   if (session_transport_service_type (ls) == TRANSPORT_SERVICE_CL)
     {
-      mp->rx_fifo = pointer_to_uword (ls->rx_fifo);
-      mp->tx_fifo = pointer_to_uword (ls->tx_fifo);
+      mp->rx_fifo = fifo_segment_fifo_offset (ls->rx_fifo);
+      mp->tx_fifo = fifo_segment_fifo_offset (ls->tx_fifo);
+      mp->segment_handle = session_segment_handle (ls);
     }
 
 done:
@@ -424,10 +432,14 @@ mq_send_session_migrate_cb (session_t * s, session_handle_t new_sh)
 {
   svm_msg_q_msg_t _msg, *msg = &_msg;
   session_migrated_msg_t *mp;
-  svm_msg_q_t *vpp_evt_q;
+  fifo_segment_t *eq_seg;
   app_worker_t *app_wrk;
   session_event_t *evt;
   svm_msg_q_t *app_mq;
+  u32 thread_index;
+
+  thread_index = session_thread_from_handle (new_sh);
+  eq_seg = session_main_get_evt_q_segment ();
 
   app_wrk = app_worker_get (s->app_wrk_index);
   app_mq = app_wrk->event_queue;
@@ -440,9 +452,9 @@ mq_send_session_migrate_cb (session_t * s, session_handle_t new_sh)
   mp = (session_migrated_msg_t *) evt->data;
   mp->handle = session_handle (s);
   mp->new_handle = new_sh;
-  mp->vpp_thread_index = session_thread_from_handle (new_sh);
-  vpp_evt_q = session_main_get_vpp_event_queue (mp->vpp_thread_index);
-  mp->vpp_evt_q = pointer_to_uword (vpp_evt_q);
+  mp->vpp_thread_index = thread_index;
+  mp->vpp_evt_q = fifo_segment_msg_q_offset (eq_seg, thread_index);
+  mp->segment_handle = session_segment_handle (s);
   svm_msg_q_add_and_unlock (app_mq, msg);
 }
 
@@ -599,19 +611,24 @@ vl_api_app_attach_t_handler (vl_api_app_attach_t * mp)
 {
   int rv = 0, fds[SESSION_N_FD_TYPE], n_fds = 0;
   vl_api_app_attach_reply_t *rmp;
-  ssvm_private_t *segp, *evt_q_segment;
+  fifo_segment_t *segp, *evt_q_segment = 0;
   vnet_app_attach_args_t _a, *a = &_a;
   u8 fd_flags = 0, ctrl_thread;
   vl_api_registration_t *reg;
-  svm_msg_q_t *ctrl_mq;
 
   reg = vl_api_client_index_to_registration (mp->client_index);
   if (!reg)
     return;
 
-  if (session_main_is_enabled () == 0)
+  if (!session_main_is_enabled () || appns_sapi_enabled ())
     {
       rv = VNET_API_ERROR_FEATURE_DISABLED;
+      goto done;
+    }
+  /* Only support binary api with socket transport */
+  if (vl_api_registration_file_index (reg) == VL_API_INVALID_FI)
+    {
+      rv = VNET_API_ERROR_APP_UNSUPPORTED_CFG;
       goto done;
     }
 
@@ -623,7 +640,6 @@ vl_api_app_attach_t_handler (vl_api_app_attach_t * mp)
   a->api_client_index = mp->client_index;
   a->options = mp->options;
   a->session_cb_vft = &session_mq_cb_vft;
-
   a->namespace_id = vl_api_from_api_to_new_vec (mp, &mp->namespace_id);
 
   if ((rv = vnet_application_attach (a)))
@@ -638,7 +654,7 @@ vl_api_app_attach_t_handler (vl_api_app_attach_t * mp)
   if ((evt_q_segment = session_main_get_evt_q_segment ()))
     {
       fd_flags |= SESSION_FD_F_VPP_MQ_SEGMENT;
-      fds[n_fds] = evt_q_segment->fd;
+      fds[n_fds] = evt_q_segment->ssvm.fd;
       n_fds += 1;
     }
   /* Send fifo segment fd if needed */
@@ -661,19 +677,19 @@ done:
     if (!rv)
       {
 	ctrl_thread = vlib_num_workers () ? 1 : 0;
-	ctrl_mq = session_main_get_vpp_event_queue (ctrl_thread);
-	segp = a->segment;
+	segp = (fifo_segment_t *) a->segment;
 	rmp->app_index = clib_host_to_net_u32 (a->app_index);
-	rmp->app_mq = pointer_to_uword (a->app_evt_q);
-	rmp->vpp_ctrl_mq = pointer_to_uword (ctrl_mq);
+	rmp->app_mq = fifo_segment_msg_q_offset (segp, 0);
+	rmp->vpp_ctrl_mq =
+	  fifo_segment_msg_q_offset (evt_q_segment, ctrl_thread);
 	rmp->vpp_ctrl_mq_thread = ctrl_thread;
 	rmp->n_fds = n_fds;
 	rmp->fd_flags = fd_flags;
-	if (vec_len (segp->name))
+	if (vec_len (segp->ssvm.name))
 	  {
-	    vl_api_vec_to_api_string (segp->name, &rmp->segment_name);
+	    vl_api_vec_to_api_string (segp->ssvm.name, &rmp->segment_name);
 	  }
-	rmp->segment_size = segp->ssvm_size;
+	rmp->segment_size = segp->ssvm.ssvm_size;
 	rmp->segment_handle = clib_host_to_net_u64 (a->segment_handle);
       }
   }));
@@ -692,7 +708,7 @@ vl_api_app_worker_add_del_t_handler (vl_api_app_worker_add_del_t * mp)
   application_t *app;
   u8 fd_flags = 0;
 
-  if (session_main_is_enabled () == 0)
+  if (!session_main_is_enabled () || appns_sapi_enabled ())
     {
       rv = VNET_API_ERROR_FEATURE_DISABLED;
       goto done;
@@ -747,13 +763,14 @@ done:
     rmp->segment_handle = clib_host_to_net_u64 (args.segment_handle);
     if (!rv && mp->is_add)
       {
+	rmp->app_event_queue_address =
+	  fifo_segment_msg_q_offset ((fifo_segment_t *) args.segment, 0);
+	rmp->n_fds = n_fds;
+	rmp->fd_flags = fd_flags;
 	if (vec_len (args.segment->name))
 	  {
 	    vl_api_vec_to_api_string (args.segment->name, &rmp->segment_name);
 	  }
-	rmp->app_event_queue_address = pointer_to_uword (args.evt_q);
-	rmp->n_fds = n_fds;
-	rmp->fd_flags = fd_flags;
       }
   }));
   /* *INDENT-ON* */
@@ -770,7 +787,7 @@ vl_api_application_detach_t_handler (vl_api_application_detach_t * mp)
   vnet_app_detach_args_t _a, *a = &_a;
   application_t *app;
 
-  if (session_main_is_enabled () == 0)
+  if (!session_main_is_enabled () || appns_sapi_enabled ())
     {
       rv = VNET_API_ERROR_FEATURE_DISABLED;
       goto done;
@@ -964,12 +981,12 @@ send_session_rules_table_details (session_rules_table_t * srt, u8 fib_proto,
       u8 *tag = 0;
       /* *INDENT-OFF* */
       srt16 = &srt->session_rules_tables_16;
-      pool_foreach (rule16, srt16->rules, ({
+      pool_foreach (rule16, srt16->rules)  {
 	ri = mma_rules_table_rule_index_16 (srt16, rule16);
 	tag = session_rules_table_rule_tag (srt, ri, 1);
         send_session_rule_details4 (rule16, is_local, tp, appns_index, tag,
                                     reg, context);
-      }));
+      }
       /* *INDENT-ON* */
     }
   if (is_local || fib_proto == FIB_PROTOCOL_IP6)
@@ -977,18 +994,18 @@ send_session_rules_table_details (session_rules_table_t * srt, u8 fib_proto,
       u8 *tag = 0;
       /* *INDENT-OFF* */
       srt40 = &srt->session_rules_tables_40;
-      pool_foreach (rule40, srt40->rules, ({
+      pool_foreach (rule40, srt40->rules)  {
 	ri = mma_rules_table_rule_index_40 (srt40, rule40);
 	tag = session_rules_table_rule_tag (srt, ri, 1);
         send_session_rule_details6 (rule40, is_local, tp, appns_index, tag,
                                     reg, context);
-      }));
+      }
       /* *INDENT-ON* */
     }
 }
 
 static void
-vl_api_session_rules_dump_t_handler (vl_api_one_map_server_dump_t * mp)
+vl_api_session_rules_dump_t_handler (vl_api_session_rules_dump_t * mp)
 {
   vl_api_registration_t *reg;
   session_table_t *st;
@@ -1046,13 +1063,11 @@ vl_api_app_add_cert_key_pair_t_handler (vl_api_app_add_cert_key_pair_t * mp)
     }
 
   clib_memset (a, 0, sizeof (*a));
-  vec_validate (a->cert, cert_len);
-  vec_validate (a->key, key_len);
-  clib_memcpy_fast (a->cert, mp->certkey, cert_len);
-  clib_memcpy_fast (a->key, mp->certkey + cert_len, key_len);
+  a->cert = mp->certkey;
+  a->key = mp->certkey + cert_len;
+  a->cert_len = cert_len;
+  a->key_len = key_len;
   rv = vnet_app_add_cert_key_pair (a);
-  vec_free (a->cert);
-  vec_free (a->key);
 
 done:
   /* *INDENT-OFF* */
@@ -1079,73 +1094,6 @@ vl_api_app_del_cert_key_pair_t_handler (vl_api_app_del_cert_key_pair_t * mp)
 
 done:
   REPLY_MACRO (VL_API_APP_DEL_CERT_KEY_PAIR_REPLY);
-}
-
-/* ### WILL BE DEPRECATED POST 20.01 ### */
-static void
-vl_api_application_tls_cert_add_t_handler (vl_api_application_tls_cert_add_t *
-					   mp)
-{
-  vl_api_application_tls_cert_add_reply_t *rmp;
-  app_cert_key_pair_t *ckpair;
-  application_t *app;
-  u32 cert_len;
-  int rv = 0;
-  if (session_main_is_enabled () == 0)
-    {
-      rv = VNET_API_ERROR_FEATURE_DISABLED;
-      goto done;
-    }
-  if (!(app = application_lookup (mp->client_index)))
-    {
-      rv = VNET_API_ERROR_APPLICATION_NOT_ATTACHED;
-      goto done;
-    }
-  cert_len = clib_net_to_host_u16 (mp->cert_len);
-  if (cert_len > 10000)
-    {
-      rv = VNET_API_ERROR_INVALID_VALUE;
-      goto done;
-    }
-  ckpair = app_cert_key_pair_get_default ();
-  vec_validate (ckpair->cert, cert_len);
-  clib_memcpy_fast (ckpair->cert, mp->cert, cert_len);
-
-done:
-  REPLY_MACRO (VL_API_APPLICATION_TLS_CERT_ADD_REPLY);
-}
-
-/* ### WILL BE DEPRECATED POST 20.01 ### */
-static void
-vl_api_application_tls_key_add_t_handler (vl_api_application_tls_key_add_t *
-					  mp)
-{
-  vl_api_application_tls_key_add_reply_t *rmp;
-  app_cert_key_pair_t *ckpair;
-  application_t *app;
-  u32 key_len;
-  int rv = 0;
-  if (session_main_is_enabled () == 0)
-    {
-      rv = VNET_API_ERROR_FEATURE_DISABLED;
-      goto done;
-    }
-  if (!(app = application_lookup (mp->client_index)))
-    {
-      rv = VNET_API_ERROR_APPLICATION_NOT_ATTACHED;
-      goto done;
-    }
-  key_len = clib_net_to_host_u16 (mp->key_len);
-  if (key_len > 10000)
-    {
-      rv = VNET_API_ERROR_INVALID_VALUE;
-      goto done;
-    }
-  ckpair = app_cert_key_pair_get_default ();
-  vec_validate (ckpair->key, key_len);
-  clib_memcpy_fast (ckpair->key, mp->key, key_len);
-done:
-  REPLY_MACRO (VL_API_APPLICATION_TLS_KEY_ADD_REPLY);
 }
 
 static clib_error_t *
@@ -1207,6 +1155,522 @@ session_api_hookup (vlib_main_t * vm)
 }
 
 VLIB_API_INIT_FUNCTION (session_api_hookup);
+
+/*
+ * Socket api functions
+ */
+
+static void
+sapi_send_fds (app_worker_t * app_wrk, int *fds, int n_fds)
+{
+  app_sapi_msg_t smsg = { 0 };
+  app_namespace_t *app_ns;
+  application_t *app;
+  clib_socket_t *cs;
+  u32 cs_index;
+
+  app = application_get (app_wrk->app_index);
+  app_ns = app_namespace_get (app->ns_index);
+  cs_index = appns_sapi_handle_sock_index (app_wrk->api_client_index);
+  cs = appns_sapi_get_socket (app_ns, cs_index);
+  if (PREDICT_FALSE (!cs))
+    return;
+
+  /* There's no payload for the message only the type */
+  smsg.type = APP_SAPI_MSG_TYPE_SEND_FDS;
+  clib_socket_sendmsg (cs, &smsg, sizeof (smsg), fds, n_fds);
+}
+
+static int
+mq_send_add_segment_sapi_cb (u32 app_wrk_index, u64 segment_handle)
+{
+  int fds[SESSION_N_FD_TYPE], n_fds = 0;
+  svm_msg_q_msg_t _msg, *msg = &_msg;
+  session_app_add_segment_msg_t *mp;
+  app_worker_t *app_wrk;
+  session_event_t *evt;
+  svm_msg_q_t *app_mq;
+  fifo_segment_t *fs;
+  ssvm_private_t *sp;
+  u8 fd_flags = 0;
+
+  app_wrk = app_worker_get (app_wrk_index);
+
+  fs = segment_manager_get_segment_w_handle (segment_handle);
+  sp = &fs->ssvm;
+  ASSERT (ssvm_type (sp) == SSVM_SEGMENT_MEMFD);
+
+  fd_flags |= SESSION_FD_F_MEMFD_SEGMENT;
+  fds[n_fds] = sp->fd;
+  n_fds += 1;
+
+  app_mq = app_wrk->event_queue;
+  if (mq_try_lock_and_alloc_msg (app_mq, msg))
+    return -1;
+
+  /*
+   * Send the fd over api socket
+   */
+  sapi_send_fds (app_wrk, fds, n_fds);
+
+  /*
+   * Send the actual message over mq
+   */
+  evt = svm_msg_q_msg_data (app_mq, msg);
+  clib_memset (evt, 0, sizeof (*evt));
+  evt->event_type = SESSION_CTRL_EVT_APP_ADD_SEGMENT;
+  mp = (session_app_add_segment_msg_t *) evt->data;
+  clib_memset (mp, 0, sizeof (*mp));
+  mp->segment_size = sp->ssvm_size;
+  mp->fd_flags = fd_flags;
+  mp->segment_handle = segment_handle;
+  strncpy ((char *) mp->segment_name, (char *) sp->name,
+	   sizeof (mp->segment_name) - 1);
+
+  svm_msg_q_add_and_unlock (app_mq, msg);
+
+  return 0;
+}
+
+static int
+mq_send_del_segment_sapi_cb (u32 app_wrk_index, u64 segment_handle)
+{
+  svm_msg_q_msg_t _msg, *msg = &_msg;
+  session_app_del_segment_msg_t *mp;
+  app_worker_t *app_wrk;
+  session_event_t *evt;
+  svm_msg_q_t *app_mq;
+
+  app_wrk = app_worker_get (app_wrk_index);
+
+  app_mq = app_wrk->event_queue;
+  if (mq_try_lock_and_alloc_msg (app_mq, msg))
+    return -1;
+
+  evt = svm_msg_q_msg_data (app_mq, msg);
+  clib_memset (evt, 0, sizeof (*evt));
+  evt->event_type = SESSION_CTRL_EVT_APP_DEL_SEGMENT;
+  mp = (session_app_del_segment_msg_t *) evt->data;
+  clib_memset (mp, 0, sizeof (*mp));
+  mp->segment_handle = segment_handle;
+  svm_msg_q_add_and_unlock (app_mq, msg);
+
+  return 0;
+}
+
+static session_cb_vft_t session_mq_sapi_cb_vft = {
+  .session_accept_callback = mq_send_session_accepted_cb,
+  .session_disconnect_callback = mq_send_session_disconnected_cb,
+  .session_connected_callback = mq_send_session_connected_cb,
+  .session_reset_callback = mq_send_session_reset_cb,
+  .session_migrate_callback = mq_send_session_migrate_cb,
+  .session_cleanup_callback = mq_send_session_cleanup_cb,
+  .add_segment_callback = mq_send_add_segment_sapi_cb,
+  .del_segment_callback = mq_send_del_segment_sapi_cb,
+};
+
+static void
+session_api_attach_handler (app_namespace_t * app_ns, clib_socket_t * cs,
+			    app_sapi_attach_msg_t * mp)
+{
+  int rv = 0, fds[SESSION_N_FD_TYPE], n_fds = 0;
+  vnet_app_attach_args_t _a, *a = &_a;
+  app_sapi_attach_reply_msg_t *rmp;
+  fifo_segment_t *evt_q_segment;
+  u8 fd_flags = 0, ctrl_thread;
+  app_ns_api_handle_t *handle;
+  app_sapi_msg_t msg = { 0 };
+  app_worker_t *app_wrk;
+  application_t *app;
+
+  /* Make sure name is null terminated */
+  mp->name[63] = 0;
+
+  clib_memset (a, 0, sizeof (*a));
+  a->api_client_index = appns_sapi_socket_handle (app_ns, cs);
+  a->name = format (0, "%s", (char *) mp->name);
+  a->options = mp->options;
+  a->session_cb_vft = &session_mq_sapi_cb_vft;
+  a->use_sock_api = 1;
+  a->options[APP_OPTIONS_NAMESPACE] = app_namespace_index (app_ns);
+
+  if ((rv = vnet_application_attach (a)))
+    {
+      clib_warning ("attach returned: %d", rv);
+      goto done;
+    }
+
+  /* Send event queues segment */
+  if ((evt_q_segment = session_main_get_evt_q_segment ()))
+    {
+      fd_flags |= SESSION_FD_F_VPP_MQ_SEGMENT;
+      fds[n_fds] = evt_q_segment->ssvm.fd;
+      n_fds += 1;
+    }
+  /* Send fifo segment fd if needed */
+  if (ssvm_type (a->segment) == SSVM_SEGMENT_MEMFD)
+    {
+      fd_flags |= SESSION_FD_F_MEMFD_SEGMENT;
+      fds[n_fds] = a->segment->fd;
+      n_fds += 1;
+    }
+  if (a->options[APP_OPTIONS_FLAGS] & APP_OPTIONS_FLAGS_EVT_MQ_USE_EVENTFD)
+    {
+      fd_flags |= SESSION_FD_F_MQ_EVENTFD;
+      fds[n_fds] = svm_msg_q_get_producer_eventfd (a->app_evt_q);
+      n_fds += 1;
+    }
+
+done:
+
+  msg.type = APP_SAPI_MSG_TYPE_ATTACH_REPLY;
+  rmp = &msg.attach_reply;
+  rmp->retval = rv;
+  if (!rv)
+    {
+      ctrl_thread = vlib_num_workers ()? 1 : 0;
+      rmp->app_index = a->app_index;
+      rmp->app_mq =
+	fifo_segment_msg_q_offset ((fifo_segment_t *) a->segment, 0);
+      rmp->vpp_ctrl_mq =
+	fifo_segment_msg_q_offset (evt_q_segment, ctrl_thread);
+      rmp->vpp_ctrl_mq_thread = ctrl_thread;
+      rmp->n_fds = n_fds;
+      rmp->fd_flags = fd_flags;
+      /* No segment name and size since we only support memfds
+       * in this configuration */
+      rmp->segment_handle = a->segment_handle;
+      rmp->api_client_handle = a->api_client_index;
+
+      /* Update app index for socket */
+      handle = (app_ns_api_handle_t *) & cs->private_data;
+      app = application_get (a->app_index);
+      app_wrk = application_get_worker (app, 0);
+      handle->aah_app_wrk_index = app_wrk->wrk_index;
+    }
+
+  clib_socket_sendmsg (cs, &msg, sizeof (msg), fds, n_fds);
+  vec_free (a->name);
+}
+
+static void
+sapi_socket_close_w_handle (u32 api_handle)
+{
+  app_namespace_t *app_ns = app_namespace_get (api_handle >> 16);
+  u16 sock_index = api_handle & 0xffff;
+  app_ns_api_handle_t *handle;
+  clib_socket_t *cs;
+  clib_file_t *cf;
+
+  cs = appns_sapi_get_socket (app_ns, sock_index);
+  if (!cs)
+    return;
+
+  handle = (app_ns_api_handle_t *) & cs->private_data;
+  cf = clib_file_get (&file_main, handle->aah_file_index);
+  clib_file_del (&file_main, cf);
+
+  clib_socket_close (cs);
+  appns_sapi_free_socket (app_ns, cs);
+}
+
+static void
+sapi_add_del_worker_handler (app_namespace_t * app_ns,
+			     clib_socket_t * cs,
+			     app_sapi_worker_add_del_msg_t * mp)
+{
+  int rv = 0, fds[SESSION_N_FD_TYPE], n_fds = 0;
+  app_sapi_worker_add_del_reply_msg_t *rmp;
+  app_ns_api_handle_t *handle;
+  app_sapi_msg_t msg = { 0 };
+  app_worker_t *app_wrk;
+  u32 sapi_handle = -1;
+  application_t *app;
+  u8 fd_flags = 0;
+
+  app = application_get_if_valid (mp->app_index);
+  if (!app)
+    {
+      rv = VNET_API_ERROR_INVALID_VALUE;
+      goto done;
+    }
+
+  sapi_handle = appns_sapi_socket_handle (app_ns, cs);
+
+  vnet_app_worker_add_del_args_t args = {
+    .app_index = app->app_index,
+    .wrk_map_index = mp->wrk_index,
+    .api_client_index = sapi_handle,
+    .is_add = mp->is_add
+  };
+  rv = vnet_app_worker_add_del (&args);
+  if (rv)
+    {
+      clib_warning ("app worker add/del returned: %d", rv);
+      goto done;
+    }
+
+  if (!mp->is_add)
+    {
+      sapi_socket_close_w_handle (sapi_handle);
+      goto done;
+    }
+
+  /* Send fifo segment fd if needed */
+  if (ssvm_type (args.segment) == SSVM_SEGMENT_MEMFD)
+    {
+      fd_flags |= SESSION_FD_F_MEMFD_SEGMENT;
+      fds[n_fds] = args.segment->fd;
+      n_fds += 1;
+    }
+  if (application_segment_manager_properties (app)->use_mq_eventfd)
+    {
+      fd_flags |= SESSION_FD_F_MQ_EVENTFD;
+      fds[n_fds] = svm_msg_q_get_producer_eventfd (args.evt_q);
+      n_fds += 1;
+    }
+
+done:
+
+  msg.type = APP_SAPI_MSG_TYPE_ADD_DEL_WORKER_REPLY;
+  rmp = &msg.worker_add_del_reply;
+  rmp->retval = rv;
+  rmp->is_add = mp->is_add;
+  rmp->api_client_handle = sapi_handle;
+  rmp->wrk_index = args.wrk_map_index;
+  rmp->segment_handle = args.segment_handle;
+  if (!rv && mp->is_add)
+    {
+      /* No segment name and size. This supports only memfds */
+      rmp->app_event_queue_address =
+	fifo_segment_msg_q_offset ((fifo_segment_t *) args.segment, 0);
+      rmp->n_fds = n_fds;
+      rmp->fd_flags = fd_flags;
+
+      /* Update app index for socket */
+      handle = (app_ns_api_handle_t *) & cs->private_data;
+      app_wrk = application_get_worker (app, args.wrk_map_index);
+      handle->aah_app_wrk_index = app_wrk->wrk_index;
+    }
+
+  clib_socket_sendmsg (cs, &msg, sizeof (msg), fds, n_fds);
+}
+
+static void
+sapi_socket_detach (app_namespace_t * app_ns, clib_socket_t * cs)
+{
+  app_ns_api_handle_t *handle;
+  app_worker_t *app_wrk;
+  u32 api_client_handle;
+
+  api_client_handle = appns_sapi_socket_handle (app_ns, cs);
+  sapi_socket_close_w_handle (api_client_handle);
+
+  /* Cleanup everything because app worker closed socket or crashed */
+  handle = (app_ns_api_handle_t *) & cs->private_data;
+  app_wrk = app_worker_get (handle->aah_app_wrk_index);
+
+  vnet_app_worker_add_del_args_t args = {
+    .app_index = app_wrk->app_index,
+    .wrk_map_index = app_wrk->wrk_map_index,
+    .api_client_index = api_client_handle,
+    .is_add = 0
+  };
+  /* Send rpc to main thread for worker barrier */
+  vlib_rpc_call_main_thread (vnet_app_worker_add_del, (u8 *) & args,
+			     sizeof (args));
+}
+
+static clib_error_t *
+sapi_sock_read_ready (clib_file_t * cf)
+{
+  app_ns_api_handle_t *handle = (app_ns_api_handle_t *) & cf->private_data;
+  vlib_main_t *vm = vlib_get_main ();
+  app_sapi_msg_t msg = { 0 };
+  app_namespace_t *app_ns;
+  clib_error_t *err = 0;
+  clib_socket_t *cs;
+
+  app_ns = app_namespace_get (handle->aah_app_ns_index);
+  cs = appns_sapi_get_socket (app_ns, handle->aah_sock_index);
+  if (!cs)
+    goto error;
+
+  err = clib_socket_recvmsg (cs, &msg, sizeof (msg), 0, 0);
+  if (err)
+    {
+      clib_error_free (err);
+      sapi_socket_detach (app_ns, cs);
+      goto error;
+    }
+
+  handle = (app_ns_api_handle_t *) & cs->private_data;
+
+  vlib_worker_thread_barrier_sync (vm);
+
+  switch (msg.type)
+    {
+    case APP_SAPI_MSG_TYPE_ATTACH:
+      session_api_attach_handler (app_ns, cs, &msg.attach);
+      break;
+    case APP_SAPI_MSG_TYPE_ADD_DEL_WORKER:
+      sapi_add_del_worker_handler (app_ns, cs, &msg.worker_add_del);
+      break;
+    default:
+      clib_warning ("app wrk %u unknown message type: %u",
+		    handle->aah_app_wrk_index, msg.type);
+      break;
+    }
+
+  vlib_worker_thread_barrier_release (vm);
+
+error:
+  return 0;
+}
+
+static clib_error_t *
+sapi_sock_write_ready (clib_file_t * cf)
+{
+  app_ns_api_handle_t *handle = (app_ns_api_handle_t *) & cf->private_data;
+  clib_warning ("called for app ns %u", handle->aah_app_ns_index);
+  return 0;
+}
+
+static clib_error_t *
+sapi_sock_error (clib_file_t * cf)
+{
+  app_ns_api_handle_t *handle = (app_ns_api_handle_t *) & cf->private_data;
+  app_namespace_t *app_ns;
+  clib_socket_t *cs;
+
+  app_ns = app_namespace_get (handle->aah_app_ns_index);
+  cs = appns_sapi_get_socket (app_ns, handle->aah_sock_index);
+  if (!cs)
+    return 0;
+
+  sapi_socket_detach (app_ns, cs);
+  return 0;
+}
+
+static clib_error_t *
+sapi_sock_accept_ready (clib_file_t * scf)
+{
+  app_ns_api_handle_t handle = *(app_ns_api_handle_t *) & scf->private_data;
+  app_namespace_t *app_ns;
+  clib_file_t cf = { 0 };
+  clib_error_t *err = 0;
+  clib_socket_t *ccs, *scs;
+
+  /* Listener files point to namespace */
+  app_ns = app_namespace_get (handle.aah_app_ns_index);
+
+  /*
+   * Initialize client socket
+   */
+  ccs = appns_sapi_alloc_socket (app_ns);
+
+  /* Grab server socket after client is initialized  */
+  scs = appns_sapi_get_socket (app_ns, handle.aah_sock_index);
+  if (!scs)
+    goto error;
+
+  err = clib_socket_accept (scs, ccs);
+  if (err)
+    {
+      clib_error_report (err);
+      goto error;
+    }
+
+  cf.read_function = sapi_sock_read_ready;
+  cf.write_function = sapi_sock_write_ready;
+  cf.error_function = sapi_sock_error;
+  cf.file_descriptor = ccs->fd;
+  /* File points to app namespace and socket */
+  handle.aah_sock_index = appns_sapi_socket_index (app_ns, ccs);
+  cf.private_data = handle.as_u64;
+  cf.description = format (0, "app sock conn fd: %d", ccs->fd);
+
+  /* Poll until we get an attach message. Socket points to file and
+   * application that owns the socket */
+  handle.aah_app_wrk_index = APP_INVALID_INDEX;
+  handle.aah_file_index = clib_file_add (&file_main, &cf);
+  ccs->private_data = handle.as_u64;
+
+  return err;
+
+error:
+  appns_sapi_free_socket (app_ns, ccs);
+  return err;
+}
+
+int
+appns_sapi_add_ns_socket (app_namespace_t * app_ns)
+{
+  char *subdir = "/app_ns_sockets/";
+  app_ns_api_handle_t *handle;
+  clib_file_t cf = { 0 };
+  struct stat file_stat;
+  clib_error_t *err;
+  clib_socket_t *cs;
+  u8 *dir = 0;
+  int rv = 0;
+
+  vec_add (dir, vlib_unix_get_runtime_dir (),
+	   strlen (vlib_unix_get_runtime_dir ()));
+  vec_add (dir, (u8 *) subdir, strlen (subdir));
+
+  err = vlib_unix_recursive_mkdir ((char *) dir);
+  if (err)
+    {
+      clib_error_report (err);
+      rv = -1;
+      goto error;
+    }
+
+  app_ns->sock_name = format (0, "%v%v%c", dir, app_ns->ns_id, 0);
+
+  /*
+   * Create and initialize socket to listen on
+   */
+  cs = appns_sapi_alloc_socket (app_ns);
+  cs->config = (char *) app_ns->sock_name;
+  cs->flags = CLIB_SOCKET_F_IS_SERVER |
+    CLIB_SOCKET_F_ALLOW_GROUP_WRITE |
+    CLIB_SOCKET_F_SEQPACKET | CLIB_SOCKET_F_PASSCRED;
+
+  if ((err = clib_socket_init (cs)))
+    {
+      clib_error_report (err);
+      rv = -1;
+      goto error;
+    }
+
+  if (stat ((char *) app_ns->sock_name, &file_stat) == -1)
+    {
+      rv = -1;
+      goto error;
+    }
+
+  /*
+   * Start polling it
+   */
+  cf.read_function = sapi_sock_accept_ready;
+  cf.file_descriptor = cs->fd;
+  /* File points to namespace */
+  handle = (app_ns_api_handle_t *) & cf.private_data;
+  handle->aah_app_ns_index = app_namespace_index (app_ns);
+  handle->aah_sock_index = appns_sapi_socket_index (app_ns, cs);
+  cf.description = format (0, "app sock listener: %s", app_ns->sock_name);
+
+  /* Socket points to clib file index */
+  handle = (app_ns_api_handle_t *) & cs->private_data;
+  handle->aah_file_index = clib_file_add (&file_main, &cf);
+  handle->aah_app_wrk_index = APP_INVALID_INDEX;
+
+error:
+  vec_free (dir);
+  return rv;
+}
 
 /*
  * fd.io coding-style-patch-verification: ON

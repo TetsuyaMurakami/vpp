@@ -78,16 +78,11 @@ typedef struct _segment_manager
   u8 low_watermark;
 } segment_manager_t;
 
-typedef struct segment_manager_main_init_args_
-{
-  u64 baseva;
-  u64 size;
-} segment_manager_main_init_args_t;
-
 #define SEGMENT_MANAGER_INVALID_APP_INDEX ((u32) ~0)
 
 segment_manager_t *segment_manager_alloc (void);
 int segment_manager_init (segment_manager_t * sm);
+int segment_manager_init_first (segment_manager_t * sm);
 
 /**
  * Cleanup segment manager
@@ -109,6 +104,8 @@ u32 segment_manager_index (segment_manager_t * sm);
 int segment_manager_add_segment (segment_manager_t * sm, uword segment_size);
 void segment_manager_del_segment (segment_manager_t * sm,
 				  fifo_segment_t * fs);
+void segment_manager_lock_and_del_segment (segment_manager_t * sm,
+					   u32 fs_index);
 fifo_segment_t *segment_manager_get_segment (segment_manager_t * sm,
 					     u32 segment_index);
 fifo_segment_t *segment_manager_get_segment_w_handle (u64 sh);
@@ -163,7 +160,7 @@ void segment_manager_app_detach (segment_manager_t * sm);
 void segment_manager_del_sessions (segment_manager_t * sm);
 void segment_manager_format_sessions (segment_manager_t * sm, int verbose);
 
-void segment_manager_main_init (segment_manager_main_init_args_t * a);
+void segment_manager_main_init (void);
 
 segment_manager_props_t *segment_manager_props_init (segment_manager_props_t *
 						     sm);

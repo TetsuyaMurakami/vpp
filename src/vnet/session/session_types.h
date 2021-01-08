@@ -22,6 +22,7 @@
 #define SESSION_INVALID_INDEX ((u32)~0)
 #define SESSION_INVALID_HANDLE ((u64)~0)
 #define SESSION_CTRL_MSG_MAX_SIZE 86
+#define SESSION_NODE_FRAME_SIZE 128
 
 #define foreach_session_endpoint_fields				\
   foreach_transport_endpoint_cfg_fields				\
@@ -494,6 +495,9 @@ typedef enum session_error_
   foreach_session_error
 #undef _
 } session_error_t;
+
+#define SESSION_CLI_ID_LEN "60"
+#define SESSION_CLI_STATE_LEN "15"
 
 /* Maintained for compatibility. Will be deprecated */
 #define SESSION_ERROR_SEG_CREATE SESSION_E_SEG_CREATE

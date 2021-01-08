@@ -20,7 +20,7 @@ class TestSession(VppTestCase):
     def setUp(self):
         super(TestSession, self).setUp()
 
-        self.vapi.session_enable_disable(is_enabled=1)
+        self.vapi.session_enable_disable(is_enable=1)
         self.create_loopback_interfaces(2)
 
         table_id = 0
@@ -49,7 +49,7 @@ class TestSession(VppTestCase):
             i.admin_down()
 
         super(TestSession, self).tearDown()
-        self.vapi.session_enable_disable(is_enabled=1)
+        self.vapi.session_enable_disable(is_enable=1)
 
     def test_segment_manager_alloc(self):
         """ Session Segment Manager Multiple Segment Allocation """
@@ -102,7 +102,7 @@ class TestSessionUnitTests(VppTestCase):
 
     def setUp(self):
         super(TestSessionUnitTests, self).setUp()
-        self.vapi.session_enable_disable(is_enabled=1)
+        self.vapi.session_enable_disable(is_enable=1)
 
     def test_session(self):
         """ Session Unit Tests """
@@ -114,11 +114,15 @@ class TestSessionUnitTests(VppTestCase):
 
     def tearDown(self):
         super(TestSessionUnitTests, self).tearDown()
-        self.vapi.session_enable_disable(is_enabled=0)
+        self.vapi.session_enable_disable(is_enable=0)
 
 
 class TestSvmFifoUnitTests(VppTestCase):
     """ SVM Fifo Unit Tests Case """
+
+    @classmethod
+    def force_solo(cls):
+        return True
 
     @classmethod
     def setUpClass(cls):

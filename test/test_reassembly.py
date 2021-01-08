@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import six
 import unittest
 from random import shuffle, choice, randrange
 
@@ -95,7 +94,7 @@ class TestIPv4Reassembly(VppTestCase):
     def create_fragments(cls):
         infos = cls._packet_infos
         cls.pkt_infos = []
-        for index, info in six.iteritems(infos):
+        for index, info in infos.items():
             p = info.data
             # cls.logger.debug(ppp("Packet:",
             #                      p.__class__(scapy.compat.raw(p))))
@@ -170,6 +169,21 @@ class TestIPv4Reassembly(VppTestCase):
         packets = self.dst_if.get_capture(len(self.pkt_infos))
         self.verify_capture(packets)
         self.src_if.assert_nothing_captured()
+
+    def test_verify_clear_trace_mid_reassembly(self):
+        """ verify clear trace works mid-reassembly """
+
+        self.pg_enable_capture()
+        self.src_if.add_stream(self.fragments_200[0:-1])
+        self.pg_start()
+
+        self.logger.debug(self.vapi.cli("show trace"))
+        self.vapi.cli("clear trace")
+
+        self.src_if.add_stream(self.fragments_200[-1])
+        self.pg_start()
+        packets = self.dst_if.get_capture(len(self.pkt_infos))
+        self.verify_capture(packets)
 
     def test_reversed(self):
         """ reverse order reassembly """
@@ -589,6 +603,42 @@ class TestIPv4SVReassembly(VppTestCase):
             self.assertEqual(sent[IP].dst, recvd[IP].dst)
             self.assertEqual(sent[Raw].payload, recvd[Raw].payload)
 
+    def test_verify_clear_trace_mid_reassembly(self):
+        """ verify clear trace works mid-reassembly """
+        payload_len = 1000
+        payload = ""
+        counter = 0
+        while len(payload) < payload_len:
+            payload += "%u " % counter
+            counter += 1
+
+        p = (Ether(dst=self.src_if.local_mac, src=self.src_if.remote_mac) /
+             IP(id=1, src=self.src_if.remote_ip4,
+                dst=self.dst_if.remote_ip4) /
+             UDP(sport=1234, dport=5678) /
+             Raw(payload))
+        fragments = fragment_rfc791(p, payload_len/4)
+
+        self.pg_enable_capture()
+        self.src_if.add_stream(fragments[1])
+        self.pg_start()
+
+        self.logger.debug(self.vapi.cli("show trace"))
+        self.vapi.cli("clear trace")
+
+        self.pg_enable_capture()
+        self.src_if.add_stream(fragments[0])
+        self.pg_start()
+        self.dst_if.get_capture(2)
+
+        self.logger.debug(self.vapi.cli("show trace"))
+        self.vapi.cli("clear trace")
+
+        self.pg_enable_capture()
+        self.src_if.add_stream(fragments[2:])
+        self.pg_start()
+        self.dst_if.get_capture(len(fragments[2:]))
+
     def test_timeout(self):
         """ reassembly timeout """
         payload_len = 1000
@@ -811,7 +861,7 @@ class TestIPv4MWReassembly(VppTestCase):
     def create_fragments(cls):
         infos = cls._packet_infos
         cls.pkt_infos = []
-        for index, info in six.iteritems(infos):
+        for index, info in infos.items():
             p = info.data
             # cls.logger.debug(ppp("Packet:",
             #                      p.__class__(scapy.compat.raw(p))))
@@ -986,7 +1036,7 @@ class TestIPv6Reassembly(VppTestCase):
     def create_fragments(cls):
         infos = cls._packet_infos
         cls.pkt_infos = []
-        for index, info in six.iteritems(infos):
+        for index, info in infos.items():
             p = info.data
             # cls.logger.debug(ppp("Packet:",
             #                      p.__class__(scapy.compat.raw(p))))
@@ -1073,6 +1123,21 @@ class TestIPv6Reassembly(VppTestCase):
         self.pg_start()
         self.src_if.assert_nothing_captured()
         self.dst_if.assert_nothing_captured()
+
+    def test_verify_clear_trace_mid_reassembly(self):
+        """ verify clear trace works mid-reassembly """
+
+        self.pg_enable_capture()
+        self.src_if.add_stream(self.fragments_400[0:-1])
+        self.pg_start()
+
+        self.logger.debug(self.vapi.cli("show trace"))
+        self.vapi.cli("clear trace")
+
+        self.src_if.add_stream(self.fragments_400[-1])
+        self.pg_start()
+        packets = self.dst_if.get_capture(len(self.pkt_infos))
+        self.verify_capture(packets)
 
     def test_reversed(self):
         """ reverse order reassembly """
@@ -1444,7 +1509,7 @@ class TestIPv6MWReassembly(VppTestCase):
     def create_fragments(cls):
         infos = cls._packet_infos
         cls.pkt_infos = []
-        for index, info in six.iteritems(infos):
+        for index, info in infos.items():
             p = info.data
             # cls.logger.debug(ppp("Packet:",
             #                      p.__class__(scapy.compat.raw(p))))
@@ -1636,6 +1701,41 @@ class TestIPv6SVReassembly(VppTestCase):
             self.assertEqual(sent[IPv6].dst, recvd[IPv6].dst)
             self.assertEqual(sent[Raw].payload, recvd[Raw].payload)
 
+    def test_verify_clear_trace_mid_reassembly(self):
+        """ verify clear trace works mid-reassembly """
+        payload_len = 1000
+        payload = ""
+        counter = 0
+        while len(payload) < payload_len:
+            payload += "%u " % counter
+            counter += 1
+
+        p = (Ether(dst=self.src_if.local_mac, src=self.src_if.remote_mac) /
+             IPv6(src=self.src_if.remote_ip6, dst=self.dst_if.remote_ip6) /
+             UDP(sport=1234, dport=5678) /
+             Raw(payload))
+        fragments = fragment_rfc8200(p, 1, payload_len/4)
+
+        self.pg_enable_capture()
+        self.src_if.add_stream(fragments[1])
+        self.pg_start()
+
+        self.logger.debug(self.vapi.cli("show trace"))
+        self.vapi.cli("clear trace")
+
+        self.pg_enable_capture()
+        self.src_if.add_stream(fragments[0])
+        self.pg_start()
+        self.dst_if.get_capture(2)
+
+        self.logger.debug(self.vapi.cli("show trace"))
+        self.vapi.cli("clear trace")
+
+        self.pg_enable_capture()
+        self.src_if.add_stream(fragments[2:])
+        self.pg_start()
+        self.dst_if.get_capture(len(fragments[2:]))
+
     def test_timeout(self):
         """ reassembly timeout """
         payload_len = 1000
@@ -1782,7 +1882,7 @@ class TestIPv4ReassemblyLocalNode(VppTestCase):
     def create_fragments(cls):
         infos = cls._packet_infos
         cls.pkt_infos = []
-        for index, info in six.iteritems(infos):
+        for index, info in infos.items():
             p = info.data
             # cls.logger.debug(ppp("Packet:",
             #                      p.__class__(scapy.compat.raw(p))))
@@ -1973,7 +2073,7 @@ class TestFIFReassembly(VppTestCase):
             self.extend_packet(p, size, self.padding)
             info.data = p[IP]  # use only IP part, without ethernet header
 
-        fragments = [x for _, p in six.iteritems(self._packet_infos)
+        fragments = [x for _, p in self._packet_infos.items()
                      for x in fragment_rfc791(p.data, 400)]
 
         encapped_fragments = \
@@ -2038,7 +2138,7 @@ class TestFIFReassembly(VppTestCase):
             self.extend_packet(p, size, self.padding)
             info.data = p[IPv6]  # use only IPv6 part, without ethernet header
 
-        fragments = [x for _, i in six.iteritems(self._packet_infos)
+        fragments = [x for _, i in self._packet_infos.items()
                      for x in fragment_rfc8200(
                          i.data, i.index, 400)]
 

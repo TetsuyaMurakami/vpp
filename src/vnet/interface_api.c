@@ -262,8 +262,8 @@ send_sw_interface_details (vpe_api_main_t * am,
       ethernet_interface_t *ei;
 
       ei = pool_elt_at_index (em->interfaces, hi->hw_instance);
-      ASSERT (sizeof (mp->l2_address) >= sizeof (ei->address));
-      mac_address_encode ((mac_address_t *) ei->address, mp->l2_address);
+      ASSERT (sizeof (mp->l2_address) >= sizeof (ei->address.mac));
+      mac_address_encode (&ei->address.mac, mp->l2_address);
     }
   else if (swif->sup_sw_if_index != swif->sw_if_index)
     {
@@ -367,8 +367,8 @@ vl_api_sw_interface_dump_t_handler (vl_api_sw_interface_dump_t * mp)
 
   char *strcasestr (char *, char *);	/* lnx hdr file botch */
   /* *INDENT-OFF* */
-  pool_foreach (swif, im->sw_interfaces,
-  ({
+  pool_foreach (swif, im->sw_interfaces)
+   {
     if (!vnet_swif_is_api_visible (swif))
         continue;
     vec_reset_length(name);
@@ -379,7 +379,7 @@ vl_api_sw_interface_dump_t_handler (vl_api_sw_interface_dump_t * mp)
 	continue;
 
     send_sw_interface_details (am, rp, swif, name, mp->context);
-  }));
+  }
   /* *INDENT-ON* */
 
   vec_free (name);
@@ -789,12 +789,12 @@ link_state_process (vlib_main_t * vm,
 	    continue;
 
           /* *INDENT-OFF* */
-          pool_foreach(reg, vam->interface_events_registrations,
-          ({
+          pool_foreach (reg, vam->interface_events_registrations)
+           {
             vl_reg = vl_api_client_index_to_registration (reg->client_index);
             if (vl_reg)
 	      send_sw_interface_event (vam, reg, vl_reg, i, event_by_sw_if_index[i]);
-          }));
+          }
           /* *INDENT-ON* */
 	}
       vec_reset_length (event_by_sw_if_index);
@@ -993,7 +993,7 @@ static void vl_api_sw_interface_get_mac_address_t_handler
   rmp->context = mp->context;
   rmp->retval = htonl (rv);
   if (!rv && eth_if)
-    mac_address_encode ((mac_address_t *) eth_if->address, rmp->mac_address);
+    mac_address_encode (&eth_if->address.mac, rmp->mac_address);
   vl_api_send_msg (reg, (u8 *) rmp);
 }
 
@@ -1006,7 +1006,7 @@ static void vl_api_sw_interface_set_rx_mode_t_handler
   vnet_sw_interface_t *si;
   clib_error_t *error;
   int rv = 0;
-  vnet_hw_interface_rx_mode rx_mode;
+  vnet_hw_if_rx_mode rx_mode;
 
   VALIDATE_SW_IF_INDEX (mp);
 
@@ -1017,12 +1017,11 @@ static void vl_api_sw_interface_set_rx_mode_t_handler
       goto bad_sw_if_index;
     }
 
-  rx_mode = (vnet_hw_interface_rx_mode) ntohl (mp->mode);
+  rx_mode = (vnet_hw_if_rx_mode) ntohl (mp->mode);
   error = set_hw_interface_change_rx_mode (vnm, si->hw_if_index,
 					   mp->queue_id_valid,
 					   ntohl (mp->queue_id),
-					   (vnet_hw_interface_rx_mode)
-					   rx_mode);
+					   (vnet_hw_if_rx_mode) rx_mode);
 
   if (error)
     {
@@ -1079,8 +1078,8 @@ static void vl_api_sw_interface_rx_placement_dump_t_handler
 
       /* *INDENT-OFF* */
       foreach_vlib_main (({
-        clib_bitmap_foreach (si, pn->sibling_bitmap,
-        ({
+        clib_bitmap_foreach (si, pn->sibling_bitmap)
+         {
           rt = vlib_node_get_runtime_data (this_vlib_main, si);
           vec_foreach (dq, rt->devices_and_queues)
             {
@@ -1089,7 +1088,7 @@ static void vl_api_sw_interface_rx_placement_dump_t_handler
               send_interface_rx_placement_details (am, reg, hw->sw_if_index, index,
                                           dq->queue_id, dq->mode, mp->context);
             }
-        }));
+        }
         index++;
       }));
       /* *INDENT-ON* */

@@ -36,7 +36,6 @@
 #include <vppinfra/bitmap.h>
 #include <vppinfra/fifo.h>
 #include <vppinfra/time.h>
-#include <vppinfra/mheap.h>
 #include <vppinfra/heap.h>
 #include <vppinfra/pool.h>
 #include <vppinfra/format.h>
@@ -330,15 +329,14 @@ svm_data_region_create (svm_map_region_args_t * a, svm_region_t * rp)
 	}
       close (fd);
       CLIB_MEM_UNPOISON (rp->data_base, map_size);
-      rp->backing_file = (char *) format (0, "%s\0", a->backing_file);
+      rp->backing_file = (char *) format (0, "%s%c", a->backing_file, 0);
       rp->flags |= SVM_FLAGS_FILE;
     }
 
   if (a->flags & SVM_FLAGS_MHEAP)
     {
-      rp->data_heap = create_mspace_with_base (rp->data_base,
-					       map_size, 1 /* locked */ );
-      mspace_disable_expand (rp->data_heap);
+      rp->data_heap = clib_mem_create_heap (rp->data_base, map_size,
+					    1 /* locked */ , "svm data");
 
       rp->flags |= SVM_FLAGS_MHEAP;
     }
@@ -487,12 +485,11 @@ svm_region_init_mapped_region (svm_map_region_args_t * a, svm_region_t * rp)
   rp->virtual_base = a->baseva;
   rp->virtual_size = a->size;
 
-  rp->region_heap = create_mspace_with_base
+  rp->region_heap = clib_mem_create_heap
     (uword_to_pointer (a->baseva + MMAP_PAGESIZE, void *),
      (a->pvt_heap_size !=
-      0) ? a->pvt_heap_size : SVM_PVT_MHEAP_SIZE, 1 /* locked */ );
-
-  mspace_disable_expand (rp->region_heap);
+      0) ? a->pvt_heap_size : SVM_PVT_MHEAP_SIZE, 1 /* locked */ ,
+     "svm region");
 
   oldheap = svm_push_pvt_heap (rp);
 
@@ -1291,10 +1288,10 @@ svm_client_scan (const char *root_path)
    * find_or_create.
    */
   /* *INDENT-OFF* */
-  pool_foreach (subp, mp->subregions, ({
+  pool_foreach (subp, mp->subregions)  {
         name = vec_dup (subp->subregion_name);
         vec_add1(svm_names, name);
-      }));
+      }
   /* *INDENT-ON* */
 
   pthread_mutex_unlock (&root_rp->mutex);

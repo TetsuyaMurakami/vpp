@@ -44,8 +44,8 @@ typedef enum
  _(DECRYPTION_FAILED, "ESP decryption failed")   \
  _(REPLAY, "SA replayed packet")	         \
  _(NOT_IP, "Not IP packet (dropped)")	         \
- _(ENQ_FAIL, "Enqueue failed (buffer full)")     \
- _(DISCARD, "Not enough crypto operations, discarding frame")  \
+ _(ENQ_FAIL, "Enqueue decrypt failed (queue full)")     \
+ _(DISCARD, "Not enough crypto operations")      \
  _(BAD_LEN, "Invalid ciphertext length")         \
  _(SESSION, "Failed to get crypto session")      \
  _(NOSUP, "Cipher/Auth not supported")
@@ -121,11 +121,12 @@ dpdk_esp_decrypt_inline (vlib_main_t * vm,
     {
       if (is_ip6)
 	vlib_node_increment_counter (vm, dpdk_esp6_decrypt_node.index,
-				     ESP_DECRYPT_ERROR_DISCARD, 1);
+				     ESP_DECRYPT_ERROR_DISCARD, n_left_from);
       else
 	vlib_node_increment_counter (vm, dpdk_esp4_decrypt_node.index,
-				     ESP_DECRYPT_ERROR_DISCARD, 1);
+				     ESP_DECRYPT_ERROR_DISCARD, n_left_from);
       /* Discard whole frame */
+      vlib_buffer_free (vm, from, n_left_from);
       return n_left_from;
     }
 
@@ -307,8 +308,7 @@ dpdk_esp_decrypt_inline (vlib_main_t * vm,
 	  cipher_len = payload_len;
 
 	  u8 *digest = vlib_buffer_get_tail (b0) - trunc_size;
-	  u64 digest_paddr =
-	    mb0->buf_physaddr + digest - ((u8 *) mb0->buf_addr);
+	  u64 digest_paddr = mb0->buf_iova + digest - ((u8 *) mb0->buf_addr);
 
 	  if (!is_aead && cipher_alg->alg == RTE_CRYPTO_CIPHER_AES_CBC)
 	    clib_memcpy_fast (icb, iv, 16);

@@ -46,6 +46,7 @@ typedef struct
   vat_main_t *vat_main;
 } ikev2_test_main_t;
 
+static const char *valid_chars = "a-zA-Z0-9_";
 ikev2_test_main_t ikev2_test_main;
 
 uword
@@ -135,7 +136,7 @@ MACRO_FORMAT (auth_method)
       s = format (s, " %s", id->data);
       break;
     case IKEV2_ID_TYPE_ID_IPV4_ADDR:
-      s = format (s, " %U", format_ip4_address, id->data);
+      s = format (s, " %U", format_ip_address, id->data);
       break;
     case IKEV2_ID_TYPE_ID_KEY_ID:
       s = format (s, " 0x%U", format_hex_bytes, id->data, id->data_len);
@@ -192,6 +193,47 @@ format_ikev2_sa_transform (u8 * s, va_list * args)
 }
 
 static int
+api_ikev2_profile_disable_natt (vat_main_t * vam)
+{
+  unformat_input_t *i = vam->input;
+  vl_api_ikev2_profile_disable_natt_t *mp;
+  u8 *name = 0;
+  int ret;
+
+  while (unformat_check_input (i) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (i, "%U", unformat_token, valid_chars, &name))
+	vec_add1 (name, 0);
+      else
+	{
+	  errmsg ("parse error '%U'", format_unformat_error, i);
+	  return -99;
+	}
+    }
+
+  if (!vec_len (name))
+    {
+      errmsg ("profile name must be specified");
+      return -99;
+    }
+
+  if (vec_len (name) > 64)
+    {
+      errmsg ("profile name too long");
+      return -99;
+    }
+
+  M (IKEV2_PROFILE_DISABLE_NATT, mp);
+
+  clib_memcpy (mp->name, name, vec_len (name));
+  vec_free (name);
+
+  S (mp);
+  W (ret);
+  return ret;
+}
+
+static int
 api_ikev2_profile_dump (vat_main_t * vam)
 {
   ikev2_test_main_t *ik = &ikev2_test_main;
@@ -225,7 +267,6 @@ static void vl_api_ikev2_profile_details_t_handler
 {
   vat_main_t *vam = ikev2_test_main.vat_main;
   vl_api_ikev2_profile_t *p = &mp->profile;
-  ip4_address_t start_addr, end_addr;
 
   fformat (vam->ofp, "profile %s\n", p->name);
 
@@ -256,21 +297,17 @@ static void vl_api_ikev2_profile_details_t_handler
 	       format_ikev2_id_type_and_data, &p->rem_id);
     }
 
-  ip4_address_decode (p->loc_ts.start_addr, &start_addr);
-  ip4_address_decode (p->loc_ts.end_addr, &end_addr);
   fformat (vam->ofp, "  local traffic-selector addr %U - %U port %u - %u"
 	   " protocol %u\n",
-	   format_ip4_address, &start_addr,
-	   format_ip4_address, &end_addr,
+	   format_ip_address, &p->loc_ts.start_addr,
+	   format_ip_address, &p->loc_ts.end_addr,
 	   clib_net_to_host_u16 (p->loc_ts.start_port),
 	   clib_net_to_host_u16 (p->loc_ts.end_port), p->loc_ts.protocol_id);
 
-  ip4_address_decode (p->rem_ts.start_addr, &start_addr);
-  ip4_address_decode (p->rem_ts.end_addr, &end_addr);
   fformat (vam->ofp, "  remote traffic-selector addr %U - %U port %u - %u"
 	   " protocol %u\n",
-	   format_ip4_address, &start_addr,
-	   format_ip4_address, &end_addr,
+	   format_ip_address, &p->rem_ts.start_addr,
+	   format_ip_address, &p->rem_ts.end_addr,
 	   clib_net_to_host_u16 (p->rem_ts.start_port),
 	   clib_net_to_host_u16 (p->rem_ts.end_port), p->rem_ts.protocol_id);
   u32 tun_itf = clib_net_to_host_u32 (p->tun_itf);
@@ -280,10 +317,13 @@ static void vl_api_ikev2_profile_details_t_handler
   u32 sw_if_index = clib_net_to_host_u32 (p->responder.sw_if_index);
   if (~0 != sw_if_index)
     fformat (vam->ofp, "  responder idx %d %U\n",
-	     sw_if_index, format_ip4_address, &p->responder.ip4);
+	     sw_if_index, format_ip_address, &p->responder.addr);
 
   if (p->udp_encap)
     fformat (vam->ofp, "  udp-encap\n");
+
+  if (p->natt_disabled)
+    fformat (vam->ofp, "  NAT-T disabled\n");
 
   u32 ipsec_over_udp_port = clib_net_to_host_u16 (p->ipsec_over_udp_port);
   if (ipsec_over_udp_port != IPSEC_UDP_PORT_NONE)
@@ -348,18 +388,18 @@ vl_api_ikev2_sa_details_t_handler (vl_api_ikev2_sa_details_t * mp)
 {
   vat_main_t *vam = ikev2_test_main.vat_main;
   vl_api_ikev2_sa_t *sa = &mp->sa;
-  ip4_address_t iaddr;
-  ip4_address_t raddr;
+  ip_address_t iaddr;
+  ip_address_t raddr;
   vl_api_ikev2_keys_t *k = &sa->keys;
   vl_api_ikev2_sa_t_endian (sa);
 
-  ip4_address_decode (sa->iaddr, &iaddr);
-  ip4_address_decode (sa->raddr, &raddr);
+  ip_address_decode2 (&sa->iaddr, &iaddr);
+  ip_address_decode2 (&sa->raddr, &raddr);
 
   fformat (vam->ofp, "profile index %d sa index: %d\n",
 	   mp->sa.profile_index, mp->sa.sa_index);
-  fformat (vam->ofp, " iip %U ispi %lx rip %U rspi %lx\n", format_ip4_address,
-	   &iaddr, sa->ispi, format_ip4_address, &raddr, sa->rspi);
+  fformat (vam->ofp, " iip %U ispi %lx rip %U rspi %lx\n", format_ip_address,
+	   &iaddr, sa->ispi, format_ip_address, &raddr, sa->rspi);
   fformat (vam->ofp, " %U ", format_ikev2_sa_transform, &sa->encryption);
   fformat (vam->ofp, "%U ", format_ikev2_sa_transform, &sa->prf);
   fformat (vam->ofp, "%U ", format_ikev2_sa_transform, &sa->integrity);
@@ -526,18 +566,17 @@ static void
 {
   vat_main_t *vam = ikev2_test_main.vat_main;
   vl_api_ikev2_ts_t *ts = &mp->ts;
-  ip4_address_t start_addr;
-  ip4_address_t end_addr;
+  ip_address_t start_addr, end_addr;
   vl_api_ikev2_ts_t_endian (ts);
 
-  ip4_address_decode (ts->start_addr, &start_addr);
-  ip4_address_decode (ts->end_addr, &end_addr);
+  ip_address_decode2 (&ts->start_addr, &start_addr);
+  ip_address_decode2 (&ts->end_addr, &end_addr);
 
   fformat (vam->ofp, " %s protocol_id %u addr "
 	   "%U - %U port %u - %u\n",
 	   ts->is_local, ts->protocol_id,
-	   format_ip4_address, &start_addr,
-	   format_ip4_address, &end_addr, ts->start_port, ts->end_port);
+	   format_ip_address, &start_addr,
+	   format_ip_address, &end_addr, ts->start_port, ts->end_port);
   vam->result_ready = 1;
 }
 
@@ -680,8 +719,6 @@ api_ikev2_profile_add_del (vat_main_t * vam)
   u8 *name = 0;
   int ret;
 
-  const char *valid_chars = "a-zA-Z0-9_";
-
   while (unformat_check_input (i) != UNFORMAT_END_OF_INPUT)
     {
       if (unformat (i, "del"))
@@ -728,8 +765,6 @@ api_ikev2_profile_set_auth (vat_main_t * vam)
   u32 auth_method = 0;
   u8 is_hex = 0;
   int ret;
-
-  const char *valid_chars = "a-zA-Z0-9_";
 
   while (unformat_check_input (i) != UNFORMAT_END_OF_INPUT)
     {
@@ -797,10 +832,8 @@ api_ikev2_profile_set_id (vat_main_t * vam)
   u8 *data = 0;
   u8 is_local = 0;
   u32 id_type = 0;
-  ip4_address_t ip4;
+  ip_address_t ip;
   int ret;
-
-  const char *valid_chars = "a-zA-Z0-9_";
 
   while (unformat_check_input (i) != UNFORMAT_END_OF_INPUT)
     {
@@ -808,10 +841,10 @@ api_ikev2_profile_set_id (vat_main_t * vam)
 	vec_add1 (name, 0);
       else if (unformat (i, "id_type %U", unformat_ikev2_id_type, &id_type))
 	;
-      else if (unformat (i, "id_data %U", unformat_ip4_address, &ip4))
+      else if (unformat (i, "id_data %U", unformat_ip_address, &ip))
 	{
-	  data = vec_new (u8, 4);
-	  clib_memcpy (data, ip4.as_u8, 4);
+	  data = vec_new (u8, ip_address_size (&ip));
+	  clib_memcpy (data, ip_addr_bytes (&ip), ip_address_size (&ip));
 	}
       else if (unformat (i, "id_data 0x%U", unformat_hex_string, &data))
 	;
@@ -875,13 +908,9 @@ api_ikev2_profile_set_ts (vat_main_t * vam)
   u8 *name = 0;
   u8 is_local = 0;
   u32 proto = 0, start_port = 0, end_port = (u32) ~ 0;
-  ip4_address_t start_addr, end_addr;
-
-  const char *valid_chars = "a-zA-Z0-9_";
+  ip_address_t start_addr, end_addr;
+  u8 start_addr_set = 0, end_addr_set = 0;
   int ret;
-
-  start_addr.as_u32 = 0;
-  end_addr.as_u32 = (u32) ~ 0;
 
   while (unformat_check_input (i) != UNFORMAT_END_OF_INPUT)
     {
@@ -894,10 +923,10 @@ api_ikev2_profile_set_ts (vat_main_t * vam)
       else if (unformat (i, "end_port %d", &end_port))
 	;
       else
-	if (unformat (i, "start_addr %U", unformat_ip4_address, &start_addr))
-	;
-      else if (unformat (i, "end_addr %U", unformat_ip4_address, &end_addr))
-	;
+	if (unformat (i, "start_addr %U", unformat_ip_address, &start_addr))
+	start_addr_set = 1;
+      else if (unformat (i, "end_addr %U", unformat_ip_address, &end_addr))
+	end_addr_set = 1;
       else if (unformat (i, "local"))
 	is_local = 1;
       else if (unformat (i, "remote"))
@@ -907,6 +936,12 @@ api_ikev2_profile_set_ts (vat_main_t * vam)
 	  errmsg ("parse error '%U'", format_unformat_error, i);
 	  return -99;
 	}
+    }
+
+  if (!start_addr_set || !end_addr_set)
+    {
+      errmsg ("missing start or end address");
+      return -99;
     }
 
   if (!vec_len (name))
@@ -927,8 +962,8 @@ api_ikev2_profile_set_ts (vat_main_t * vam)
   mp->ts.protocol_id = (u8) proto;
   mp->ts.start_port = clib_host_to_net_u16 ((u16) start_port);
   mp->ts.end_port = clib_host_to_net_u16 ((u16) end_port);
-  ip4_address_encode (&start_addr, mp->ts.start_addr);
-  ip4_address_encode (&end_addr, mp->ts.end_addr);
+  ip_address_encode2 (&start_addr, &mp->ts.start_addr);
+  ip_address_encode2 (&end_addr, &mp->ts.end_addr);
   clib_memcpy (mp->name, name, vec_len (name));
   vec_free (name);
 
@@ -986,8 +1021,6 @@ api_ikev2_profile_set_udp_encap (vat_main_t * vam)
   int ret;
   u8 *name = 0;
 
-  const char *valid_chars = "a-zA-Z0-9_";
-
   while (unformat_check_input (i) != UNFORMAT_END_OF_INPUT)
     {
       if (unformat (i, "%U udp-encap", unformat_token, valid_chars, &name))
@@ -1035,15 +1068,13 @@ api_ikev2_set_responder (vat_main_t * vam)
   int ret;
   u8 *name = 0;
   u32 sw_if_index = ~0;
-  ip4_address_t address;
-
-  const char *valid_chars = "a-zA-Z0-9_";
+  ip_address_t address;
 
   while (unformat_check_input (i) != UNFORMAT_END_OF_INPUT)
     {
       if (unformat
 	  (i, "%U interface %d address %U", unformat_token, valid_chars,
-	   &name, &sw_if_index, unformat_ip4_address, &address))
+	   &name, &sw_if_index, unformat_ip_address, &address))
 	vec_add1 (name, 0);
       else
 	{
@@ -1070,7 +1101,7 @@ api_ikev2_set_responder (vat_main_t * vam)
   vec_free (name);
 
   mp->responder.sw_if_index = clib_host_to_net_u32 (sw_if_index);
-  ip4_address_encode (&address, mp->responder.ip4);
+  ip_address_encode2 (&address, &mp->responder.addr);
 
   S (mp);
   W (ret);
@@ -1085,8 +1116,6 @@ api_ikev2_set_ike_transforms (vat_main_t * vam)
   int ret;
   u8 *name = 0;
   u32 crypto_alg, crypto_key_size, integ_alg, dh_group;
-
-  const char *valid_chars = "a-zA-Z0-9_";
 
   while (unformat_check_input (i) != UNFORMAT_END_OF_INPUT)
     {
@@ -1136,8 +1165,6 @@ api_ikev2_set_esp_transforms (vat_main_t * vam)
   u8 *name = 0;
   u32 crypto_alg, crypto_key_size, integ_alg;
 
-  const char *valid_chars = "a-zA-Z0-9_";
-
   while (unformat_check_input (i) != UNFORMAT_END_OF_INPUT)
     {
       if (unformat (i, "%U %d %d %d", unformat_token, valid_chars, &name,
@@ -1185,8 +1212,6 @@ api_ikev2_set_sa_lifetime (vat_main_t * vam)
   u64 lifetime, lifetime_maxdata;
   u32 lifetime_jitter, handover;
 
-  const char *valid_chars = "a-zA-Z0-9_";
-
   while (unformat_check_input (i) != UNFORMAT_END_OF_INPUT)
     {
       if (unformat (i, "%U %lu %u %u %lu", unformat_token, valid_chars, &name,
@@ -1233,8 +1258,6 @@ api_ikev2_initiate_sa_init (vat_main_t * vam)
   vl_api_ikev2_initiate_sa_init_t *mp;
   int ret;
   u8 *name = 0;
-
-  const char *valid_chars = "a-zA-Z0-9_";
 
   while (unformat_check_input (i) != UNFORMAT_END_OF_INPUT)
     {

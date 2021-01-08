@@ -20,8 +20,8 @@ teib_add (vlib_main_t * vm,
 	  unformat_input_t * input, vlib_cli_command_t * cmd)
 {
   unformat_input_t _line_input, *line_input = &_line_input;
-  ip46_address_t peer = ip46_address_initializer;
-  ip46_address_t nh = ip46_address_initializer;
+  ip_address_t peer = ip_address_initializer;
+  ip_address_t nh = ip_address_initializer;
   u32 sw_if_index, nh_table_id;
   clib_error_t *error = NULL;
   int rv;
@@ -38,9 +38,9 @@ teib_add (vlib_main_t * vm,
       if (unformat (line_input, "%U", unformat_vnet_sw_interface,
 		    vnet_get_main (), &sw_if_index))
 	;
-      else if (unformat (line_input, "peer %U", unformat_ip46_address, &peer))
+      else if (unformat (line_input, "peer %U", unformat_ip_address, &peer))
 	;
-      else if (unformat (line_input, "nh %U", unformat_ip46_address, &nh))
+      else if (unformat (line_input, "nh %U", unformat_ip_address, &nh))
 	;
       else if (unformat (line_input, "nh-table-id %d", &nh_table_id))
 	;
@@ -58,13 +58,13 @@ teib_add (vlib_main_t * vm,
 				 format_unformat_error, line_input);
       goto done;
     }
-  if (ip46_address_is_zero (&peer))
+  if (ip_address_is_zero (&peer))
     {
       error = clib_error_return (0, "peer required'",
 				 format_unformat_error, line_input);
       goto done;
     }
-  if (ip46_address_is_zero (&nh))
+  if (ip_address_is_zero (&nh))
     {
       error = clib_error_return (0, "next-hop required'",
 				 format_unformat_error, line_input);
@@ -75,8 +75,7 @@ teib_add (vlib_main_t * vm,
 
   if (rv)
     {
-      error = clib_error_return_code (NULL, rv, 0,
-				      "NRHP error",
+      error = clib_error_return_code (NULL, rv, 0, "TEIB error",
 				      format_unformat_error, line_input);
     }
 
@@ -99,7 +98,7 @@ teib_del (vlib_main_t * vm,
 	  unformat_input_t * input, vlib_cli_command_t * cmd)
 {
   unformat_input_t _line_input, *line_input = &_line_input;
-  ip46_address_t peer = ip46_address_initializer;
+  ip_address_t peer = ip_address_initializer;
   clib_error_t *error = NULL;
   u32 sw_if_index;
   int rv;
@@ -115,7 +114,7 @@ teib_del (vlib_main_t * vm,
       if (unformat (line_input, "%U", unformat_vnet_sw_interface,
 		    vnet_get_main (), &sw_if_index))
 	;
-      else if (unformat (line_input, "peer %U", unformat_ip46_address, &peer))
+      else if (unformat (line_input, "peer %U", unformat_ip_address, &peer))
 	;
       else
 	{
@@ -130,7 +129,7 @@ teib_del (vlib_main_t * vm,
       error = clib_error_return (0, "interface required'",
 				 format_unformat_error, line_input);
     }
-  if (ip46_address_is_zero (&peer))
+  if (ip_address_is_zero (&peer))
     {
       error = clib_error_return (0, "peer required'",
 				 format_unformat_error, line_input);
@@ -141,8 +140,7 @@ teib_del (vlib_main_t * vm,
 
   if (rv)
     {
-      error = clib_error_return_code (NULL, rv, 0,
-				      "NRHP error",
+      error = clib_error_return_code (NULL, rv, 0, "TEIB error",
 				      format_unformat_error, line_input);
     }
 

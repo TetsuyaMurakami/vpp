@@ -180,12 +180,13 @@ app_worker_alloc_segment_manager (app_worker_t * app_wrk)
     {
       sm = segment_manager_get (app_wrk->first_segment_manager);
       app_wrk->first_segment_manager_in_use = 1;
-      return sm;
     }
-
-  sm = segment_manager_alloc ();
+  else
+    {
+      sm = segment_manager_alloc ();
+    }
   sm->app_wrk_index = app_wrk->wrk_index;
-
+  segment_manager_init (sm);
   return sm;
 }
 
@@ -199,10 +200,10 @@ app_worker_alloc_session_fifos (segment_manager_t * sm, session_t * s)
 						 &rx_fifo, &tx_fifo)))
     return rv;
 
-  rx_fifo->master_session_index = s->session_index;
+  rx_fifo->shr->master_session_index = s->session_index;
   rx_fifo->master_thread_index = s->thread_index;
 
-  tx_fifo->master_session_index = s->session_index;
+  tx_fifo->shr->master_session_index = s->session_index;
   tx_fifo->master_thread_index = s->thread_index;
 
   s->rx_fifo = rx_fifo;
@@ -387,17 +388,15 @@ app_worker_init_connected (app_worker_t * app_wrk, session_t * s)
   application_t *app = application_get (app_wrk->app_index);
   segment_manager_t *sm;
 
-  /* Allocate fifos for session, unless the app is a builtin proxy */
-  if (!application_is_builtin_proxy (app))
-    {
-      sm = app_worker_get_connect_segment_manager (app_wrk);
-      return app_worker_alloc_session_fifos (sm, s);
-    }
-
   if (app->cb_fns.fifo_tuning_callback)
     s->flags |= SESSION_F_CUSTOM_FIFO_TUNING;
 
-  return 0;
+  /* Allocate fifos for session, unless the app is a builtin proxy */
+  if (application_is_builtin_proxy (app))
+    return 0;
+
+  sm = app_worker_get_connect_segment_manager (app_wrk);
+  return app_worker_alloc_session_fifos (sm, s);
 }
 
 int
@@ -712,7 +711,7 @@ app_send_io_evt_rx (app_worker_t * app_wrk, session_t * s)
 
   msg = svm_msg_q_alloc_msg_w_ring (mq, SESSION_MQ_IO_EVT_RING);
   evt = (session_event_t *) svm_msg_q_msg_data (mq, &msg);
-  evt->session_index = s->rx_fifo->client_session_index;
+  evt->session_index = s->rx_fifo->shr->client_session_index;
   evt->event_type = SESSION_IO_EVT_RX;
 
   (void) svm_fifo_set_event (s->rx_fifo);
@@ -751,7 +750,7 @@ app_send_io_evt_tx (app_worker_t * app_wrk, session_t * s)
   msg = svm_msg_q_alloc_msg_w_ring (mq, SESSION_MQ_IO_EVT_RING);
   evt = (session_event_t *) svm_msg_q_msg_data (mq, &msg);
   evt->event_type = SESSION_IO_EVT_TX;
-  evt->session_index = s->tx_fifo->client_session_index;
+  evt->session_index = s->tx_fifo->shr->client_session_index;
 
   svm_msg_q_add_and_unlock (mq, &msg);
   return 0;
@@ -793,10 +792,10 @@ format_app_worker_listener (u8 * s, va_list * args)
   if (!app_wrk)
     {
       if (verbose)
-	s = format (s, "%-40s%-25s%=10s%-15s%-15s%-10s", "Connection", "App",
+	s = format (s, "%-40s%-25s%-10s%-15s%-15s%-10s", "Connection", "App",
 		    "Wrk", "API Client", "ListenerID", "SegManager");
       else
-	s = format (s, "%-40s%-25s%=10s", "Connection", "App", "Wrk");
+	s = format (s, "%-40s%-25s%-10s", "Connection", "App", "Wrk");
 
       return s;
     }
@@ -809,12 +808,14 @@ format_app_worker_listener (u8 * s, va_list * args)
     {
       u8 *buf;
       buf = format (0, "%u(%u)", app_wrk->wrk_map_index, app_wrk->wrk_index);
-      s = format (s, "%-40s%-25s%=10v%-15u%-15u%-10u", str, app_name,
+      s = format (s, "%-40v%-25v%-10v%-15u%-15u%-10u", str, app_name,
 		  buf, app_wrk->api_client_index, handle, sm_index);
       vec_free (buf);
     }
   else
-    s = format (s, "%-40s%-25s%=10u", str, app_name, app_wrk->wrk_map_index);
+    s = format (s, "%-40v%-25v%=10u", str, app_name, app_wrk->wrk_map_index);
+
+  vec_free (str);
 
   return s;
 }

@@ -60,7 +60,7 @@ pmalloc_validate_numa_node (u32 * numa_node)
   return 0;
 }
 
-int
+__clib_export int
 clib_pmalloc_init (clib_pmalloc_main_t * pm, uword base_addr, uword size)
 {
   uword base, pagesize;
@@ -70,11 +70,10 @@ clib_pmalloc_init (clib_pmalloc_main_t * pm, uword base_addr, uword size)
 
   pagesize = clib_mem_get_default_hugepage_size ();
   pm->def_log2_page_sz = min_log2 (pagesize);
-  pm->sys_log2_page_sz = min_log2 (sysconf (_SC_PAGESIZE));
   pm->lookup_log2_page_sz = pm->def_log2_page_sz;
 
   /* check if pagemap is accessible */
-  pt = clib_mem_vm_get_paddr (&pt, pm->sys_log2_page_sz, 1);
+  pt = clib_mem_vm_get_paddr (&pt, CLIB_MEM_PAGE_SZ_DEFAULT, 1);
   if (pt == 0 || pt[0] == 0)
     pm->flags |= CLIB_PMALLOC_F_NO_PAGEMAP;
 
@@ -223,12 +222,12 @@ pmalloc_update_lookup_table (clib_pmalloc_main_t * pm, u32 first, u32 count)
     {
       va = pointer_to_uword (pm->base) + (p << pm->lookup_log2_page_sz);
       pa = 0;
-      seek = (va >> pm->sys_log2_page_sz) * sizeof (pa);
+      seek = (va >> clib_mem_get_log2_page_size ()) * sizeof (pa);
       if (fd != -1 && lseek (fd, seek, SEEK_SET) == seek &&
 	  read (fd, &pa, sizeof (pa)) == (sizeof (pa)) &&
 	  pa & (1ULL << 63) /* page present bit */ )
 	{
-	  pa = (pa & pow2_mask (55)) << pm->sys_log2_page_sz;
+	  pa = (pa & pow2_mask (55)) << clib_mem_get_log2_page_size ();
 	}
       pm->lookup_table[p] = va - pa;
       p++;
@@ -258,7 +257,7 @@ pmalloc_map_pages (clib_pmalloc_main_t * pm, clib_pmalloc_arena_t * a,
       return 0;
     }
 
-  if (a->log2_subpage_sz != pm->sys_log2_page_sz)
+  if (a->log2_subpage_sz != clib_mem_get_log2_page_size ())
     {
       pm->error = clib_sysfs_prealloc_hugepages (numa_node,
 						 a->log2_subpage_sz, n_pages);
@@ -289,10 +288,7 @@ pmalloc_map_pages (clib_pmalloc_main_t * pm, clib_pmalloc_arena_t * a,
   if (a->flags & CLIB_PMALLOC_ARENA_F_SHARED_MEM)
     {
       mmap_flags |= MAP_SHARED;
-      if (a->log2_subpage_sz != pm->sys_log2_page_sz)
-	pm->error = clib_mem_create_hugetlb_fd ((char *) a->name, &a->fd);
-      else
-	pm->error = clib_mem_create_fd ((char *) a->name, &a->fd);
+      a->fd = clib_mem_vm_create_fd (a->log2_subpage_sz, "%s", a->name);
       if (a->fd == -1)
 	goto error;
       if ((ftruncate (a->fd, size)) == -1)
@@ -300,7 +296,7 @@ pmalloc_map_pages (clib_pmalloc_main_t * pm, clib_pmalloc_arena_t * a,
     }
   else
     {
-      if (a->log2_subpage_sz != pm->sys_log2_page_sz)
+      if (a->log2_subpage_sz != clib_mem_get_log2_page_size ())
 	mmap_flags |= MAP_HUGETLB;
 
       mmap_flags |= MAP_PRIVATE | MAP_ANONYMOUS;
@@ -318,7 +314,8 @@ pmalloc_map_pages (clib_pmalloc_main_t * pm, clib_pmalloc_arena_t * a,
       goto error;
     }
 
-  if (a->log2_subpage_sz != pm->sys_log2_page_sz && mlock (va, size) != 0)
+  if (a->log2_subpage_sz != clib_mem_get_log2_page_size () &&
+      mlock (va, size) != 0)
     {
       pm->error = clib_error_return_unix (0, "Unable to lock pages");
       goto error;
@@ -385,7 +382,7 @@ error:
   return 0;
 }
 
-void *
+__clib_export void *
 clib_pmalloc_create_shared_arena (clib_pmalloc_main_t * pm, char *name,
 				  uword size, u32 log2_page_sz, u32 numa_node)
 {
@@ -398,7 +395,7 @@ clib_pmalloc_create_shared_arena (clib_pmalloc_main_t * pm, char *name,
   if (log2_page_sz == 0)
     log2_page_sz = pm->def_log2_page_sz;
   else if (log2_page_sz != pm->def_log2_page_sz &&
-	   log2_page_sz != pm->sys_log2_page_sz)
+	   log2_page_sz != clib_mem_get_log2_page_size ())
     {
       pm->error = clib_error_create ("unsupported page size (%uKB)",
 				     1 << (log2_page_sz - 10));
@@ -487,7 +484,7 @@ clib_pmalloc_alloc_inline (clib_pmalloc_main_t * pm, clib_pmalloc_arena_t * a,
   return 0;
 }
 
-void *
+__clib_export void *
 clib_pmalloc_alloc_aligned_on_numa (clib_pmalloc_main_t * pm, uword size,
 				    uword align, u32 numa_node)
 {
@@ -531,7 +528,7 @@ pmalloc_chunks_mergeable (clib_pmalloc_arena_t * a, clib_pmalloc_page_t * pp,
   return 1;
 }
 
-void
+__clib_export void
 clib_pmalloc_free (clib_pmalloc_main_t * pm, void *va)
 {
   clib_pmalloc_page_t *pp;
@@ -584,24 +581,6 @@ clib_pmalloc_free (clib_pmalloc_main_t * pm, void *va)
 }
 
 static u8 *
-format_log2_page_size (u8 * s, va_list * va)
-{
-  u32 log2_page_sz = va_arg (*va, u32);
-
-  if (log2_page_sz >= 30)
-    return format (s, "%uGB", 1 << (log2_page_sz - 30));
-
-  if (log2_page_sz >= 20)
-    return format (s, "%uMB", 1 << (log2_page_sz - 20));
-
-  if (log2_page_sz >= 10)
-    return format (s, "%uKB", 1 << (log2_page_sz - 10));
-
-  return format (s, "%uB", 1 << log2_page_sz);
-}
-
-
-static u8 *
 format_pmalloc_page (u8 * s, va_list * va)
 {
   clib_pmalloc_page_t *pp = va_arg (*va, clib_pmalloc_page_t *);
@@ -638,7 +617,7 @@ format_pmalloc_page (u8 * s, va_list * va)
   return s;
 }
 
-u8 *
+__clib_export u8 *
 format_pmalloc (u8 * s, va_list * va)
 {
   clib_pmalloc_main_t *pm = va_arg (*va, clib_pmalloc_main_t *);
@@ -664,7 +643,7 @@ format_pmalloc (u8 * s, va_list * va)
 
 
   /* *INDENT-OFF* */
-  pool_foreach (a, pm->arenas,
+  pool_foreach (a, pm->arenas)
     {
       u32 *page_index;
       s = format (s, "\n%Uarena '%s' pages %u subpage-size %U numa-node %u",
@@ -680,13 +659,13 @@ format_pmalloc (u8 * s, va_list * va)
 	    s = format (s, "\n%U%U", format_white_space, indent + 4,
 			format_pmalloc_page, pp, verbose);
 	  }
-    });
+    }
   /* *INDENT-ON* */
 
   return s;
 }
 
-u8 *
+__clib_export u8 *
 format_pmalloc_map (u8 * s, va_list * va)
 {
   clib_pmalloc_main_t *pm = va_arg (*va, clib_pmalloc_main_t *);

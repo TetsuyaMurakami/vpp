@@ -19,7 +19,7 @@
 #include <vnet/api_errno.h>
 #include <vnet/ip/ip.h>
 #include <vnet/interface.h>
-#include <vnet/udp/udp.h>
+#include <vnet/udp/udp_local.h>
 
 #include <vnet/ipsec/ipsec.h>
 #include <vnet/ipsec/esp.h>
@@ -342,20 +342,20 @@ ipsec_set_async_mode (u32 is_enabled)
   ipsec_sa_t *sa;
 
   /* lock all SAs before change im->async_mode */
-  pool_foreach (sa, im->sad, (
-			       {
-			       fib_node_lock (&sa->node);
-			       }));
+  pool_foreach (sa, im->sad)
+  {
+    fib_node_lock (&sa->node);
+  }
 
   im->async_mode = is_enabled;
 
   /* change SA crypto op data before unlock them */
-  pool_foreach (sa, im->sad, (
-			       {
-			       sa->crypto_op_data = is_enabled ?
-			       sa->async_op_data.data : sa->sync_op_data.data;
-			       fib_node_unlock (&sa->node);
-			       }));
+  pool_foreach (sa, im->sad)
+  {
+    sa->crypto_op_data = is_enabled ?
+      sa->async_op_data.data : sa->sync_op_data.data;
+    fib_node_unlock (&sa->node);
+  }
 }
 
 static void
@@ -450,44 +450,44 @@ ipsec_init (vlib_main_t * vm)
   a->dec_op_id = VNET_CRYPTO_OP_NONE;
   a->alg = VNET_CRYPTO_ALG_NONE;
   a->iv_size = 0;
-  a->block_size = 1;
+  a->block_align = 1;
 
   a = im->crypto_algs + IPSEC_CRYPTO_ALG_DES_CBC;
   a->enc_op_id = VNET_CRYPTO_OP_DES_CBC_ENC;
   a->dec_op_id = VNET_CRYPTO_OP_DES_CBC_DEC;
   a->alg = VNET_CRYPTO_ALG_DES_CBC;
-  a->iv_size = a->block_size = 8;
+  a->iv_size = a->block_align = 8;
 
   a = im->crypto_algs + IPSEC_CRYPTO_ALG_3DES_CBC;
   a->enc_op_id = VNET_CRYPTO_OP_3DES_CBC_ENC;
   a->dec_op_id = VNET_CRYPTO_OP_3DES_CBC_DEC;
   a->alg = VNET_CRYPTO_ALG_3DES_CBC;
-  a->iv_size = a->block_size = 8;
+  a->iv_size = a->block_align = 8;
 
   a = im->crypto_algs + IPSEC_CRYPTO_ALG_AES_CBC_128;
   a->enc_op_id = VNET_CRYPTO_OP_AES_128_CBC_ENC;
   a->dec_op_id = VNET_CRYPTO_OP_AES_128_CBC_DEC;
   a->alg = VNET_CRYPTO_ALG_AES_128_CBC;
-  a->iv_size = a->block_size = 16;
+  a->iv_size = a->block_align = 16;
 
   a = im->crypto_algs + IPSEC_CRYPTO_ALG_AES_CBC_192;
   a->enc_op_id = VNET_CRYPTO_OP_AES_192_CBC_ENC;
   a->dec_op_id = VNET_CRYPTO_OP_AES_192_CBC_DEC;
   a->alg = VNET_CRYPTO_ALG_AES_192_CBC;
-  a->iv_size = a->block_size = 16;
+  a->iv_size = a->block_align = 16;
 
   a = im->crypto_algs + IPSEC_CRYPTO_ALG_AES_CBC_256;
   a->enc_op_id = VNET_CRYPTO_OP_AES_256_CBC_ENC;
   a->dec_op_id = VNET_CRYPTO_OP_AES_256_CBC_DEC;
   a->alg = VNET_CRYPTO_ALG_AES_256_CBC;
-  a->iv_size = a->block_size = 16;
+  a->iv_size = a->block_align = 16;
 
   a = im->crypto_algs + IPSEC_CRYPTO_ALG_AES_GCM_128;
   a->enc_op_id = VNET_CRYPTO_OP_AES_128_GCM_ENC;
   a->dec_op_id = VNET_CRYPTO_OP_AES_128_GCM_DEC;
   a->alg = VNET_CRYPTO_ALG_AES_128_GCM;
   a->iv_size = 8;
-  a->block_size = 16;
+  a->block_align = 1;
   a->icv_size = 16;
 
   a = im->crypto_algs + IPSEC_CRYPTO_ALG_AES_GCM_192;
@@ -495,7 +495,7 @@ ipsec_init (vlib_main_t * vm)
   a->dec_op_id = VNET_CRYPTO_OP_AES_192_GCM_DEC;
   a->alg = VNET_CRYPTO_ALG_AES_192_GCM;
   a->iv_size = 8;
-  a->block_size = 16;
+  a->block_align = 1;
   a->icv_size = 16;
 
   a = im->crypto_algs + IPSEC_CRYPTO_ALG_AES_GCM_256;
@@ -503,7 +503,7 @@ ipsec_init (vlib_main_t * vm)
   a->dec_op_id = VNET_CRYPTO_OP_AES_256_GCM_DEC;
   a->alg = VNET_CRYPTO_ALG_AES_256_GCM;
   a->iv_size = 8;
-  a->block_size = 16;
+  a->block_align = 1;
   a->icv_size = 16;
 
   vec_validate (im->integ_algs, IPSEC_INTEG_N_ALG - 1);

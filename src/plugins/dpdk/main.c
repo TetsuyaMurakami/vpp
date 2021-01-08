@@ -96,63 +96,9 @@ VLIB_INIT_FUNCTION (dpdk_main_init) =
 {
     .runs_after = VLIB_INITS("dpdk_init"),
 };
-/* *INDENT-ON* */
 
-
-clib_error_t *
-dpdk_early_init (vlib_main_t *vm)
-{
-  int fd = -1;
-  u64 *pt = 0;
-  clib_error_t *err = 0;
-  clib_mem_vm_alloc_t alloc = { 0 };
-
-  /* check if pagemap is accessible - if we get zero result
-     dpdk will not be able to get physical memory address and game is over
-     unless we have IOMMU */
-  pt = clib_mem_vm_get_paddr (&pt, min_log2 (sysconf (_SC_PAGESIZE)), 1);
-  if (pt && pt[0])
-    goto check_hugetlb;
-
-  if ((fd = open ("/dev/vfio/vfio", O_RDWR)) == -1)
-      goto error;
-
-  if (ioctl (fd, VFIO_GET_API_VERSION) != VFIO_API_VERSION)
-      goto error;
-
-  /* if we have type 1 IOMMU page map is not needed */
-  if (ioctl (fd, VFIO_CHECK_EXTENSION, VFIO_TYPE1_IOMMU) != 1)
-    goto error;
-
-check_hugetlb:
-  alloc.flags = CLIB_MEM_VM_F_SHARED | CLIB_MEM_VM_F_HUGETLB | CLIB_MEM_VM_F_HUGETLB_PREALLOC;
-  alloc.size = 1;
-  alloc.name = "dpdk_early_init";
-
-  if ((err = clib_mem_vm_ext_alloc (&alloc)))
-    {
-      clib_error_free (err);
-      goto error;
-    }
-  else
-    clib_mem_vm_ext_free (&alloc);
-
-  goto done;
-
-error:
-  err = clib_error_return (0, "access to physical devices is not allowed");
-
-done:
-  if (fd != -1)
-    close (fd);
-  vec_free (pt);
-  return err;
-}
-
-/* *INDENT-OFF* */
 VLIB_PLUGIN_REGISTER () = {
     .version = VPP_BUILD_VER,
     .description = "Data Plane Development Kit (DPDK)",
-    .early_init = "dpdk_early_init",
 };
 /* *INDENT-ON* */

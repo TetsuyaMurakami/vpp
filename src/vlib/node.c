@@ -47,8 +47,7 @@ vlib_get_node_by_name (vlib_main_t * vm, u8 * name)
   vlib_node_main_t *nm = &vm->node_main;
   uword *p;
   u8 *key = name;
-  if (!clib_mem_is_heap_object (vec_header (key, 0)))
-    key = format (0, "%s", key);
+  key = format (0, "%s", key);
   p = hash_get (nm->node_by_name, key);
   if (key != name)
     vec_free (key);
@@ -131,10 +130,10 @@ vlib_node_runtime_update (vlib_main_t * vm, u32 node_index, u32 next_index)
 	  pf->next_frame_index += n_insert;
       }
       /* *INDENT-OFF* */
-      pool_foreach (pf, nm->suspended_process_frames, ({
+      pool_foreach (pf, nm->suspended_process_frames)  {
 	  if (pf->next_frame_index != ~0 && pf->next_frame_index >= i)
 	    pf->next_frame_index += n_insert;
-      }));
+      }
       /* *INDENT-ON* */
 
       r->n_next_nodes = vec_len (node->next_nodes);
@@ -224,14 +223,14 @@ vlib_node_add_next_with_slot (vlib_main_t * vm,
     uword sib_node_index, sib_slot;
     vlib_node_t *sib_node;
     /* *INDENT-OFF* */
-    clib_bitmap_foreach (sib_node_index, node->sibling_bitmap, ({
+    clib_bitmap_foreach (sib_node_index, node->sibling_bitmap)  {
       sib_node = vec_elt (nm->nodes, sib_node_index);
       if (sib_node != node)
 	{
 	  sib_slot = vlib_node_add_next_with_slot (vm, sib_node_index, next_node_index, slot);
 	  ASSERT (sib_slot == slot);
 	}
-    }));
+    }
     /* *INDENT-ON* */
   }
 
@@ -296,7 +295,6 @@ register_node (vlib_main_t * vm, vlib_node_registration_t * r)
 {
   vlib_node_main_t *nm = &vm->node_main;
   vlib_node_t *n;
-  u32 page_size = clib_mem_get_page_size ();
   int i;
 
   if (CLIB_DEBUG > 0)
@@ -348,7 +346,10 @@ register_node (vlib_main_t * vm, vlib_node_registration_t * r)
 
   /* Node names must be unique. */
   {
-    vlib_node_t *o = vlib_get_node_by_name (vm, n->name);
+    /* vlib_get_node_by_name() expects NULL-terminated strings */
+    u8 *name = format (0, "%v%c", n->name, 0);
+    vlib_node_t *o = vlib_get_node_by_name (vm, name);
+    vec_free (name);
     if (o)
       clib_error ("more than one node named `%v'", n->name);
   }
@@ -379,7 +380,8 @@ register_node (vlib_main_t * vm, vlib_node_registration_t * r)
   _(validate_frame);
 
   /* Register error counters. */
-  vlib_register_errors (vm, n->index, r->n_errors, r->error_strings);
+  vlib_register_errors (vm, n->index, r->n_errors, r->error_strings,
+			r->error_counters);
   node_elog_init (vm, n->index);
 
   _(runtime_data_bytes);
@@ -407,36 +409,26 @@ register_node (vlib_main_t * vm, vlib_node_registration_t * r)
     if (n->type == VLIB_NODE_TYPE_PROCESS)
       {
 	vlib_process_t *p;
-	void *map;
-	uword log2_n_stack_bytes, stack_bytes;
-	int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
+	uword log2_n_stack_bytes;
 
 	log2_n_stack_bytes = clib_max (r->process_log2_n_stack_bytes,
 				       VLIB_PROCESS_LOG2_STACK_SIZE);
 	log2_n_stack_bytes = clib_max (log2_n_stack_bytes,
-				       min_log2 (page_size));
+				       clib_mem_get_log2_page_size ());
 
 	p = clib_mem_alloc_aligned (sizeof (p[0]), CLIB_CACHE_LINE_BYTES);
 	clib_memset (p, 0, sizeof (p[0]));
 	p->log2_n_stack_bytes = log2_n_stack_bytes;
 
-	stack_bytes = 1ULL << log2_n_stack_bytes;
-	/* map stack size + 2 extra guard pages */
-	map = mmap (0, stack_bytes + page_size, PROT_READ | PROT_WRITE,
-		    mmap_flags, -1, 0);
+	p->stack = clib_mem_vm_map_stack (1ULL << log2_n_stack_bytes,
+					  CLIB_MEM_PAGE_SZ_DEFAULT,
+					  "process stack: %U",
+					  format_vlib_node_name, vm,
+					  n->index);
 
-	if (map == MAP_FAILED)
+	if (p->stack == CLIB_MEM_VM_MAP_FAILED)
 	  clib_panic ("failed to allocate process stack (%d bytes)",
-		      stack_bytes);
-
-	/* skip the guard page */
-	p->stack = map + page_size;
-
-	mmap_flags |= MAP_FIXED;
-	map = mmap (map, page_size, PROT_NONE, mmap_flags, -1, 0);
-
-	if (map == MAP_FAILED)
-	  clib_unix_warning ("failed to create stack guard page");
+		      1ULL << log2_n_stack_bytes);
 
 	/* Process node's runtime index is really index into process
 	   pointer vector. */
@@ -635,7 +627,7 @@ vlib_node_main_init (vlib_main_t * vm)
 	  }
 
         /* *INDENT-OFF* */
-	clib_bitmap_foreach (si, sib->sibling_bitmap, ({
+	clib_bitmap_foreach (si, sib->sibling_bitmap)  {
 	      vlib_node_t * m = vec_elt (nm->nodes, si);
 
 	      /* Connect all of sibling's siblings to us. */
@@ -643,7 +635,7 @@ vlib_node_main_init (vlib_main_t * vm)
 
 	      /* Connect us to all of sibling's siblings. */
 	      n->sibling_bitmap = clib_bitmap_ori (n->sibling_bitmap, si);
-	    }));
+	    }
         /* *INDENT-ON* */
 
 	/* Connect sibling to us. */

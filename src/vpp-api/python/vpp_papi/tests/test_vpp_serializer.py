@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import unittest
-from vpp_papi.vpp_serializer import VPPType, VPPEnumType
+from vpp_papi.vpp_serializer import VPPType, VPPEnumType, VPPEnumFlagType
 from vpp_papi.vpp_serializer import VPPUnionType, VPPMessage
 from vpp_papi.vpp_serializer import VPPTypeAlias, VPPSerializerValueError
 from vpp_papi import MACAddress
@@ -46,7 +46,6 @@ class TestLimits(unittest.TestCase):
         self.assertEqual(size, 4 + len('foobar'))
         self.assertEqual(nt.name, 'foobar')
         self.assertEqual(len(nt.name), len('foobar'))
-
 
     def test_limit(self):
         limited_type = VPPType('limited_type_t',
@@ -105,6 +104,7 @@ class TestDefaults(unittest.TestCase):
         self.assertEqual(len(b), size)
         self.assertEqual(nt.e, 1)
 
+
 class TestAddType(unittest.TestCase):
 
     def test_union(self):
@@ -122,6 +122,9 @@ class TestAddType(unittest.TestCase):
         af = VPPEnumType('vl_api_address_family_t', [["ADDRESS_IP4", 0],
                                                      ["ADDRESS_IP6", 1],
                                                      {"enumtype": "u32"}])
+        aff = VPPEnumFlagType('vl_api_address_family_flag_t', [["ADDRESS_IP4", 0],
+                                                               ["ADDRESS_IP6", 1],
+                                                               {"enumtype": "u32"}])
         ip4 = VPPTypeAlias('vl_api_ip4_address_t', {'type': 'u8',
                                                     'length': 4})
         ip6 = VPPTypeAlias('vl_api_ip6_address_t', {'type': 'u8',
@@ -201,7 +204,6 @@ class TestAddType(unittest.TestCase):
                           [['vl_api_address_family_t', 'af'],
                            ['vl_api_address_union_t', 'un']])
 
-
         prefix = VPPType('vl_api_prefix_t',
                          [['vl_api_address_t', 'address'],
                           ['u8', 'len']])
@@ -273,7 +275,6 @@ class TestAddType(unittest.TestCase):
         nt, size = awp_type.unpack(b)
         self.assertTrue(isinstance(nt.address, IPv4Interface))
         self.assertEqual(str(nt.address), '1.2.3.4/24')
-
 
     def test_recursive_address(self):
         af = VPPEnumType('vl_api_address_family_t', [["ADDRESS_IP4", 0],
@@ -557,7 +558,6 @@ class TestAddType(unittest.TestCase):
 
         self.assertEqual(len(b), 20)
 
-
     def test_lisp(self):
         VPPEnumType('vl_api_eid_type_t',
                     [["EID_TYPE_API_PREFIX", 0],
@@ -607,6 +607,28 @@ class TestAddType(unittest.TestCase):
         nt, size = eid.unpack(b)
         self.assertEqual(str(nt.address.mac), 'aa:bb:cc:dd:ee:ff')
         self.assertIsNone(nt.address.prefix)
+
+
+class TestVppSerializerLogging(unittest.TestCase):
+
+    def test_logger(self):
+        # test logger name 'vpp_papi.serializer'
+        with self.assertRaises(VPPSerializerValueError) as ctx:
+            with self.assertLogs('vpp_papi.serializer', level='DEBUG') as cm:
+                u = VPPUnionType('vl_api_eid_address_t',
+                                 [["vl_api_prefix_t", "prefix"],
+                                  ["vl_api_mac_address_t", "mac"],
+                                  ["vl_api_nsh_t", "nsh"]])
+        self.assertEqual(cm.output, ["DEBUG:vpp_papi.serializer:Unknown union type vl_api_prefix_t"])
+
+        # test parent logger name 'vpp_papi'
+        with self.assertRaises(VPPSerializerValueError) as ctx:
+            with self.assertLogs('vpp_papi', level='DEBUG') as cm:
+                u = VPPUnionType('vl_api_eid_address_t',
+                                 [["vl_api_prefix_t", "prefix"],
+                                  ["vl_api_mac_address_t", "mac"],
+                                  ["vl_api_nsh_t", "nsh"]])
+        self.assertEqual(cm.output, ["DEBUG:vpp_papi.serializer:Unknown union type vl_api_prefix_t"])
 
 
 if __name__ == '__main__':

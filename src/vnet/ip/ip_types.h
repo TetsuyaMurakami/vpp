@@ -26,8 +26,6 @@ typedef enum ip_address_family_t_
 
 #define N_AF (AF_IP6+1)
 
-#define N_AF (AF_IP6+1)
-
 extern uword unformat_ip_address_family (unformat_input_t * input,
 					 va_list * args);
 extern u8 *format_ip_address_family (u8 * s, va_list * args);
@@ -40,8 +38,42 @@ extern fib_protocol_t ip_address_family_to_fib_proto (ip_address_family_t af);
 extern ip_address_family_t ip_address_family_from_fib_proto (fib_protocol_t
 							     fp);
 
+typedef enum ip_sub_address_family_t_
+{
+  SAFI_UNICAST,
+  SAFI_MULTICAST,
+} __clib_packed ip_sub_address_family_t;
+
+#define N_SAFI (SAFI_MULTICAST+1)
+
+extern uword unformat_ip_sub_address_family (unformat_input_t * input,
+					     va_list * args);
+extern u8 *format_ip_sub_address_family (u8 * s, va_list * args);
+
+#define FOR_EACH_IP_ADDRESS_SUB_FAMILY(_safi) \
+  for (_safi = SAFI_UNICAST; _safi <= SAFI_MULTICAST; _safi++)
+
 #define u8_ptr_add(ptr, index) (((u8 *)ptr) + index)
 #define u16_net_add(u, val) clib_host_to_net_u16(clib_net_to_host_u16(u) + (val))
+
+/**
+ * Locations in the IP switch path where features can be applied
+ */
+#define foreach_ip_feature_location                 \
+  _(INPUT, "input")                                 \
+  _(OUTPUT, "output")                               \
+  _(LOCAL, "local")                                 \
+  _(PUNT, "punt")                                   \
+  _(DROP, "drop")                                   \
+
+typedef enum ip_feature_location_t_
+{
+#define _(a,b) IP_FEATURE_##a,
+  foreach_ip_feature_location
+#undef _
+} __clib_packed ip_feature_location_t;
+
+#define N_IP_FEATURE_LOCATIONS (IP_FEATURE_DROP+1)
 
 /* *INDENT-OFF* */
 typedef struct ip_address
@@ -53,6 +85,7 @@ typedef struct ip_address
 
 #define IP_ADDRESS_V4_ALL_0S {.ip.ip4.as_u32 = 0, .version = AF_IP4}
 #define IP_ADDRESS_V6_ALL_0S {.ip.ip6.as_u64 = {0, 0}, .version = AF_IP6}
+#define ip_address_initializer IP_ADDRESS_V6_ALL_0S
 
 #define ip_addr_46(_a) (_a)->ip
 #define ip_addr_v4(_a) (_a)->ip.ip4
@@ -75,6 +108,8 @@ extern fib_protocol_t ip_address_to_46 (const ip_address_t * addr,
 					ip46_address_t * a);
 extern void ip_address_from_46 (const ip46_address_t * a,
 				fib_protocol_t fproto, ip_address_t * addr);
+extern void ip_address_increment (ip_address_t * ip);
+extern void ip_address_reset (ip_address_t * ip);
 
 /* *INDENT-OFF* */
 typedef struct ip_prefix

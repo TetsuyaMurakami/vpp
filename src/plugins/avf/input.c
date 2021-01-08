@@ -125,8 +125,7 @@ avf_rxq_refill (vlib_main_t * vm, vlib_node_runtime_t * node, avf_rxq_t * rxq,
       n_alloc -= 8;
     }
 
-  CLIB_MEMORY_STORE_BARRIER ();
-  *(rxq->qrx_tail) = slot;
+  clib_atomic_store_rel_n (rxq->qrx_tail, slot);
 }
 
 
@@ -254,6 +253,9 @@ avf_device_input_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 #ifdef CLIB_HAVE_VEC256
   u64x4 q1x4, or_q1x4 = { 0 };
   u64x4 dd_eop_mask4 = u64x4_splat (AVF_RXD_STATUS_DD | AVF_RXD_STATUS_EOP);
+#elif defined(CLIB_HAVE_VEC128)
+  u32x4 q1x4_lo, q1x4_hi, or_q1x4 = { 0 };
+  u32x4 dd_eop_mask4 = u32x4_splat (AVF_RXD_STATUS_DD | AVF_RXD_STATUS_EOP);
 #endif
 
   /* is there anything on the ring */
@@ -301,6 +303,29 @@ avf_device_input_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 
       or_q1x4 |= q1x4;
       u64x4_store_unaligned (q1x4, ptd->qw1s + n_rx_packets);
+#elif defined(CLIB_HAVE_VEC128)
+      if (n_rx_packets >= AVF_RX_VECTOR_SZ - 4 || next >= size - 4)
+	goto one_by_one;
+
+      q1x4_lo =
+	u32x4_gather ((void *) &d[0].qword[1], (void *) &d[1].qword[1],
+		      (void *) &d[2].qword[1], (void *) &d[3].qword[1]);
+
+      /* not all packets are ready or at least one of them is chained */
+      if (!u32x4_is_equal (q1x4_lo & dd_eop_mask4, dd_eop_mask4))
+	goto one_by_one;
+
+      q1x4_hi = u32x4_gather (
+	(void *) &d[0].qword[1] + 4, (void *) &d[1].qword[1] + 4,
+	(void *) &d[2].qword[1] + 4, (void *) &d[3].qword[1] + 4);
+
+      or_q1x4 |= q1x4_lo;
+      ptd->qw1s[n_rx_packets + 0] = (u64) q1x4_hi[0] << 32 | (u64) q1x4_lo[0];
+      ptd->qw1s[n_rx_packets + 1] = (u64) q1x4_hi[1] << 32 | (u64) q1x4_lo[1];
+      ptd->qw1s[n_rx_packets + 2] = (u64) q1x4_hi[2] << 32 | (u64) q1x4_lo[2];
+      ptd->qw1s[n_rx_packets + 3] = (u64) q1x4_hi[3] << 32 | (u64) q1x4_lo[3];
+#endif
+#if defined(CLIB_HAVE_VEC256) || defined(CLIB_HAVE_VEC128)
       vlib_buffer_copy_indices (bi, rxq->bufs + next, 4);
 
       /* next */
@@ -360,7 +385,7 @@ no_more_desc:
   rxq->next = next;
   rxq->n_enqueued -= n_rx_packets + n_tail_desc;
 
-#ifdef CLIB_HAVE_VEC256
+#if defined(CLIB_HAVE_VEC256) || defined(CLIB_HAVE_VEC128)
   or_qw1 |= or_q1x4[0] | or_q1x4[1] | or_q1x4[2] | or_q1x4[3];
 #endif
 
@@ -384,20 +409,24 @@ no_more_desc:
 
       while (n_trace && n_left)
 	{
-	  vlib_buffer_t *b;
-	  avf_input_trace_t *tr;
-	  b = vlib_get_buffer (vm, bi[0]);
-	  vlib_trace_buffer (vm, node, next_index, b, /* follow_chain */ 0);
-	  tr = vlib_add_trace (vm, node, b, sizeof (*tr));
-	  tr->next_index = next_index;
-	  tr->qid = qid;
-	  tr->hw_if_index = ad->hw_if_index;
-	  tr->qw1s[0] = ptd->qw1s[i];
-	  for (j = 1; j < AVF_RX_MAX_DESC_IN_CHAIN; j++)
-	    tr->qw1s[j] = ptd->tails[i].qw1s[j - 1];
+	  vlib_buffer_t *b = vlib_get_buffer (vm, bi[0]);
+	  if (PREDICT_TRUE
+	      (vlib_trace_buffer
+	       (vm, node, next_index, b, /* follow_chain */ 0)))
+	    {
+	      avf_input_trace_t *tr =
+		vlib_add_trace (vm, node, b, sizeof (*tr));
+	      tr->next_index = next_index;
+	      tr->qid = qid;
+	      tr->hw_if_index = ad->hw_if_index;
+	      tr->qw1s[0] = ptd->qw1s[i];
+	      for (j = 1; j < AVF_RX_MAX_DESC_IN_CHAIN; j++)
+		tr->qw1s[j] = ptd->tails[i].qw1s[j - 1];
+
+	      n_trace--;
+	    }
 
 	  /* next */
-	  n_trace--;
 	  n_left--;
 	  bi++;
 	  i++;
@@ -444,14 +473,13 @@ VLIB_NODE_FN (avf_input_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
 			       vlib_frame_t * frame)
 {
   u32 n_rx = 0;
-  avf_main_t *am = &avf_main;
   vnet_device_input_runtime_t *rt = (void *) node->runtime_data;
   vnet_device_and_queue_t *dq;
 
   foreach_device_and_queue (dq, rt->devices_and_queues)
   {
     avf_device_t *ad;
-    ad = vec_elt_at_index (am->devices, dq->dev_instance);
+    ad = avf_get_device (dq->dev_instance);
     if ((ad->flags & AVF_DEVICE_F_ADMIN_UP) == 0)
       continue;
     n_rx += avf_device_input_inline (vm, node, frame, ad, dq->queue_id);

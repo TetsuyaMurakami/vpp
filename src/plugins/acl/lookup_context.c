@@ -37,12 +37,12 @@ static u32 get_acl_user_id(acl_main_t *am, char *user_module_name, char *val1_la
 {
     acl_lookup_context_user_t *auser;
 
-    pool_foreach (auser, am->acl_users,
-    ({
+    pool_foreach (auser, am->acl_users)
+     {
       if (0 == strcmp(auser->user_module_name, user_module_name)) {
         return (auser - am->acl_users);
       }
-    }));
+    }
 
     pool_get(am->acl_users, auser);
     auser->user_module_name = user_module_name;
@@ -197,7 +197,6 @@ static void acl_plugin_put_lookup_context_index (u32 lc_index)
     return;
   }
 
-  void *oldheap = acl_plugin_set_heap ();
   acl_lookup_context_t *acontext = pool_elt_at_index(am->acl_lookup_contexts, lc_index);
 
   u32 index = vec_search(am->acl_users[acontext->context_user_id].lookup_contexts, lc_index);
@@ -208,7 +207,6 @@ static void acl_plugin_put_lookup_context_index (u32 lc_index)
   unlock_acl_vec(lc_index, acontext->acl_indices);
   vec_free(acontext->acl_indices);
   pool_put(am->acl_lookup_contexts, acontext);
-  clib_mem_set_heap (oldheap);
 }
 
 /*
@@ -233,8 +231,6 @@ static int acl_plugin_set_acl_vec_for_context (u32 lc_index, u32 *acl_list)
     clib_warning("BUG: lc_index %d is not valid", lc_index);
     return -1;
   }
-  void *oldheap = acl_plugin_set_heap ();
-
   vec_foreach (pacln, acl_list)
   {
     if (pool_is_free_index (am->acls, *pacln))
@@ -267,7 +263,6 @@ static int acl_plugin_set_acl_vec_for_context (u32 lc_index, u32 *acl_list)
 
 done:
   clib_bitmap_free (seen_acl_bitmap);
-  clib_mem_set_heap (oldheap);
   return rv;
 }
 
@@ -315,13 +310,13 @@ acl_plugin_show_lookup_user (u32 user_index)
     vlib_main_t *vm = am->vlib_main;
     acl_lookup_context_user_t *auser;
 
-    pool_foreach (auser, am->acl_users,
-    ({
+    pool_foreach (auser, am->acl_users)
+     {
       u32 curr_user_index = (auser - am->acl_users);
       if (user_index == ~0 || (curr_user_index == user_index)) {
         vlib_cli_output (vm, "index %d:%s:%s:%s", curr_user_index, auser->user_module_name, auser->val1_label, auser->val2_label);
       }
-    }));
+    }
 }
 
 
@@ -338,8 +333,8 @@ acl_plugin_show_lookup_context (u32 lc_index)
     return;
   }
 
-  pool_foreach (acontext, am->acl_lookup_contexts,
-  ({
+  pool_foreach (acontext, am->acl_lookup_contexts)
+   {
     u32 curr_lc_index = (acontext - am->acl_lookup_contexts);
     if ((lc_index == ~0) || (curr_lc_index == lc_index)) {
       if (acl_user_id_valid(am, acontext->context_user_id)) {
@@ -355,7 +350,7 @@ acl_plugin_show_lookup_context (u32 lc_index)
                        format_vec32, acontext->acl_indices, "%d");
       }
     }
-  }));
+  }
 }
 
 void *
@@ -364,7 +359,8 @@ acl_plugin_get_p_acl_main(void)
   return &acl_main;
 }
 
-clib_error_t *acl_plugin_methods_vtable_init(acl_plugin_methods_t *m)
+__clib_export clib_error_t *
+acl_plugin_methods_vtable_init(acl_plugin_methods_t *m)
 {
   m->p_acl_main = &acl_main;
 #define _(name) m->name = acl_plugin_ ## name;

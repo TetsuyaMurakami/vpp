@@ -523,9 +523,10 @@ vlib_pci_bind_to_uio (vlib_main_t * vm, vlib_pci_addr_t * addr,
 
       if (ifr.ifr_flags & IFF_UP)
 	{
-	  error = clib_error_return (0, "Skipping PCI device %U as host "
-				     "interface %s is up",
-				     format_vlib_pci_addr, addr, e->d_name);
+	  vlib_log (VLIB_LOG_LEVEL_WARNING, pci_main.log_default,
+		    "Skipping PCI device %U as host "
+		    "interface %s is up", format_vlib_pci_addr, addr,
+		    e->d_name);
 	  close (fd);
 	  goto done;
 	}
@@ -912,6 +913,17 @@ vlib_pci_enable_msix_irq (vlib_main_t * vm, vlib_pci_dev_handle_t h,
 			VFIO_IRQ_SET_ACTION_TRIGGER, fds);
 }
 
+uword
+vlib_pci_get_msix_file_index (vlib_main_t * vm, vlib_pci_dev_handle_t h,
+			      u16 index)
+{
+  linux_pci_device_t *p = linux_pci_get_device (h);
+  linux_pci_irq_t *irq = vec_elt_at_index (p->msix_irqs, index);
+  if (irq->fd == -1)
+    return ~0;
+  return irq->clib_file_index;
+}
+
 clib_error_t *
 vlib_pci_disable_msix_irq (vlib_main_t * vm, vlib_pci_dev_handle_t h,
 			   u16 start, u16 count)
@@ -1123,8 +1135,20 @@ vlib_pci_map_region_int (vlib_main_t * vm, vlib_pci_dev_handle_t h,
   clib_error_t *error;
   int flags = MAP_SHARED;
   u64 size = 0, offset = 0;
+  u16 command;
 
   pci_log_debug (vm, p, "map region %u to va %p", bar, addr);
+
+  if ((error = vlib_pci_read_config_u16 (vm, h, 4, &command)))
+    return error;
+
+  if (!(command & PCI_COMMAND_MEMORY))
+    {
+      pci_log_debug (vm, p, "setting memory enable bit");
+      command |= PCI_COMMAND_MEMORY;
+      if ((error = vlib_pci_write_config_u16 (vm, h, 4, &command)))
+	return error;
+    }
 
   if ((error = vlib_pci_region (vm, h, bar, &fd, &size, &offset)))
     return error;
@@ -1132,8 +1156,10 @@ vlib_pci_map_region_int (vlib_main_t * vm, vlib_pci_dev_handle_t h,
   if (p->type == LINUX_PCI_DEVICE_TYPE_UIO && addr != 0)
     flags |= MAP_FIXED;
 
-  *result = mmap (addr, size, PROT_READ | PROT_WRITE, flags, fd, offset);
-  if (*result == (void *) -1)
+  *result = clib_mem_vm_map_shared (addr, size, fd, offset,
+				    "PCIe %U region %u", format_vlib_pci_addr,
+				    vlib_pci_get_addr (vm, h), bar);
+  if (*result == CLIB_MEM_VM_MAP_FAILED)
     {
       error = clib_error_return_unix (0, "mmap `BAR%u'", bar);
       if (p->type == LINUX_PCI_DEVICE_TYPE_UIO && (fd != -1))
@@ -1337,7 +1363,7 @@ vlib_pci_device_close (vlib_main_t * vm, vlib_pci_dev_handle_t h)
     {
       if (res->size == 0)
 	continue;
-      munmap (res->addr, res->size);
+      clib_mem_vm_unmap (res->addr);
       if (res->fd != -1)
         close (res->fd);
     }

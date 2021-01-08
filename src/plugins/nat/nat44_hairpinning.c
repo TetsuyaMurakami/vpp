@@ -108,10 +108,11 @@ snat_hairpinning (vlib_main_t * vm, vlib_node_runtime_t * node,
   ip4_address_t sm0_addr;
   u16 sm0_port;
   u32 sm0_fib_index;
+  u32 old_sw_if_index = vnet_buffer (b0)->sw_if_index[VLIB_TX];
   /* Check if destination is static mappings */
   if (!snat_static_mapping_match
       (sm, ip0->dst_address, udp0->dst_port, sm->outside_fib_index, proto0,
-       &sm0_addr, &sm0_port, &sm0_fib_index, 1, 0, 0, 0, 0, 0))
+       &sm0_addr, &sm0_port, &sm0_fib_index, 1, 0, 0, 0, 0, 0, 0))
     {
       new_dst_addr0 = sm0_addr.as_u32;
       new_dst_port0 = sm0_port;
@@ -158,6 +159,17 @@ snat_hairpinning (vlib_main_t * vm, vlib_node_runtime_t * node,
       new_dst_port0 = s0->in2out.port;
       vnet_buffer (b0)->sw_if_index[VLIB_TX] = s0->in2out.fib_index;
     }
+
+  /* Check if anything has changed and if not, then return 0. This
+     helps avoid infinite loop, repeating the three nodes
+     nat44-hairpinning-->ip4-lookup-->ip4-local, in case nothing has
+     changed. */
+  old_dst_addr0 = ip0->dst_address.as_u32;
+  old_dst_port0 = tcp0->dst;
+  if (new_dst_addr0 == old_dst_addr0
+      && new_dst_port0 == old_dst_port0
+      && vnet_buffer (b0)->sw_if_index[VLIB_TX] == old_sw_if_index)
+    return 0;
 
   /* Destination is behind the same NAT, use internal address and port */
   if (new_dst_addr0)
@@ -734,8 +746,8 @@ snat_hairpin_src_fn_inline (vlib_main_t * vm,
 	  vnet_feature_next (&next0, b0);
 
           /* *INDENT-OFF* */
-          pool_foreach (i, sm->output_feature_interfaces,
-          ({
+          pool_foreach (i, sm->output_feature_interfaces)
+           {
             /* Only packets from NAT inside interface */
             if ((nat_interface_is_inside(i)) && (sw_if_index0 == i->sw_if_index))
               {
@@ -749,7 +761,7 @@ snat_hairpin_src_fn_inline (vlib_main_t * vm,
                   }
                 break;
               }
-          }));
+          }
           /* *INDENT-ON* */
 
 	  if (next0 != SNAT_HAIRPIN_SRC_NEXT_DROP)

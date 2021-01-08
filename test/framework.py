@@ -7,6 +7,7 @@ import sys
 import os
 import select
 import signal
+import subprocess
 import unittest
 import tempfile
 import time
@@ -39,19 +40,6 @@ from util import ppp, is_core_present
 from scapy.layers.inet import IPerror, TCPerror, UDPerror, ICMPerror
 from scapy.layers.inet6 import ICMPv6DestUnreach, ICMPv6EchoRequest
 from scapy.layers.inet6 import ICMPv6EchoReply
-
-if os.name == 'posix' and sys.version_info[0] < 3:
-    # using subprocess32 is recommended by python official documentation
-    # @ https://docs.python.org/2/library/subprocess.html
-    import subprocess32 as subprocess
-else:
-    import subprocess
-
-#  Python2/3 compatible
-try:
-    input = raw_input
-except NameError:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -231,14 +219,6 @@ def _running_gcov_tests():
 running_gcov_tests = _running_gcov_tests()
 
 
-def _running_on_centos():
-    os_id = os.getenv("OS_ID", "")
-    return True if "centos" in os_id.lower() else False
-
-
-running_on_centos = _running_on_centos()
-
-
 class KeepAliveReporter(object):
     """
     Singleton object which reports test start to parent process
@@ -297,6 +277,11 @@ class VppTestCase(unittest.TestCase):
             return cls._packet_count_for_dst_if_idx[dst_if_index]
         else:
             return 0
+
+    @classmethod
+    def force_solo(cls):
+        """ if the test case class is timing-sensitive - return true """
+        return False
 
     @classmethod
     def instance(cls):
@@ -414,6 +399,8 @@ class VppTestCase(unittest.TestCase):
                            "plugins",
                            "{", "plugin", "dpdk_plugin.so", "{", "disable",
                            "}", "plugin", "rdma_plugin.so", "{", "disable",
+                           "}", "plugin", "lisp_unittest_plugin.so", "{",
+                           "enable",
                            "}", "plugin", "unittest_plugin.so", "{", "enable",
                            "}"] + cls.extra_vpp_plugin_config + ["}", ]
 
@@ -1412,9 +1399,19 @@ class VppTestResult(unittest.TestResult):
         """
 
         def print_header(test):
+            test_doc = getdoc(test)
+            if not test_doc:
+                raise Exception("No doc string for test '%s'" % test.id())
+            test_title = test_doc.splitlines()[0]
+            test_title_colored = colorize(test_title, GREEN)
+            if test.force_solo():
+                # long live PEP-8 and 80 char width limitation...
+                c = YELLOW
+                test_title_colored = colorize("SOLO RUN: " + test_title, c)
+
             if not hasattr(test.__class__, '_header_printed'):
                 print(double_line_delim)
-                print(colorize(getdoc(test).splitlines()[0], GREEN))
+                print(test_title_colored)
                 print(double_line_delim)
             test.__class__._header_printed = True
 

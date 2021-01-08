@@ -28,6 +28,7 @@
 #include <vnet/tunnel/tunnel_types_api.h>
 #include <vnet/fib/fib.h>
 #include <vnet/ipip/ipip.h>
+#include <vnet/tunnel/tunnel_types_api.h>
 
 #include <vnet/vnet_msg_enum.h>
 
@@ -58,20 +59,21 @@ _(IPSEC_SPD_ADD_DEL, ipsec_spd_add_del)                         \
 _(IPSEC_INTERFACE_ADD_DEL_SPD, ipsec_interface_add_del_spd)     \
 _(IPSEC_SPD_ENTRY_ADD_DEL, ipsec_spd_entry_add_del)             \
 _(IPSEC_SAD_ENTRY_ADD_DEL, ipsec_sad_entry_add_del)             \
+_(IPSEC_SAD_ENTRY_ADD_DEL_V2, ipsec_sad_entry_add_del_v2)       \
 _(IPSEC_SA_DUMP, ipsec_sa_dump)                                 \
+_(IPSEC_SA_V2_DUMP, ipsec_sa_v2_dump)                           \
 _(IPSEC_SPDS_DUMP, ipsec_spds_dump)                             \
 _(IPSEC_SPD_DUMP, ipsec_spd_dump)                               \
 _(IPSEC_SPD_INTERFACE_DUMP, ipsec_spd_interface_dump)		\
 _(IPSEC_ITF_CREATE, ipsec_itf_create)                           \
 _(IPSEC_ITF_DELETE, ipsec_itf_delete)                           \
 _(IPSEC_ITF_DUMP, ipsec_itf_dump)                               \
-_(IPSEC_TUNNEL_IF_ADD_DEL, ipsec_tunnel_if_add_del)             \
-_(IPSEC_TUNNEL_IF_SET_SA, ipsec_tunnel_if_set_sa)               \
 _(IPSEC_SELECT_BACKEND, ipsec_select_backend)                   \
 _(IPSEC_BACKEND_DUMP, ipsec_backend_dump)                       \
 _(IPSEC_TUNNEL_PROTECT_UPDATE, ipsec_tunnel_protect_update)     \
 _(IPSEC_TUNNEL_PROTECT_DEL, ipsec_tunnel_protect_del)           \
-_(IPSEC_TUNNEL_PROTECT_DUMP, ipsec_tunnel_protect_dump)
+_(IPSEC_TUNNEL_PROTECT_DUMP, ipsec_tunnel_protect_dump)         \
+_(IPSEC_SET_ASYNC_MODE, ipsec_set_async_mode)
 
 static void
 vl_api_ipsec_spd_add_del_t_handler (vl_api_ipsec_spd_add_del_t * mp)
@@ -379,7 +381,10 @@ static void vl_api_ipsec_sad_entry_add_del_t_handler
 				crypto_alg, &crypto_key,
 				integ_alg, &integ_key, flags,
 				0, mp->entry.salt, &tun_src, &tun_dst,
-				&sa_index, htons (mp->entry.udp_src_port),
+				TUNNEL_ENCAP_DECAP_FLAG_NONE,
+				IP_DSCP_CS0,
+				&sa_index,
+				htons (mp->entry.udp_src_port),
 				htons (mp->entry.udp_dst_port));
   else
     rv = ipsec_sa_unlock_id (id);
@@ -391,6 +396,83 @@ static void vl_api_ipsec_sad_entry_add_del_t_handler
 out:
   /* *INDENT-OFF* */
   REPLY_MACRO2 (VL_API_IPSEC_SAD_ENTRY_ADD_DEL_REPLY,
+  {
+    rmp->stat_index = htonl (sa_index);
+  });
+  /* *INDENT-ON* */
+}
+
+static void vl_api_ipsec_sad_entry_add_del_v2_t_handler
+  (vl_api_ipsec_sad_entry_add_del_v2_t * mp)
+{
+  vlib_main_t *vm __attribute__ ((unused)) = vlib_get_main ();
+  vl_api_ipsec_sad_entry_add_del_v2_reply_t *rmp;
+  ip46_address_t tun_src = { }, tun_dst =
+  {
+  };
+  tunnel_encap_decap_flags_t tunnel_flags;
+  ipsec_key_t crypto_key, integ_key;
+  ipsec_crypto_alg_t crypto_alg;
+  ipsec_integ_alg_t integ_alg;
+  ipsec_protocol_t proto;
+  ipsec_sa_flags_t flags;
+  u32 id, spi, sa_index = ~0;
+  int rv;
+
+#if WITH_LIBSSL > 0
+
+  id = ntohl (mp->entry.sad_id);
+  spi = ntohl (mp->entry.spi);
+
+  rv = ipsec_proto_decode (mp->entry.protocol, &proto);
+
+  if (rv)
+    goto out;
+
+  rv = ipsec_crypto_algo_decode (mp->entry.crypto_algorithm, &crypto_alg);
+
+  if (rv)
+    goto out;
+
+  rv = ipsec_integ_algo_decode (mp->entry.integrity_algorithm, &integ_alg);
+
+  if (rv)
+    goto out;
+
+  rv =
+    tunnel_encap_decap_flags_decode (mp->entry.tunnel_flags, &tunnel_flags);
+
+  if (rv)
+    goto out;
+
+  ipsec_key_decode (&mp->entry.crypto_key, &crypto_key);
+  ipsec_key_decode (&mp->entry.integrity_key, &integ_key);
+
+  flags = ipsec_sa_flags_decode (mp->entry.flags);
+
+  ip_address_decode (&mp->entry.tunnel_src, &tun_src);
+  ip_address_decode (&mp->entry.tunnel_dst, &tun_dst);
+
+  if (mp->is_add)
+    rv = ipsec_sa_add_and_lock (id, spi, proto,
+				crypto_alg, &crypto_key,
+				integ_alg, &integ_key, flags,
+				0, mp->entry.salt, &tun_src, &tun_dst,
+				tunnel_flags,
+				ip_dscp_decode (mp->entry.dscp),
+				&sa_index,
+				htons (mp->entry.udp_src_port),
+				htons (mp->entry.udp_dst_port));
+  else
+    rv = ipsec_sa_unlock_id (id);
+
+#else
+  rv = VNET_API_ERROR_UNIMPLEMENTED;
+#endif
+
+out:
+  /* *INDENT-OFF* */
+  REPLY_MACRO2 (VL_API_IPSEC_SAD_ENTRY_ADD_DEL_V2_REPLY,
   {
     rmp->stat_index = htonl (sa_index);
   });
@@ -430,9 +512,9 @@ vl_api_ipsec_spds_dump_t_handler (vl_api_ipsec_spds_dump_t * mp)
     return;
 
   /* *INDENT-OFF* */
-  pool_foreach (spd, im->spds, ({
+  pool_foreach (spd, im->spds)  {
     send_ipsec_spds_details (spd, reg, mp->context);
-  }));
+  }
   /* *INDENT-ON* */
 #else
   clib_warning ("unimplemented");
@@ -580,165 +662,6 @@ vl_api_ipsec_spd_interface_dump_t_handler (vl_api_ipsec_spd_interface_dump_t *
 #else
   clib_warning ("unimplemented");
 #endif
-}
-
-static u32
-ipsec_tun_mk_input_sa_id (u32 ti)
-{
-  return (0x80000000 | ti);
-}
-
-static u32
-ipsec_tun_mk_output_sa_id (u32 ti)
-{
-  return (0xc0000000 | ti);
-}
-
-static void
-vl_api_ipsec_tunnel_if_add_del_t_handler (vl_api_ipsec_tunnel_if_add_del_t *
-					  mp)
-{
-  vl_api_ipsec_tunnel_if_add_del_reply_t *rmp;
-  u32 sw_if_index = ~0;
-  int rv;
-
-#if WITH_LIBSSL > 0
-  ip46_address_t local_ip = ip46_address_initializer;
-  ip46_address_t remote_ip = ip46_address_initializer;
-  ipsec_key_t crypto_key, integ_key;
-  ipsec_sa_flags_t flags;
-  ip46_type_t local_ip_type, remote_ip_type;
-  ipip_transport_t transport;
-  u32 fib_index;
-
-  local_ip_type = ip_address_decode (&mp->local_ip, &local_ip);
-  remote_ip_type = ip_address_decode (&mp->remote_ip, &remote_ip);
-  transport = (IP46_TYPE_IP6 == local_ip_type ?
-	       IPIP_TRANSPORT_IP6 : IPIP_TRANSPORT_IP4);
-
-  if (local_ip_type != remote_ip_type)
-    {
-      rv = VNET_API_ERROR_INVALID_VALUE;
-      goto done;
-    }
-
-  flags = IPSEC_SA_FLAG_NONE;
-
-  if (mp->udp_encap)
-    flags |= IPSEC_SA_FLAG_UDP_ENCAP;
-  if (mp->esn)
-    flags |= IPSEC_SA_FLAG_USE_ESN;
-  if (mp->anti_replay)
-    flags |= IPSEC_SA_FLAG_USE_ANTI_REPLAY;
-
-  ipsec_mk_key (&crypto_key, mp->remote_crypto_key,
-		mp->remote_crypto_key_len);
-  ipsec_mk_key (&integ_key, mp->remote_integ_key, mp->remote_integ_key_len);
-  ipsec_mk_key (&crypto_key, mp->local_crypto_key, mp->local_crypto_key_len);
-  ipsec_mk_key (&integ_key, mp->local_integ_key, mp->local_integ_key_len);
-
-  fib_index =
-    fib_table_find (fib_proto_from_ip46 (local_ip_type),
-		    ntohl (mp->tx_table_id));
-
-  if (~0 == fib_index)
-    {
-      rv = VNET_API_ERROR_NO_SUCH_FIB;
-      goto done;
-    }
-
-  if (mp->is_add)
-    {
-      // remote = input, local = output
-      /* create an ip-ip tunnel, then the two SA, then bind them */
-      rv = ipip_add_tunnel (transport,
-			    (mp->renumber ? ntohl (mp->show_instance) : ~0),
-			    &local_ip,
-			    &remote_ip, fib_index,
-			    TUNNEL_ENCAP_DECAP_FLAG_NONE, IP_DSCP_CS0,
-			    TUNNEL_MODE_P2P, &sw_if_index);
-
-      if (rv)
-	goto done;
-
-      rv = ipsec_sa_add_and_lock (ipsec_tun_mk_input_sa_id (sw_if_index),
-				  ntohl (mp->remote_spi),
-				  IPSEC_PROTOCOL_ESP,
-				  mp->crypto_alg,
-				  &crypto_key,
-				  mp->integ_alg,
-				  &integ_key,
-				  (flags | IPSEC_SA_FLAG_IS_INBOUND),
-				  ntohl (mp->tx_table_id),
-				  mp->salt, &remote_ip, &local_ip, NULL,
-				  IPSEC_UDP_PORT_NONE, IPSEC_UDP_PORT_NONE);
-
-      if (rv)
-	goto done;
-
-      rv = ipsec_sa_add_and_lock (ipsec_tun_mk_output_sa_id (sw_if_index),
-				  ntohl (mp->local_spi),
-				  IPSEC_PROTOCOL_ESP,
-				  mp->crypto_alg,
-				  &crypto_key,
-				  mp->integ_alg,
-				  &integ_key,
-				  flags,
-				  ntohl (mp->tx_table_id),
-				  mp->salt, &local_ip, &remote_ip, NULL,
-				  IPSEC_UDP_PORT_NONE, IPSEC_UDP_PORT_NONE);
-
-      if (rv)
-	goto done;
-
-      rv = ipsec_tun_protect_update_one (sw_if_index, NULL,
-					 ipsec_tun_mk_output_sa_id
-					 (sw_if_index),
-					 ipsec_tun_mk_input_sa_id
-					 (sw_if_index));
-      if (rv)
-	goto done;
-
-      /* the SAs are locked as a result of being used for proection,
-       * they cannot be removed from the API, since they cannot be refered
-       * to by the API. unlock them now, so that if the tunnel is rekeyed
-       * they-ll disapper
-       */
-      ipsec_sa_unlock_id (ipsec_tun_mk_input_sa_id (sw_if_index));
-      ipsec_sa_unlock_id (ipsec_tun_mk_output_sa_id (sw_if_index));
-    }
-  else
-    {
-      /* *INDENT-OFF* */
-      ipip_tunnel_key_t key = {
-	.transport = transport,
-	.fib_index = fib_index,
-	.src = local_ip,
-	.dst = remote_ip
-      };
-      /* *INDENT-ON* */
-
-      ipip_tunnel_t *t = ipip_tunnel_db_find (&key);
-
-      if (NULL != t)
-	{
-	  rv = ipsec_tun_protect_del (t->sw_if_index, NULL);
-	  ipip_del_tunnel (t->sw_if_index);
-	}
-      else
-	rv = VNET_API_ERROR_NO_SUCH_ENTRY;
-    }
-
-#else
-  rv = VNET_API_ERROR_UNIMPLEMENTED;
-#endif
-done:
-  /* *INDENT-OFF* */
-  REPLY_MACRO2 (VL_API_IPSEC_TUNNEL_IF_ADD_DEL_REPLY,
-  ({
-    rmp->sw_if_index = htonl (sw_if_index);
-  }));
-  /* *INDENT-ON* */
 }
 
 static void
@@ -904,29 +827,99 @@ vl_api_ipsec_sa_dump_t_handler (vl_api_ipsec_sa_dump_t * mp)
 #endif
 }
 
-static void
-vl_api_ipsec_tunnel_if_set_sa_t_handler (vl_api_ipsec_tunnel_if_set_sa_t * mp)
+static walk_rc_t
+send_ipsec_sa_v2_details (ipsec_sa_t * sa, void *arg)
 {
-  vl_api_ipsec_tunnel_if_set_sa_reply_t *rmp;
-  int rv;
+  ipsec_dump_walk_ctx_t *ctx = arg;
+  vl_api_ipsec_sa_v2_details_t *mp;
+  ipsec_main_t *im = &ipsec_main;
+
+  mp = vl_msg_api_alloc (sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
+  mp->_vl_msg_id = ntohs (VL_API_IPSEC_SA_V2_DETAILS);
+  mp->context = ctx->context;
+
+  mp->entry.sad_id = htonl (sa->id);
+  mp->entry.spi = htonl (sa->spi);
+  mp->entry.protocol = ipsec_proto_encode (sa->protocol);
+  mp->entry.tx_table_id =
+    htonl (fib_table_get_table_id (sa->tx_fib_index, FIB_PROTOCOL_IP4));
+
+  mp->entry.crypto_algorithm = ipsec_crypto_algo_encode (sa->crypto_alg);
+  ipsec_key_encode (&sa->crypto_key, &mp->entry.crypto_key);
+
+  mp->entry.integrity_algorithm = ipsec_integ_algo_encode (sa->integ_alg);
+  ipsec_key_encode (&sa->integ_key, &mp->entry.integrity_key);
+
+  mp->entry.flags = ipsec_sad_flags_encode (sa);
+  mp->entry.salt = clib_host_to_net_u32 (sa->salt);
+
+  if (ipsec_sa_is_set_IS_PROTECT (sa))
+    {
+      ipsec_sa_dump_match_ctx_t ctx = {
+        .sai = sa - im->sad,
+        .sw_if_index = ~0,
+      };
+      ipsec_tun_protect_walk (ipsec_sa_dump_match_sa, &ctx);
+
+      mp->sw_if_index = htonl (ctx.sw_if_index);
+    }
+  else
+    mp->sw_if_index = ~0;
+
+  if (ipsec_sa_is_set_IS_TUNNEL (sa))
+    {
+      ip_address_encode (&sa->tunnel_src_addr, IP46_TYPE_ANY,
+			 &mp->entry.tunnel_src);
+      ip_address_encode (&sa->tunnel_dst_addr, IP46_TYPE_ANY,
+			 &mp->entry.tunnel_dst);
+    }
+  if (ipsec_sa_is_set_UDP_ENCAP (sa))
+    {
+      mp->entry.udp_src_port = sa->udp_hdr.src_port;
+      mp->entry.udp_dst_port = sa->udp_hdr.dst_port;
+    }
+
+  mp->entry.tunnel_flags = tunnel_encap_decap_flags_encode (sa->tunnel_flags);
+  mp->entry.dscp = ip_dscp_encode (sa->dscp);
+
+  mp->seq_outbound = clib_host_to_net_u64 (((u64) sa->seq));
+  mp->last_seq_inbound = clib_host_to_net_u64 (((u64) sa->last_seq));
+  if (ipsec_sa_is_set_USE_ESN (sa))
+    {
+      mp->seq_outbound |= (u64) (clib_host_to_net_u32 (sa->seq_hi));
+      mp->last_seq_inbound |= (u64) (clib_host_to_net_u32 (sa->last_seq_hi));
+    }
+  if (ipsec_sa_is_set_USE_ANTI_REPLAY (sa))
+    mp->replay_window = clib_host_to_net_u64 (sa->replay_window);
+
+  mp->stat_index = clib_host_to_net_u32 (sa->stat_index);
+
+  vl_api_send_msg (ctx->reg, (u8 *) mp);
+
+  return (WALK_CONTINUE);
+}
+
+static void
+vl_api_ipsec_sa_v2_dump_t_handler (vl_api_ipsec_sa_dump_t * mp)
+{
+  vl_api_registration_t *reg;
 
 #if WITH_LIBSSL > 0
-  VALIDATE_SW_IF_INDEX(mp);
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
 
-  if (mp->is_outbound)
-    rv = ipsec_tun_protect_update_out (ntohl (mp->sw_if_index), NULL,
-                                       ntohl (mp->sa_id));
-  else
-    rv = ipsec_tun_protect_update_in (ntohl (mp->sw_if_index), NULL,
-                                       ntohl (mp->sa_id));
+  ipsec_dump_walk_ctx_t ctx = {
+    .reg = reg,
+    .context = mp->context,
+  };
+
+  ipsec_sa_walk (send_ipsec_sa_v2_details, &ctx);
 
 #else
   clib_warning ("unimplemented");
 #endif
-
-  BAD_SW_IF_INDEX_LABEL;
-
-  REPLY_MACRO (VL_API_IPSEC_TUNNEL_IF_SET_SA_REPLY);
 }
 
 static void
@@ -947,7 +940,7 @@ vl_api_ipsec_backend_dump_t_handler (vl_api_ipsec_backend_dump_t * mp)
   ipsec_ah_backend_t *ab;
   ipsec_esp_backend_t *eb;
   /* *INDENT-OFF* */
-  pool_foreach (ab, im->ah_backends, {
+  pool_foreach (ab, im->ah_backends) {
     vl_api_ipsec_backend_details_t *mp = vl_msg_api_alloc (sizeof (*mp));
     clib_memset (mp, 0, sizeof (*mp));
     mp->_vl_msg_id = ntohs (VL_API_IPSEC_BACKEND_DETAILS);
@@ -958,8 +951,8 @@ vl_api_ipsec_backend_dump_t_handler (vl_api_ipsec_backend_dump_t * mp)
     mp->index = ab - im->ah_backends;
     mp->active = mp->index == im->ah_current_backend ? 1 : 0;
     vl_api_send_msg (rp, (u8 *)mp);
-  });
-  pool_foreach (eb, im->esp_backends, {
+  }
+  pool_foreach (eb, im->esp_backends) {
     vl_api_ipsec_backend_details_t *mp = vl_msg_api_alloc (sizeof (*mp));
     clib_memset (mp, 0, sizeof (*mp));
     mp->_vl_msg_id = ntohs (VL_API_IPSEC_BACKEND_DETAILS);
@@ -970,7 +963,7 @@ vl_api_ipsec_backend_dump_t_handler (vl_api_ipsec_backend_dump_t * mp)
     mp->index = eb - im->esp_backends;
     mp->active = mp->index == im->esp_current_backend ? 1 : 0;
     vl_api_send_msg (rp, (u8 *)mp);
-  });
+  }
   /* *INDENT-ON* */
 }
 
@@ -1010,6 +1003,18 @@ vl_api_ipsec_select_backend_t_handler (vl_api_ipsec_select_backend_t * mp)
 #endif
 done:
   REPLY_MACRO (VL_API_IPSEC_SELECT_BACKEND_REPLY);
+}
+
+static void
+vl_api_ipsec_set_async_mode_t_handler (vl_api_ipsec_set_async_mode_t * mp)
+{
+  vl_api_ipsec_set_async_mode_reply_t *rmp;
+  int rv = 0;
+
+  vnet_crypto_request_async_mode (mp->async_enable);
+  ipsec_set_async_mode (mp->async_enable);
+
+  REPLY_MACRO (VL_API_IPSEC_SET_ASYNC_MODE_REPLY);
 }
 
 /*

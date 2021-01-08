@@ -64,9 +64,12 @@ uword
 unformat_ip_prefix (unformat_input_t * input, va_list * args)
 {
   ip_prefix_t *a = va_arg (*args, ip_prefix_t *);
+  /* %d writes more than a u8 */
+  int plen;
   if (unformat (input, "%U/%d", unformat_ip_address, &ip_prefix_addr (a),
-		&ip_prefix_len (a)))
+		&plen))
     {
+      ip_prefix_len (a) = plen;
       if ((ip_prefix_version (a) == AF_IP4 && 32 < ip_prefix_len (a)) ||
 	  (ip_prefix_version (a) == AF_IP6 && 128 < ip_prefix_len (a)))
 	{
@@ -261,6 +264,43 @@ ip_address_from_46 (const ip46_address_t * nh,
   ip_addr_version (ip) = ip_address_family_from_fib_proto (fproto);
 }
 
+/**
+ * convert from a IP address to a FIB prefix
+ */
+void
+ip_address_to_fib_prefix (const ip_address_t * addr, fib_prefix_t * prefix)
+{
+  if (addr->version == AF_IP4)
+    {
+      prefix->fp_len = 32;
+      prefix->fp_proto = FIB_PROTOCOL_IP4;
+      clib_memset (&prefix->fp_addr.pad, 0, sizeof (prefix->fp_addr.pad));
+      memcpy (&prefix->fp_addr.ip4, &addr->ip.ip4,
+	      sizeof (prefix->fp_addr.ip4));
+    }
+  else
+    {
+      prefix->fp_len = 128;
+      prefix->fp_proto = FIB_PROTOCOL_IP6;
+      memcpy (&prefix->fp_addr.ip6, &addr->ip.ip6,
+	      sizeof (prefix->fp_addr.ip6));
+    }
+  prefix->___fp___pad = 0;
+}
+
+void
+ip_address_increment (ip_address_t * ip)
+{
+  ip46_address_increment ((ip_addr_version (ip) == AF_IP4 ?
+			   IP46_TYPE_IP4 : IP46_TYPE_IP6), &ip_addr_46 (ip));
+}
+
+void
+ip_address_reset (ip_address_t * ip)
+{
+  clib_memset (ip, 0, sizeof (*ip));
+}
+
 static void
 ip_prefix_normalize_ip4 (ip4_address_t * ip4, u8 preflen)
 {
@@ -362,6 +402,17 @@ ip_prefix_cmp (ip_prefix_t * p1, ip_prefix_t * p2)
 	}
     }
   return cmp;
+}
+
+/**
+ * convert from a LISP to a FIB prefix
+ */
+void
+ip_prefix_to_fib_prefix (const ip_prefix_t * ip_prefix,
+			 fib_prefix_t * fib_prefix)
+{
+  ip_address_to_fib_prefix (&ip_prefix->addr, fib_prefix);
+  fib_prefix->fp_len = ip_prefix->len;
 }
 
 static bool

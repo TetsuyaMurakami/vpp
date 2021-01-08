@@ -35,7 +35,7 @@ handle_get_mactime (http_builtin_method_type_t reqtype,
 
   /* Walk all ip4 neighbours on all interfaces */
   vec_reset_length (mm->arp_cache_copy);
-  ip_neighbor_walk (IP46_TYPE_IP4, ~0, mactime_ip_neighbor_copy, mm);
+  ip_neighbor_walk (AF_IP4, ~0, mactime_ip_neighbor_copy, mm);
 
   now = clib_timebase_now (&mm->timebase);
 
@@ -43,10 +43,10 @@ handle_get_mactime (http_builtin_method_type_t reqtype,
     mm->sunday_midnight = clib_timebase_find_sunday_midnight (now);
 
     /* *INDENT-OFF* */
-    pool_foreach (dp, mm->devices,
-    ({
+    pool_foreach (dp, mm->devices)
+     {
         vec_add1 (pool_indices, dp - mm->devices);
-    }));
+    }
     /* *INDENT-ON* */
 
   s = format (s, "{%smactime%s: [\n", q, q);

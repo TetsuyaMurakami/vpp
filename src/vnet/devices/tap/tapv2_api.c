@@ -83,7 +83,7 @@ vl_api_tap_create_v2_t_handler (vl_api_tap_create_v2_t * mp)
     ap->num_rx_queues = mp->num_rx_queues;
 
   if (mp->host_if_name_set)
-    ap->host_if_name = mp->host_if_name;
+    ap->host_if_name = format (0, "%s%c", mp->host_if_name, 0);
 
   if (mp->host_mac_addr_set)
     {
@@ -91,10 +91,10 @@ vl_api_tap_create_v2_t_handler (vl_api_tap_create_v2_t * mp)
     }
 
   if (mp->host_namespace_set)
-    ap->host_namespace = mp->host_namespace;
+    ap->host_namespace = format (0, "%s%c", mp->host_namespace, 0);
 
   if (mp->host_bridge_set)
-    ap->host_bridge = mp->host_bridge;
+    ap->host_bridge = format (0, "%s%c", mp->host_bridge, 0);
 
   if (mp->host_ip4_prefix_set)
     {
@@ -126,6 +126,25 @@ vl_api_tap_create_v2_t_handler (vl_api_tap_create_v2_t * mp)
       ap->host_mtu_set = 1;
     }
 
+  STATIC_ASSERT (((int) TAP_API_FLAG_GSO == (int) TAP_FLAG_GSO),
+		 "tap gso api flag mismatch");
+  STATIC_ASSERT (((int) TAP_API_FLAG_CSUM_OFFLOAD ==
+		  (int) TAP_FLAG_CSUM_OFFLOAD),
+		 "tap checksum offload api flag mismatch");
+  STATIC_ASSERT (((int) TAP_API_FLAG_PERSIST == (int) TAP_FLAG_PERSIST),
+		 "tap persist api flag mismatch");
+  STATIC_ASSERT (((int) TAP_API_FLAG_ATTACH == (int) TAP_FLAG_ATTACH),
+		 "tap attach api flag mismatch");
+  STATIC_ASSERT (((int) TAP_API_FLAG_TUN == (int) TAP_FLAG_TUN),
+		 "tap tun api flag mismatch");
+  STATIC_ASSERT (((int) TAP_API_FLAG_GRO_COALESCE ==
+		  (int) TAP_FLAG_GRO_COALESCE),
+		 "tap gro coalesce api flag mismatch");
+  STATIC_ASSERT (((int) TAP_API_FLAG_PACKED == (int) TAP_FLAG_PACKED),
+		 "tap packed api flag mismatch");
+  STATIC_ASSERT (((int) TAP_API_FLAG_IN_ORDER ==
+		  (int) TAP_FLAG_IN_ORDER), "tap in-order api flag mismatch");
+
   ap->tap_flags = ntohl (mp->tap_flags);
 
   tap_create_if (vm, ap);
@@ -145,6 +164,11 @@ vl_api_tap_create_v2_t_handler (vl_api_tap_create_v2_t * mp)
   rmp->sw_if_index = ntohl (ap->sw_if_index);
 
   vl_api_send_msg (reg, (u8 *) rmp);
+
+  vec_free (ap->host_if_name);
+  vec_free (ap->host_namespace);
+  vec_free (ap->host_bridge);
+
 }
 
 static void

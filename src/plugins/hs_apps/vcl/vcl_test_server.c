@@ -38,7 +38,7 @@ typedef struct
   vcl_test_stats_t stats;
   vppcom_endpt_t endpt;
   uint8_t ip[16];
-  vppcom_data_segments_t ds;
+  vppcom_data_segment_t ds[2];
 } vcl_test_server_conn_t;
 
 typedef struct
@@ -246,10 +246,24 @@ vts_server_rx (vcl_test_server_conn_t * conn, int rx_bytes)
     }
 
   if (vsm->use_ds)
-    vppcom_session_free_segments (conn->fd, conn->ds);
+    vppcom_session_free_segments (conn->fd, rx_bytes);
 
   if (conn->stats.rx_bytes >= conn->cfg.total_bytes)
     clock_gettime (CLOCK_REALTIME, &conn->stats.stop);
+}
+
+static void
+vts_copy_ds (void *buf, vppcom_data_segment_t * ds, u32 max_bytes)
+{
+  uint32_t n_bytes = 0, ds_idx = 0, to_copy;
+
+  while (n_bytes < max_bytes)
+    {
+      to_copy = clib_min (ds[ds_idx].len, max_bytes - n_bytes);
+      clib_memcpy_fast (buf + n_bytes, ds[ds_idx].data, to_copy);
+      n_bytes += to_copy;
+      ds_idx += 1;
+    }
 }
 
 static void
@@ -259,7 +273,7 @@ vts_server_echo (vcl_test_server_conn_t * conn, int rx_bytes)
   int tx_bytes, nbytes, pos;
 
   if (vsm->use_ds)
-    vppcom_data_segment_copy (conn->buf, conn->ds, rx_bytes);
+    vts_copy_ds (conn->buf, conn->ds, rx_bytes);
 
   /* If it looks vaguely like a string, make sure it's terminated */
   pos = rx_bytes < conn->buf_size ? rx_bytes : conn->buf_size - 1;
@@ -373,7 +387,7 @@ vcl_test_server_process_opts (vcl_test_server_main_t * vsm, int argc,
   vsm->cfg.proto = VPPCOM_PROTO_TCP;
 
   opterr = 0;
-  while ((c = getopt (argc, argv, "6DLsw:p:")) != -1)
+  while ((c = getopt (argc, argv, "6DLsw:hp:")) != -1)
     switch (c)
       {
       case '6':
@@ -539,10 +553,22 @@ vts_worker_init (vcl_test_server_worker_t * wrk)
   if (vsm->cfg.proto == VPPCOM_PROTO_TLS
       || vsm->cfg.proto == VPPCOM_PROTO_QUIC)
     {
-      vppcom_session_tls_add_cert (wrk->listen_fd, vcl_test_crt_rsa,
-				   vcl_test_crt_rsa_len);
-      vppcom_session_tls_add_key (wrk->listen_fd, vcl_test_key_rsa,
-				  vcl_test_key_rsa_len);
+      vppcom_cert_key_pair_t ckpair;
+      uint32_t ckp_len;
+      int ckp_index;
+
+      vtinf ("Adding tls certs ...");
+      ckpair.cert = vcl_test_crt_rsa;
+      ckpair.key = vcl_test_key_rsa;
+      ckpair.cert_len = vcl_test_crt_rsa_len;
+      ckpair.key_len = vcl_test_key_rsa_len;
+      ckp_index = vppcom_add_cert_key_pair (&ckpair);
+      if (ckp_index < 0)
+	vtfail ("vppcom_add_cert_key_pair()", ckp_index);
+
+      ckp_len = sizeof (ckp_index);
+      vppcom_session_attr (wrk->listen_fd, VPPCOM_ATTR_SET_CKPAIR, &ckp_index,
+			   &ckp_len);
     }
 
   rv = vppcom_session_bind (wrk->listen_fd, &vsm->cfg.endpt);
@@ -590,7 +616,7 @@ vts_conn_read_config (vcl_test_server_conn_t * conn)
     {
       /* We could avoid the copy if the first segment is big enough but this
        * just simplifies things */
-      vppcom_data_segment_copy (conn->buf, conn->ds, sizeof (vcl_test_cfg_t));
+      vts_copy_ds (conn->buf, conn->ds, sizeof (vcl_test_cfg_t));
     }
   return (vcl_test_cfg_t *) conn->buf;
 }
@@ -692,7 +718,7 @@ vts_worker_loop (void *arg)
 		  if (rx_cfg->magic == VCL_TEST_CFG_CTRL_MAGIC)
 		    {
 		      if (vsm->use_ds)
-			vppcom_session_free_segments (conn->fd, conn->ds);
+			vppcom_session_free_segments (conn->fd, rx_bytes);
 		      vts_handle_cfg (wrk, rx_cfg, conn, rx_bytes);
 		      if (!wrk->nfds)
 			{

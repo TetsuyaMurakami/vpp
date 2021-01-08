@@ -484,7 +484,6 @@ application_alloc_and_init (app_init_args_t * a)
 {
   ssvm_segment_type_t seg_type = SSVM_SEGMENT_MEMFD;
   segment_manager_props_t *props;
-  vl_api_registration_t *reg;
   application_t *app;
   u64 *options;
 
@@ -493,18 +492,8 @@ application_alloc_and_init (app_init_args_t * a)
   /*
    * Make sure we support the requested configuration
    */
-  if (!(options[APP_OPTIONS_FLAGS] & APP_OPTIONS_FLAGS_IS_BUILTIN))
-    {
-      reg = vl_api_client_index_to_registration (a->api_client_index);
-      if (!reg)
-	return VNET_API_ERROR_APP_UNSUPPORTED_CFG;
-      if (vl_api_registration_file_index (reg) == VL_API_INVALID_FI)
-	seg_type = SSVM_SEGMENT_SHM;
-    }
-  else
-    {
-      seg_type = SSVM_SEGMENT_PRIVATE;
-    }
+  if (options[APP_OPTIONS_FLAGS] & APP_OPTIONS_FLAGS_IS_BUILTIN)
+    seg_type = SSVM_SEGMENT_PRIVATE;
 
   if ((options[APP_OPTIONS_FLAGS] & APP_OPTIONS_FLAGS_EVT_MQ_USE_EVENTFD)
       && seg_type != SSVM_SEGMENT_MEMFD)
@@ -633,11 +622,11 @@ application_detach_process (application_t * app, u32 api_client_index)
 	   app->app_index, api_client_index);
 
   /* *INDENT-OFF* */
-  pool_foreach (wrk_map, app->worker_maps, ({
+  pool_foreach (wrk_map, app->worker_maps)  {
     app_wrk = app_worker_get (wrk_map->wrk_index);
     if (app_wrk->api_client_index == api_client_index)
       vec_add1 (wrks, app_wrk->wrk_index);
-  }));
+  }
   /* *INDENT-ON* */
 
   if (!vec_len (wrks))
@@ -711,7 +700,7 @@ application_alloc_worker_and_init (application_t * app, app_worker_t ** wrk)
   sm = segment_manager_alloc ();
   sm->app_wrk_index = app_wrk->wrk_index;
 
-  if ((rv = segment_manager_init (sm)))
+  if ((rv = segment_manager_init_first (sm)))
     {
       app_worker_free (app_wrk);
       return rv;
@@ -845,16 +834,21 @@ vnet_application_attach (vnet_app_attach_args_t * a)
   if (app)
     return VNET_API_ERROR_APP_ALREADY_ATTACHED;
 
-  if (a->api_client_index != APP_INVALID_INDEX)
+  /* Socket api sets the name and validates namespace prior to attach */
+  if (!a->use_sock_api)
     {
-      app_name = app_name_from_api_index (a->api_client_index);
-      a->name = app_name;
-    }
+      if (a->api_client_index != APP_INVALID_INDEX)
+	{
+	  app_name = app_name_from_api_index (a->api_client_index);
+	  a->name = app_name;
+	}
 
-  secret = a->options[APP_OPTIONS_NAMESPACE_SECRET];
-  if ((rv = app_validate_namespace (a->namespace_id, secret, &app_ns_index)))
-    return rv;
-  a->options[APP_OPTIONS_NAMESPACE] = app_ns_index;
+      secret = a->options[APP_OPTIONS_NAMESPACE_SECRET];
+      if ((rv = app_validate_namespace (a->namespace_id, secret,
+					&app_ns_index)))
+	return rv;
+      a->options[APP_OPTIONS_NAMESPACE] = app_ns_index;
+    }
 
   if ((rv = application_alloc_and_init ((app_init_args_t *) a)))
     return rv;
@@ -869,7 +863,12 @@ vnet_application_attach (vnet_app_attach_args_t * a)
   fs = segment_manager_get_segment_w_lock (sm, 0);
 
   if (application_is_proxy (app))
-    application_setup_proxy (app);
+    {
+      application_setup_proxy (app);
+      /* The segment manager pool is reallocated because a new listener
+       * is added. Re-grab segment manager to avoid dangling reference */
+      sm = segment_manager_get (app_wrk->first_segment_manager);
+    }
 
   ASSERT (vec_len (fs->ssvm.name) <= 128);
   a->segment = &fs->ssvm;
@@ -1321,26 +1320,6 @@ application_get_segment_manager_properties (u32 app_index)
   return &app->sm_properties;
 }
 
-clib_error_t *
-vnet_app_add_tls_cert (vnet_app_add_tls_cert_args_t * a)
-{
-  /* Deprected, will be remove after 20.01 */
-  app_cert_key_pair_t *ckpair;
-  ckpair = app_cert_key_pair_get_default ();
-  ckpair->cert = vec_dup (a->cert);
-  return 0;
-}
-
-clib_error_t *
-vnet_app_add_tls_key (vnet_app_add_tls_key_args_t * a)
-{
-  /* Deprected, will be remove after 20.01 */
-  app_cert_key_pair_t *ckpair;
-  ckpair = app_cert_key_pair_get_default ();
-  ckpair->key = vec_dup (a->key);
-  return 0;
-}
-
 static void
 application_format_listeners (application_t * app, int verbose)
 {
@@ -1358,7 +1337,7 @@ application_format_listeners (application_t * app, int verbose)
     }
 
   /* *INDENT-OFF* */
-  pool_foreach (wrk_map, app->worker_maps, ({
+  pool_foreach (wrk_map, app->worker_maps)  {
     app_wrk = app_worker_get (wrk_map->wrk_index);
     if (hash_elts (app_wrk->listeners_table) == 0)
       continue;
@@ -1366,7 +1345,7 @@ application_format_listeners (application_t * app, int verbose)
       vlib_cli_output (vm, "%U", format_app_worker_listener, app_wrk,
                        handle, sm_index, verbose);
     }));
-  }));
+  }
   /* *INDENT-ON* */
 }
 
@@ -1383,10 +1362,10 @@ application_format_connects (application_t * app, int verbose)
     }
 
   /* *INDENT-OFF* */
-  pool_foreach (wrk_map, app->worker_maps, ({
+  pool_foreach (wrk_map, app->worker_maps)  {
     app_wrk = app_worker_get (wrk_map->wrk_index);
     app_worker_format_connects (app_wrk, verbose);
-  }));
+  }
   /* *INDENT-ON* */
 }
 
@@ -1476,7 +1455,7 @@ format_application (u8 * s, va_list * args)
   props = application_segment_manager_properties (app);
   if (!verbose)
     {
-      s = format (s, "%-10u%-20v%-40s", app->app_index, app_name,
+      s = format (s, "%-10u%-20v%-40v", app->app_index, app_name,
 		  app_ns_name);
       return s;
     }
@@ -1489,10 +1468,10 @@ format_application (u8 * s, va_list * args)
 	      format_memory_size, props->tx_fifo_size);
 
   /* *INDENT-OFF* */
-  pool_foreach (wrk_map, app->worker_maps, ({
+  pool_foreach (wrk_map, app->worker_maps)  {
       app_wrk = app_worker_get (wrk_map->wrk_index);
       s = format (s, "%U", format_app_worker, app_wrk);
-  }));
+  }
   /* *INDENT-ON* */
 
   return s;
@@ -1512,9 +1491,9 @@ application_format_all_listeners (vlib_main_t * vm, int verbose)
   application_format_listeners (0, verbose);
 
   /* *INDENT-OFF* */
-  pool_foreach (app, app_main.app_pool, ({
+  pool_foreach (app, app_main.app_pool)  {
     application_format_listeners (app, verbose);
-  }));
+  }
   /* *INDENT-ON* */
 }
 
@@ -1532,9 +1511,9 @@ application_format_all_clients (vlib_main_t * vm, int verbose)
   application_format_connects (0, verbose);
 
   /* *INDENT-OFF* */
-  pool_foreach (app, app_main.app_pool, ({
+  pool_foreach (app, app_main.app_pool)  {
     application_format_connects (app, verbose);
-  }));
+  }
   /* *INDENT-ON* */
 }
 
@@ -1546,9 +1525,9 @@ show_certificate_command_fn (vlib_main_t * vm, unformat_input_t * input,
   session_cli_return_if_not_enabled ();
 
   /* *INDENT-OFF* */
-  pool_foreach (ckpair, app_main.cert_key_pair_store, ({
+  pool_foreach (ckpair, app_main.cert_key_pair_store)  {
     vlib_cli_output (vm, "%U", format_cert_key_pair, ckpair);
-  }));
+  }
   /* *INDENT-ON* */
   return 0;
 }
@@ -1559,12 +1538,12 @@ appliction_format_app_mq (vlib_main_t * vm, application_t * app)
   app_worker_map_t *map;
   app_worker_t *wrk;
   /* *INDENT-OFF* */
-  pool_foreach (map, app->worker_maps, ({
+  pool_foreach (map, app->worker_maps)  {
     wrk = app_worker_get (map->wrk_index);
     vlib_cli_output (vm, "[A%d][%d]%U", app->app_index,
 		     map->wrk_index, format_svm_msg_q,
 		     wrk->event_queue);
-  }));
+  }
   /* *INDENT-ON* */
 }
 
@@ -1583,9 +1562,9 @@ appliction_format_all_app_mq (vlib_main_t * vm)
     }
 
   /* *INDENT-OFF* */
-  pool_foreach (app, app_main.app_pool, ({
+  pool_foreach (app, app_main.app_pool)  {
       appliction_format_app_mq (vm, app);
-  }));
+  }
   /* *INDENT-ON* */
   return 0;
 }
@@ -1661,9 +1640,9 @@ show_app_command_fn (vlib_main_t * vm, unformat_input_t * input,
     {
       vlib_cli_output (vm, "%U", format_application, 0, 0);
       /* *INDENT-OFF* */
-      pool_foreach (app, app_main.app_pool, ({
+      pool_foreach (app, app_main.app_pool)  {
 	vlib_cli_output (vm, "%U", format_application, app, 0);
-      }));
+      }
       /* *INDENT-ON* */
     }
 
@@ -1707,8 +1686,10 @@ int
 vnet_app_add_cert_key_pair (vnet_app_add_cert_key_pair_args_t * a)
 {
   app_cert_key_pair_t *ckpair = app_cert_key_pair_alloc ();
-  ckpair->cert = vec_dup (a->cert);
-  ckpair->key = vec_dup (a->key);
+  vec_validate (ckpair->cert, a->cert_len - 1);
+  clib_memcpy_fast (ckpair->cert, a->cert, a->cert_len);
+  vec_validate (ckpair->key, a->key_len - 1);
+  clib_memcpy_fast (ckpair->key, a->key, a->key_len);
   a->index = ckpair->cert_key_index;
   return 0;
 }
@@ -1750,7 +1731,7 @@ vnet_app_del_cert_key_pair (u32 index)
 clib_error_t *
 application_init (vlib_main_t * vm)
 {
-  /* Add a certificate with index 0 to support legacy apis */
+  /* Index 0 was originally used by legacy apis, maintain as invalid */
   (void) app_cert_key_pair_alloc ();
   app_main.last_crypto_engine = CRYPTO_ENGINE_LAST;
   app_main.app_by_name = hash_create_vec (0, sizeof (u8), sizeof (uword));

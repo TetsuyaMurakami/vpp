@@ -110,6 +110,12 @@ typedef struct
   /* Bridge domain tag (C string NULL terminated) */
   u8 *bd_tag;
 
+  /* Maximum number of learned entries */
+  u32 learn_limit;
+
+  /* Current number of learned entries */
+  u32 learn_count;
+
 } l2_bridge_domain_t;
 
 /* Limit Bridge Domain ID to 24 bits to match 24-bit VNI range */
@@ -139,7 +145,6 @@ bd_is_valid (l2_bridge_domain_t * bd_config)
 /* Init bridge domain if not done already */
 void bd_validate (l2_bridge_domain_t * bd_config);
 
-
 void
 bd_add_member (l2_bridge_domain_t * bd_config, l2_flood_member_t * member);
 
@@ -159,6 +164,7 @@ typedef enum bd_flags_t_
 u32 bd_set_flags (vlib_main_t * vm, u32 bd_index, bd_flags_t flags,
 		  u32 enable);
 void bd_set_mac_age (vlib_main_t * vm, u32 bd_index, u8 age);
+void bd_set_learn_limit (vlib_main_t *vm, u32 bd_index, u32 learn_limit);
 int bd_add_del (l2_bridge_domain_add_del_args_t * args);
 
 /**
@@ -200,6 +206,16 @@ bd_find_or_add_bd_index (bd_main_t * bdm, u32 bd_id)
     return bd_add_bd_index (bdm, bd_id);
   return bd_index;
 }
+
+/**
+ * \brief Walk all the input interfaces in the BD
+ */
+typedef walk_rc_t (*bd_input_walk_fn_t) (u32 bd_index, u32 sw_if_index);
+
+u32 bd_input_walk (u32 bd_index, bd_input_walk_fn_t fn, void *data);
+
+l2_bridge_domain_t *bd_get (u32 bd_index);
+l2_bridge_domain_t *bd_get_by_table_id (u32 table_id);
 
 u32 bd_add_del_ip_mac (u32 bd_index,
 		       ip46_type_t type,

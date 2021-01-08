@@ -20,23 +20,6 @@ except NameError:
     text_type = str
 
 
-class MRouteItfFlags:
-    MFIB_ITF_FLAG_NONE = 0
-    MFIB_ITF_FLAG_NEGATE_SIGNAL = 1
-    MFIB_ITF_FLAG_ACCEPT = 2
-    MFIB_ITF_FLAG_FORWARD = 4
-    MFIB_ITF_FLAG_SIGNAL_PRESENT = 8
-    MFIB_ITF_FLAG_INTERNAL_COPY = 16
-
-
-class MRouteEntryFlags:
-    MFIB_ENTRY_FLAG_NONE = 0
-    MFIB_ENTRY_FLAG_SIGNAL = 1
-    MFIB_ENTRY_FLAG_DROP = 2
-    MFIB_ENTRY_FLAG_CONNECTED = 4
-    MFIB_ENTRY_FLAG_INHERIT_ACCEPT = 8
-
-
 class FibPathProto:
     FIB_PATH_NH_PROTO_IP4 = 0
     FIB_PATH_NH_PROTO_IP6 = 1
@@ -188,16 +171,19 @@ class VppIpTable(VppObject):
     def __init__(self,
                  test,
                  table_id,
-                 is_ip6=0):
+                 is_ip6=0,
+                 register=True):
         self._test = test
         self.table_id = table_id
         self.is_ip6 = is_ip6
+        self.register = register
 
     def add_vpp_config(self):
         self._test.vapi.ip_table_add_del(is_add=1,
                                          table={'is_ip6': self.is_ip6,
                                                 'table_id': self.table_id})
-        self._test.registry.register(self, self._test.logger)
+        if self.register:
+            self._test.registry.register(self, self._test.logger)
         return self
 
     def remove_vpp_config(self):
@@ -362,7 +348,7 @@ class VppIpInterfaceBind(VppObject):
         return "interface-bind-%s-%s" % (self.intf, self.table)
 
 
-class VppMplsLabel(object):
+class VppMplsLabel:
     def __init__(self, value, mode=MplsLspMode.PIPE, ttl=64, exp=0):
         self.value = value
         self.mode = mode
@@ -394,7 +380,7 @@ class VppMplsLabel(object):
         return not (self == other)
 
 
-class VppFibPathNextHop(object):
+class VppFibPathNextHop:
     def __init__(self, addr,
                  via_label=MPLS_LABEL_INVALID,
                  next_hop_id=INVALID_INDEX):
@@ -425,7 +411,7 @@ class VppFibPathNextHop(object):
                 self.obj_id == other.obj_id)
 
 
-class VppRoutePath(object):
+class VppRoutePath:
 
     def __init__(
             self,
@@ -705,7 +691,7 @@ class VppIpMRoute(VppObject):
         return c[0][self.stats_index]
 
 
-class VppMFibSignal(object):
+class VppMFibSignal:
     def __init__(self, test, route, interface, packet):
         self.route = route
         self.interface = interface

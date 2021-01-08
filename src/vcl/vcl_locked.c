@@ -219,7 +219,10 @@ vls_mt_add (void)
    * vcl worker with vpp. Otherwise, all threads use the same vcl worker, so
    * update the vcl worker's thread local worker index variable */
   if (vls_mt_wrk_supported ())
-    vls_register_vcl_worker ();
+    {
+      if (vppcom_worker_register () != VPPCOM_OK)
+	VERR ("failed to register worker");
+    }
   else
     vcl_set_worker_index (vlsl->vls_wrk_index);
 }
@@ -566,10 +569,10 @@ vls_listener_wrk_stop_listen (vcl_locked_session_t * vls, u32 wrk_index)
 
   wrk = vcl_worker_get (wrk_index);
   s = vcl_session_get (wrk, vls->session_index);
-  if (s->session_state != STATE_LISTEN)
+  if (s->session_state != VCL_STATE_LISTEN)
     return;
   vcl_send_session_unlisten (wrk, s);
-  s->session_state = STATE_LISTEN_NO_MQ;
+  s->session_state = VCL_STATE_LISTEN_NO_MQ;
   vls_listener_wrk_set (vls, wrk_index, 0 /* is_active */ );
 }
 
@@ -599,7 +602,7 @@ vls_unshare_session (vcl_locked_session_t * vls, vcl_worker_t * wrk)
     return 0;
 
   s = vcl_session_get (wrk, vls->session_index);
-  if (s->session_state == STATE_LISTEN)
+  if (s->session_state == VCL_STATE_LISTEN)
     vls_listener_wrk_set (vls, wrk->wrk_index, 0 /* is_active */ );
 
   vls_shared_data_pool_rlock ();
@@ -629,7 +632,7 @@ vls_unshare_session (vcl_locked_session_t * vls, vcl_worker_t * wrk)
    * Cleanup vcl state
    */
   n_subscribers = vec_len (vls_shd->workers_subscribed);
-  do_disconnect = s->session_state == STATE_LISTEN || !n_subscribers;
+  do_disconnect = s->session_state == VCL_STATE_LISTEN || !n_subscribers;
   vcl_session_cleanup (wrk, s, vcl_session_handle (s), do_disconnect);
 
   /*
@@ -724,9 +727,9 @@ vls_share_session (vls_worker_t * vls_wrk, vcl_locked_session_t * vls)
       svm_fifo_add_subscriber (s->rx_fifo, vcl_wrk->vpp_wrk_index);
       svm_fifo_add_subscriber (s->tx_fifo, vcl_wrk->vpp_wrk_index);
     }
-  else if (s->session_state == STATE_LISTEN)
+  else if (s->session_state == VCL_STATE_LISTEN)
     {
-      s->session_state = STATE_LISTEN_NO_MQ;
+      s->session_state = VCL_STATE_LISTEN_NO_MQ;
     }
 }
 
@@ -736,7 +739,7 @@ vls_share_sessions (vls_worker_t * vls_parent_wrk, vls_worker_t * vls_wrk)
   vcl_locked_session_t *vls, *parent_vls;
 
   /* *INDENT-OFF* */
-  pool_foreach (vls, vls_wrk->vls_pool, ({
+  pool_foreach (vls, vls_wrk->vls_pool)  {
     /* Initialize sharing on parent session */
     if (vls->shared_data_index == ~0)
       {
@@ -745,7 +748,7 @@ vls_share_sessions (vls_worker_t * vls_parent_wrk, vls_worker_t * vls_wrk)
 	vls->shared_data_index = parent_vls->shared_data_index;
       }
     vls_share_session (vls_wrk, vls);
-  }));
+  }
   /* *INDENT-ON* */
 }
 
@@ -760,7 +763,6 @@ vls_worker_copy_on_fork (vcl_worker_t * parent_wrk)
   /*
    * init vcl worker
    */
-  wrk->vpp_event_queues = vec_dup (parent_wrk->vpp_event_queues);
   wrk->sessions = pool_dup (parent_wrk->sessions);
   wrk->session_index_by_vpp_handles =
     hash_dup (parent_wrk->session_index_by_vpp_handles);
@@ -794,7 +796,7 @@ vls_mt_acq_locks (vcl_locked_session_t * vls, vls_mt_ops_t op, int *locks_acq)
       s = vcl_session_get (wrk, vls->session_index);
       if (PREDICT_FALSE (!s))
 	return;
-      is_nonblk = VCL_SESS_ATTR_TEST (s->attr, VCL_SESS_ATTR_NONBLOCK);
+      is_nonblk = vcl_session_has_attr (s, VCL_SESS_ATTR_NONBLOCK);
     }
 
   switch (op)
@@ -896,15 +898,16 @@ vls_mt_session_migrate (vcl_locked_session_t * vls)
   VDBG (1, "migrate session of worker (session): %u (%u) -> %u (%u)",
 	vls->owner_vcl_wrk_index, src_sid, wrk_index, sid);
 
-  if (PREDICT_FALSE (session->is_vep && session->vep.next_sh != ~0))
+  if (PREDICT_FALSE ((session->flags & VCL_SESSION_F_IS_VEP)
+		     && session->vep.next_sh != ~0))
     {
       /* TODO: rollback? */
       VERR ("can't migrate nonempty epoll session");
       ASSERT (0);
       return;
     }
-  else if (PREDICT_FALSE (!session->is_vep &&
-			  session->session_state != STATE_CLOSED))
+  else if (PREDICT_FALSE (!(session->flags & VCL_SESSION_F_IS_VEP) &&
+			  session->session_state != VCL_STATE_CLOSED))
     {
       /* TODO: rollback? */
       VERR ("migrate NOT supported, session_status (%u)",
@@ -1099,7 +1102,7 @@ vls_mp_checks (vcl_locked_session_t * vls, int is_add)
   s = vcl_session_get (wrk, vls->session_index);
   switch (s->session_state)
     {
-    case STATE_LISTEN:
+    case VCL_STATE_LISTEN:
       if (is_add)
 	{
 	  vls_listener_wrk_set (vls, vls->worker_index, 1 /* is_active */ );
@@ -1107,7 +1110,7 @@ vls_mp_checks (vcl_locked_session_t * vls, int is_add)
 	}
       vls_listener_wrk_stop_listen (vls, vls->worker_index);
       break;
-    case STATE_LISTEN_NO_MQ:
+    case VCL_STATE_LISTEN_NO_MQ:
       if (!is_add)
 	break;
 
@@ -1337,14 +1340,14 @@ vls_select_mp_checks (vcl_si_set * read_map)
   wrk = vcl_worker_get_current ();
 
   /* *INDENT-OFF* */
-  clib_bitmap_foreach (si, read_map, ({
+  clib_bitmap_foreach (si, read_map)  {
     s = vcl_session_get (wrk, si);
-    if (s->session_state == STATE_LISTEN)
+    if (s->session_state == VCL_STATE_LISTEN)
       {
 	vls = vls_get (vls_session_index_to_vlsh (si));
 	vls_mp_checks (vls, 1 /* is_add */);
       }
-  }));
+  }
   /* *INDENT-ON* */
 }
 
@@ -1377,11 +1380,11 @@ vls_unshare_vcl_worker_sessions (vcl_worker_t * wrk)
   is_current = current_wrk == wrk->wrk_index;
 
   /* *INDENT-OFF* */
-  pool_foreach (s, wrk->sessions, ({
+  pool_foreach (s, wrk->sessions)  {
     vls = vls_get (vls_si_wi_to_vlsh (s->session_index, wrk->wrk_index));
     if (vls && (is_current || vls_is_shared_by_wrk (vls, current_wrk)))
       vls_unshare_session (vls, wrk);
-  }));
+  }
   /* *INDENT-ON* */
 }
 
@@ -1491,44 +1494,30 @@ static void
 vls_app_fork_child_handler (void)
 {
   vcl_worker_t *parent_wrk;
-  int rv, parent_wrk_index;
-  u8 *child_name;
+  int parent_wrk_index;
 
   parent_wrk_index = vcl_get_worker_index ();
   VDBG (0, "initializing forked child %u with parent wrk %u", getpid (),
 	parent_wrk_index);
 
   /*
-   * Allocate worker vcl
+   * Clear old state
    */
   vcl_set_worker_index (~0);
-  if (!vcl_worker_alloc_and_init ())
-    VERR ("couldn't allocate new worker");
 
   /*
-   * Attach to binary api
+   * Allocate and register vcl worker with vpp
    */
-  child_name = format (0, "%v-child-%u%c", vcm->app_name, getpid (), 0);
-  vcl_cleanup_bapi ();
-  vppcom_api_hookup ();
-  vcm->app_state = STATE_APP_START;
-  rv = vppcom_connect_to_vpp ((char *) child_name);
-  vec_free (child_name);
-  if (rv)
+  if (vppcom_worker_register ())
     {
-      VERR ("couldn't connect to VPP!");
+      VERR ("couldn't register new worker!");
       return;
     }
 
   /*
-   * Allocate/initialize vls worker
+   * Allocate/initialize vls worker and share sessions
    */
   vls_worker_alloc ();
-
-  /*
-   * Register worker with vpp and share sessions
-   */
-  vcl_worker_register_with_vpp ();
   parent_wrk = vcl_worker_get (parent_wrk_index);
   vls_worker_copy_on_fork (parent_wrk);
   parent_wrk->forked_child = vcl_get_worker_index ();
@@ -1726,11 +1715,7 @@ vls_use_real_epoll (void)
 void
 vls_register_vcl_worker (void)
 {
-  if (vppcom_worker_register () != VPPCOM_OK)
-    {
-      VERR ("failed to register worker");
-      return;
-    }
+  vls_mt_add ();
 }
 
 /*

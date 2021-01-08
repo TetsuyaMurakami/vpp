@@ -16,10 +16,9 @@
 #include <vppinfra/hash.h>
 #include <vnet/vnet.h>
 #include <vnet/ip/ip.h>
-#include <vnet/udp/udp.h>
+#include <vnet/udp/udp_local.h>
 #include <vnet/ethernet/ethernet.h>
-#include <vnet/lisp-gpe/lisp_gpe.h>
-#include <vnet/lisp-gpe/lisp_gpe_packet.h>
+#include <lisp/lisp-gpe/lisp_gpe_packet.h>
 #include <nsh/nsh.h>
 #include <nsh/nsh_packet.h>
 #include <nsh/nsh-md2-ioam/nsh_md2_ioam.h>

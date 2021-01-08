@@ -304,7 +304,7 @@ vlib_cli_get_possible_completions (u8 * str)
    * autocomplete the next level of subcommands */
   help_next_level = (vec_len (str) == 0) || isspace (str[vec_len (str) - 1]);
   /* *INDENT-OFF* */
-  clib_bitmap_foreach(index, match_bitmap, {
+  clib_bitmap_foreach (index, match_bitmap) {
     if (help_next_level && is_unique) {
 	c = get_sub_command (vcm, c, index);
 	vec_foreach (sc, c->sub_commands) {
@@ -314,7 +314,7 @@ vlib_cli_get_possible_completions (u8 * str)
     }
     sc = &c->sub_commands[index];
     vec_add1(result, (u8*) sc->name);
-  });
+  }
   /* *INDENT-ON* */
 
 done:
@@ -507,7 +507,7 @@ vlib_cli_dispatch_sub_commands (vlib_main_t * vm,
 	}
 
       (void) clib_mem_trace_enable_disable (0);
-      leak_report = format (0, "%U", format_mheap, clib_mem_get_heap (),
+      leak_report = format (0, "%U", format_clib_mem_heap, 0,
 			    1 /* verbose, i.e. print leaks */ );
       clib_mem_trace (0);
       vlib_cli_output (vm, "%v", leak_report);
@@ -703,6 +703,11 @@ vlib_cli_output (vlib_main_t * vm, char *fmt, ...)
   s = va_format (0, fmt, &va);
   va_end (va);
 
+  /* some format functions might return 0
+   * e.g. show int addr */
+  if (NULL == s)
+    return;
+
   /* Terminate with \n if not present. */
   if (vec_len (s) > 0 && s[vec_len (s) - 1] != '\n')
     vec_add1 (s, '\n');
@@ -739,8 +744,10 @@ static clib_error_t *
 show_memory_usage (vlib_main_t * vm,
 		   unformat_input_t * input, vlib_cli_command_t * cmd)
 {
+  clib_mem_main_t *mm = &clib_mem_main;
   int verbose __attribute__ ((unused)) = 0;
   int api_segment = 0, stats_segment = 0, main_heap = 0, numa_heaps = 0;
+  int map = 0;
   clib_error_t *error;
   u32 index = 0;
   int i;
@@ -760,6 +767,8 @@ show_memory_usage (vlib_main_t * vm,
 	main_heap = 1;
       else if (unformat (input, "numa-heaps"))
 	numa_heaps = 1;
+      else if (unformat (input, "map"))
+	map = 1;
       else
 	{
 	  error = clib_error_return (0, "unknown input `%U'",
@@ -768,16 +777,16 @@ show_memory_usage (vlib_main_t * vm,
 	}
     }
 
-  if ((api_segment + stats_segment + main_heap + numa_heaps) == 0)
+  if ((api_segment + stats_segment + main_heap + numa_heaps + map) == 0)
     return clib_error_return
-      (0, "Need one of api-segment, stats-segment, main-heap or numa-heaps");
+      (0, "Need one of api-segment, stats-segment, main-heap, numa-heaps "
+       "or map");
 
   if (api_segment)
     {
       void *oldheap = vl_msg_push_heap ();
       was_enabled = clib_mem_trace_enable_disable (0);
-      u8 *s_in_svm =
-	format (0, "%U\n", format_mheap, clib_mem_get_heap (), 1);
+      u8 *s_in_svm = format (0, "%U\n", format_clib_mem_heap, 0, 1);
       vl_msg_pop_heap (oldheap);
       u8 *s = vec_dup (s_in_svm);
 
@@ -793,8 +802,7 @@ show_memory_usage (vlib_main_t * vm,
     {
       void *oldheap = vlib_stats_push_heap (0);
       was_enabled = clib_mem_trace_enable_disable (0);
-      u8 *s_in_svm =
-	format (0, "%U\n", format_mheap, clib_mem_get_heap (), 1);
+      u8 *s_in_svm = format (0, "%U\n", format_clib_mem_heap, 0, 1);
       if (oldheap)
 	clib_mem_set_heap (oldheap);
       u8 *s = vec_dup (s_in_svm);
@@ -824,18 +832,10 @@ show_memory_usage (vlib_main_t * vm,
         /* *INDENT-OFF* */
         foreach_vlib_main (
         ({
-          struct dlmallinfo mi;
-          void *mspace;
-          mspace = clib_per_cpu_mheaps[index];
-
-          mi = mspace_mallinfo (mspace);
           vlib_cli_output (vm, "%sThread %d %s\n", index ? "\n":"", index,
                            vlib_worker_threads[index].name);
-          vlib_cli_output (vm, "  %U\n", format_page_map,
-                           pointer_to_uword (mspace_least_addr(mspace)),
-                           mi.arena);
-          vlib_cli_output (vm, "  %U\n", format_mheap,
-                           clib_per_cpu_mheaps[index],
+          vlib_cli_output (vm, "  %U\n", format_clib_mem_heap,
+                           mm->per_cpu_mheaps[index],
                            verbose);
           index++;
         }));
@@ -846,29 +846,63 @@ show_memory_usage (vlib_main_t * vm,
       }
     if (numa_heaps)
       {
-	struct dlmallinfo mi;
-	void *mspace;
-
-	for (i = 0; i < ARRAY_LEN (clib_per_numa_mheaps); i++)
+	for (i = 0; i < ARRAY_LEN (mm->per_numa_mheaps); i++)
 	  {
-	    if (clib_per_numa_mheaps[i] == 0)
+	    if (mm->per_numa_mheaps[i] == 0)
 	      continue;
-	    if (clib_per_numa_mheaps[i] == clib_per_cpu_mheaps[i])
+	    if (mm->per_numa_mheaps[i] == mm->per_cpu_mheaps[i])
 	      {
 		vlib_cli_output (vm, "Numa %d uses the main heap...", i);
 		continue;
 	      }
 	    was_enabled = clib_mem_trace_enable_disable (0);
-	    mspace = clib_per_numa_mheaps[i];
 
-	    mi = mspace_mallinfo (mspace);
 	    vlib_cli_output (vm, "Numa %d:", i);
-	    vlib_cli_output (vm, "  %U\n", format_page_map,
-			     pointer_to_uword (mspace_least_addr (mspace)),
-			     mi.arena);
-	    vlib_cli_output (vm, "  %U\n", format_mheap,
-			     clib_per_numa_mheaps[index], verbose);
+	    vlib_cli_output (vm, "  %U\n", format_clib_mem_heap,
+			     mm->per_numa_mheaps[index], verbose);
 	  }
+      }
+    if (map)
+      {
+	clib_mem_page_stats_t stats = { };
+	clib_mem_vm_map_hdr_t *hdr = 0;
+	u8 *s = 0;
+	int numa = -1;
+
+	s = format (s, "\n%-16s%7s%5s%7s%7s",
+		    "StartAddr", "size", "FD", "PageSz", "Pages");
+	while ((numa = vlib_mem_get_next_numa_node (numa)) != -1)
+	  s = format (s, " Numa%u", numa);
+	s = format (s, " NotMap");
+	s = format (s, " Name");
+	vlib_cli_output (vm, "%v", s);
+	vec_reset_length (s);
+
+	while ((hdr = clib_mem_vm_get_next_map_hdr (hdr)))
+	  {
+	    clib_mem_get_page_stats ((void *) hdr->base_addr,
+				     hdr->log2_page_sz, hdr->num_pages,
+				     &stats);
+	    s = format (s, "%016lx%7U",
+			hdr->base_addr, format_memory_size,
+			hdr->num_pages << hdr->log2_page_sz);
+
+	    if (hdr->fd != -1)
+	      s = format (s, "%5d", hdr->fd);
+	    else
+	      s = format (s, "%5s", " ");
+
+	    s = format (s, "%7U%7lu",
+			format_log2_page_size, hdr->log2_page_sz,
+			hdr->num_pages);
+	    while ((numa = vlib_mem_get_next_numa_node (numa)) != -1)
+	      s = format (s, "%6lu", stats.per_numa[numa]);
+	    s = format (s, "%7lu", stats.not_mapped);
+	    s = format (s, " %s", hdr->name);
+	    vlib_cli_output (vm, "%v", s);
+	    vec_reset_length (s);
+	  }
+	vec_free (s);
       }
   }
   return 0;
@@ -878,7 +912,7 @@ show_memory_usage (vlib_main_t * vm,
 VLIB_CLI_COMMAND (show_memory_usage_command, static) = {
   .path = "show memory",
   .short_help = "show memory [api-segment][stats-segment][verbose]\n"
-  "            [numa-heaps]",
+  "            [numa-heaps][map]",
   .function = show_memory_usage,
 };
 /* *INDENT-ON* */
@@ -921,6 +955,7 @@ enable_disable_memory_trace (vlib_main_t * vm,
 			     unformat_input_t * input,
 			     vlib_cli_command_t * cmd)
 {
+  clib_mem_main_t *mm = &clib_mem_main;
   unformat_input_t _line_input, *line_input = &_line_input;
   int enable = 1;
   int api_segment = 0;
@@ -1003,15 +1038,15 @@ enable_disable_memory_trace (vlib_main_t * vm,
 
   if (numa_id != ~0)
     {
-      if (numa_id >= ARRAY_LEN (clib_per_numa_mheaps))
+      if (numa_id >= ARRAY_LEN (mm->per_numa_mheaps))
 	return clib_error_return (0, "Numa %d out of range", numa_id);
-      if (clib_per_numa_mheaps[numa_id] == 0)
+      if (mm->per_numa_mheaps[numa_id] == 0)
 	return clib_error_return (0, "Numa %d heap not active", numa_id);
 
-      if (clib_per_numa_mheaps[numa_id] == clib_mem_get_heap ())
+      if (mm->per_numa_mheaps[numa_id] == clib_mem_get_heap ())
 	return clib_error_return (0, "Numa %d uses the main heap...",
 				  numa_id);
-      current_traced_heap = clib_per_numa_mheaps[numa_id];
+      current_traced_heap = mm->per_numa_mheaps[numa_id];
       oldheap = clib_mem_set_heap (current_traced_heap);
       clib_mem_trace (1);
       clib_mem_set_heap (oldheap);
@@ -1042,11 +1077,11 @@ restart_cmd_fn (vlib_main_t * vm, unformat_input_t * input,
 
   /* Close all known open files */
   /* *INDENT-OFF* */
-  pool_foreach(f, fm->file_pool,
-    ({
+  pool_foreach (f, fm->file_pool)
+     {
       if (f->file_descriptor > 2)
         close(f->file_descriptor);
-    }));
+    }
   /* *INDENT-ON* */
 
   /* Exec ourself */
@@ -1442,8 +1477,9 @@ done:
 #endif
 
 static clib_error_t *
-elog_trace_command_fn (vlib_main_t * vm,
-		       unformat_input_t * input, vlib_cli_command_t * cmd)
+event_logger_trace_command_fn (vlib_main_t * vm,
+			       unformat_input_t * input,
+			       vlib_cli_command_t * cmd)
 {
   unformat_input_t _line_input, *line_input = &_line_input;
   int enable = 1;
@@ -1532,21 +1568,20 @@ print_status:
  *
  * @cliexpar
  * @clistart
- * elog trace api cli barrier
- * elog trace api cli barrier disable
- * elog trace dispatch
- * elog trace circuit-node ethernet-input
- * elog trace
+ * event-logger trace api cli barrier
+ * event-logger trace api cli barrier disable
+ * event-logger trace dispatch
+ * event-logger trace circuit-node ethernet-input
  * @cliend
- * @cliexcmd{elog trace [api][cli][barrier][disable]}
+ * @cliexcmd{event-logger trace [api][cli][barrier][disable]}
 ?*/
 /* *INDENT-OFF* */
-VLIB_CLI_COMMAND (elog_trace_command, static) =
+VLIB_CLI_COMMAND (event_logger_trace_command, static) =
 {
-  .path = "elog trace",
-  .short_help = "elog trace [api][cli][barrier][dispatch]\n"
+  .path = "event-logger trace",
+  .short_help = "event-logger trace [api][cli][barrier][dispatch]\n"
   "[circuit-node <name> e.g. ethernet-input][disable]",
-  .function = elog_trace_command_fn,
+  .function = event_logger_trace_command_fn,
 };
 /* *INDENT-ON* */
 

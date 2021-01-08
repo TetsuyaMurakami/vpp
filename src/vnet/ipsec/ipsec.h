@@ -26,6 +26,10 @@
 #include <vnet/ipsec/ipsec_spd_policy.h>
 #include <vnet/ipsec/ipsec_sa.h>
 
+#include <vppinfra/bihash_8_16.h>
+
+#include <vppinfra/bihash_24_16.h>
+
 typedef clib_error_t *(*add_del_sa_sess_cb_t) (u32 sa_index, u8 is_add);
 typedef clib_error_t *(*check_support_cb_t) (ipsec_sa_t * sa);
 typedef clib_error_t *(*enable_disable_cb_t) (int is_enable);
@@ -78,7 +82,7 @@ typedef struct
   vnet_crypto_op_id_t dec_op_id;
   vnet_crypto_alg_t alg;
   u8 iv_size;
-  u8 block_size;
+  u8 block_align;
   u8 icv_size;
 } ipsec_main_crypto_alg_t;
 
@@ -125,8 +129,9 @@ typedef struct
   uword *ipsec6_if_pool_index_by_key;
   uword *ipsec_if_real_dev_by_show_dev;
   uword *ipsec_if_by_sw_if_index;
-  uword *tun4_protect_by_key;
-  uword *tun6_protect_by_key;
+
+  clib_bihash_8_16_t tun4_protect_by_key;
+  clib_bihash_24_16_t tun6_protect_by_key;
 
   /* node indices */
   u32 error_drop_node_index;

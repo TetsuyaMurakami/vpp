@@ -20,6 +20,12 @@
 #include <vppinfra/bihash_24_8.h>
 #include <vppinfra/bihash_template.c>
 
+ip6_fib_table_instance_t ip6_fib_table[IP6_FIB_NUM_TABLES];
+
+/* ip6 lookup table config parameters */
+u32 ip6_fib_table_nbuckets;
+uword ip6_fib_table_size;
+
 static void
 vnet_ip6_fib_init (u32 fib_index)
 {
@@ -183,7 +189,7 @@ ip6_fib_table_lookup (u32 fib_index,
     int i, n_p, rv;
     u64 fib;
 
-    table = &ip6_main.ip6_table[IP6_FIB_TABLE_NON_FWDING];
+    table = &ip6_fib_table[IP6_FIB_TABLE_NON_FWDING];
     n_p = vec_len (table->prefix_lengths_in_search_order);
 
     kv.key[0] = addr->as_u64[0];
@@ -230,7 +236,7 @@ ip6_fib_table_lookup_exact_match (u32 fib_index,
     u64 fib;
     int rv;
 
-    table = &ip6_main.ip6_table[IP6_FIB_TABLE_NON_FWDING];
+    table = &ip6_fib_table[IP6_FIB_TABLE_NON_FWDING];
     mask = &ip6_main.fib_masks[len];
     fib = ((u64)((fib_index))<<32);
 
@@ -248,14 +254,29 @@ ip6_fib_table_lookup_exact_match (u32 fib_index,
 static void
 compute_prefix_lengths_in_search_order (ip6_fib_table_instance_t *table)
 {
+    u8 *old, *prefix_lengths_in_search_order = NULL;
     int i;
-    vec_reset_length (table->prefix_lengths_in_search_order);
+
+    /*
+     * build the list in a scratch space then cutover so the workers
+     * can continue uninterrupted.
+     */
+    old = table->prefix_lengths_in_search_order;
+
     /* Note: bitmap reversed so this is in fact a longest prefix match */
-    clib_bitmap_foreach (i, table->non_empty_dst_address_length_bitmap,
-    ({
+    clib_bitmap_foreach (i, table->non_empty_dst_address_length_bitmap)
+     {
 	int dst_address_length = 128 - i;
-	vec_add1(table->prefix_lengths_in_search_order, dst_address_length);
-    }));
+	vec_add1(prefix_lengths_in_search_order, dst_address_length);
+    }
+
+    table->prefix_lengths_in_search_order = prefix_lengths_in_search_order;
+
+    /*
+     * let the workers go once round the track before we free the old set
+     */
+    vlib_worker_wait_one_loop();
+    vec_free(old);
 }
 
 void
@@ -268,7 +289,7 @@ ip6_fib_table_entry_remove (u32 fib_index,
     ip6_address_t *mask;
     u64 fib;
 
-    table = &ip6_main.ip6_table[IP6_FIB_TABLE_NON_FWDING];
+    table = &ip6_fib_table[IP6_FIB_TABLE_NON_FWDING];
     mask = &ip6_main.fib_masks[len];
     fib = ((u64)((fib_index))<<32);
 
@@ -300,7 +321,7 @@ ip6_fib_table_entry_insert (u32 fib_index,
     ip6_address_t *mask;
     u64 fib;
 
-    table = &ip6_main.ip6_table[IP6_FIB_TABLE_NON_FWDING];
+    table = &ip6_fib_table[IP6_FIB_TABLE_NON_FWDING];
     mask = &ip6_main.fib_masks[len];
     fib = ((u64)((fib_index))<<32);
 
@@ -311,12 +332,13 @@ ip6_fib_table_entry_insert (u32 fib_index,
 
     clib_bihash_add_del_24_8(&table->ip6_hash, &kv, 1);
 
-    table->dst_address_length_refcounts[len]++;
-
-    table->non_empty_dst_address_length_bitmap =
-        clib_bitmap_set (table->non_empty_dst_address_length_bitmap, 
-			 128 - len, 1);
-    compute_prefix_lengths_in_search_order (table);
+    if (0 == table->dst_address_length_refcounts[len]++)
+    {
+        table->non_empty_dst_address_length_bitmap =
+            clib_bitmap_set (table->non_empty_dst_address_length_bitmap,
+                             128 - len, 1);
+        compute_prefix_lengths_in_search_order (table);
+    }
 }
 
 u32 ip6_fib_table_fwding_lookup_with_if_index (ip6_main_t * im,
@@ -352,7 +374,7 @@ ip6_fib_table_fwding_dpo_update (u32 fib_index,
     ip6_address_t *mask;
     u64 fib;
 
-    table = &ip6_main.ip6_table[IP6_FIB_TABLE_FWDING];
+    table = &ip6_fib_table[IP6_FIB_TABLE_FWDING];
     mask = &ip6_main.fib_masks[len];
     fib = ((u64)((fib_index))<<32);
 
@@ -363,12 +385,13 @@ ip6_fib_table_fwding_dpo_update (u32 fib_index,
 
     clib_bihash_add_del_24_8(&table->ip6_hash, &kv, 1);
 
-    table->dst_address_length_refcounts[len]++;
-
-    table->non_empty_dst_address_length_bitmap =
-        clib_bitmap_set (table->non_empty_dst_address_length_bitmap, 
-			 128 - len, 1);
-    compute_prefix_lengths_in_search_order (table);
+    if (0 == table->dst_address_length_refcounts[len]++)
+    {
+        table->non_empty_dst_address_length_bitmap =
+            clib_bitmap_set (table->non_empty_dst_address_length_bitmap,
+                             128 - len, 1);
+        compute_prefix_lengths_in_search_order (table);
+    }
 }
 
 void
@@ -382,7 +405,7 @@ ip6_fib_table_fwding_dpo_remove (u32 fib_index,
     ip6_address_t *mask;
     u64 fib;
 
-    table = &ip6_main.ip6_table[IP6_FIB_TABLE_FWDING];
+    table = &ip6_fib_table[IP6_FIB_TABLE_FWDING];
     mask = &ip6_main.fib_masks[len];
     fib = ((u64)((fib_index))<<32);
 
@@ -494,7 +517,7 @@ ip6_fib_table_walk (u32 fib_index,
     };
 
     clib_bihash_foreach_key_value_pair_24_8(
-        &ip6_main.ip6_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash,
+        &ip6_fib_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash,
         ip6_fib_walk_cb,
         &ctx);
 
@@ -515,7 +538,7 @@ ip6_fib_table_sub_tree_walk (u32 fib_index,
     };
 
     clib_bihash_foreach_key_value_pair_24_8(
-        &ip6_main.ip6_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash,
+        &ip6_fib_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash,
         ip6_fib_walk_cb,
         &ctx);
 }
@@ -578,8 +601,8 @@ format_ip6_fib_table_memory (u8 * s, va_list * args)
 {
     uword bytes_inuse;
 
-    bytes_inuse = (alloc_arena_next(&(ip6_main.ip6_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash)) +
-                   alloc_arena_next(&(ip6_main.ip6_table[IP6_FIB_TABLE_FWDING].ip6_hash)));
+    bytes_inuse = (alloc_arena_next(&(ip6_fib_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash)) +
+                   alloc_arena_next(&(ip6_fib_table[IP6_FIB_TABLE_FWDING].ip6_hash)));
 
     s = format(s, "%=30s %=6d %=12ld\n",
                "IPv6 unicast",
@@ -664,17 +687,17 @@ ip6_show_fib (vlib_main_t * vm,
     {
         vlib_cli_output (vm, "IPv6 Non-Forwarding Hash Table:\n%U\n",
                          BV (format_bihash),
-                         &im6->ip6_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash,
+                         &ip6_fib_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash,
                          detail);
         vlib_cli_output (vm, "IPv6 Forwarding Hash Table:\n%U\n",
                          BV (format_bihash),
-                         &im6->ip6_table[IP6_FIB_TABLE_FWDING].ip6_hash,
+                         &ip6_fib_table[IP6_FIB_TABLE_FWDING].ip6_hash,
                          detail);
         return (NULL);
     }
 
-    pool_foreach (fib_table, im6->fibs,
-    ({
+    pool_foreach (fib_table, im6->fibs)
+     {
         fib_source_t source;
         u8 *s = NULL;
 
@@ -711,7 +734,7 @@ ip6_show_fib (vlib_main_t * vm,
 	/* Show summary? */
 	if (! verbose)
 	{
-	    clib_bihash_24_8_t * h = &im6->ip6_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash;
+	    clib_bihash_24_8_t * h = &ip6_fib_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash;
 	    int len;
 
 	    vlib_cli_output (vm, "%=20s%=16s", "Prefix length", "Count");
@@ -739,7 +762,7 @@ ip6_show_fib (vlib_main_t * vm,
 	{
 	    ip6_fib_table_show_one(fib, vm, &matching_address, mask_len, detail);
 	}
-    }));
+    }
 
     return 0;
 }
@@ -845,3 +868,55 @@ VLIB_CLI_COMMAND (ip6_show_fib_command, static) = {
     .function = ip6_show_fib,
 };
 /* *INDENT-ON* */
+
+static clib_error_t *
+ip6_config (vlib_main_t * vm, unformat_input_t * input)
+{
+  uword heapsize = 0;
+  u32 nbuckets = 0;
+
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (input, "hash-buckets %d", &nbuckets))
+          ;
+      else if (unformat (input, "heap-size %U",
+			 unformat_memory_size, &heapsize))
+	;
+      else
+	return clib_error_return (0, "unknown input '%U'",
+				  format_unformat_error, input);
+    }
+
+  ip6_fib_table_nbuckets = nbuckets;
+  ip6_fib_table_size = heapsize;
+
+  return 0;
+}
+
+VLIB_EARLY_CONFIG_FUNCTION (ip6_config, "ip6");
+
+static clib_error_t *
+ip6_fib_init (vlib_main_t * vm)
+{
+    if (ip6_fib_table_nbuckets == 0)
+        ip6_fib_table_nbuckets = IP6_FIB_DEFAULT_HASH_NUM_BUCKETS;
+
+    ip6_fib_table_nbuckets = 1 << max_log2 (ip6_fib_table_nbuckets);
+
+    if (ip6_fib_table_size == 0)
+        ip6_fib_table_size = IP6_FIB_DEFAULT_HASH_MEMORY_SIZE;
+
+    clib_bihash_init_24_8 (&(ip6_fib_table[IP6_FIB_TABLE_FWDING].ip6_hash),
+                           "ip6 FIB fwding table",
+                           ip6_fib_table_nbuckets, ip6_fib_table_size);
+    clib_bihash_init_24_8 (&ip6_fib_table[IP6_FIB_TABLE_NON_FWDING].ip6_hash,
+                           "ip6 FIB non-fwding table",
+                           ip6_fib_table_nbuckets, ip6_fib_table_size);
+
+    return (NULL);
+}
+
+VLIB_INIT_FUNCTION (ip6_fib_init) =
+{
+  .runs_before = VLIB_INITS("ip6_lookup_init"),
+};

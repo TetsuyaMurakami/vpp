@@ -3,7 +3,6 @@ import unittest
 
 from scapy.layers.l2 import Ether
 from scapy.layers.inet import IP, ICMP
-import six
 
 from framework import VppTestCase, VppTestRunner, running_extended_tests
 from remote_test import RemoteClass, RemoteVppTestCase
@@ -15,6 +14,10 @@ from vpp_papi import VppEnum
 
 class TestMemif(VppTestCase):
     """ Memif Test Case """
+
+    @classmethod
+    def force_solo(cls):
+        return True
 
     @classmethod
     def setUpClass(cls):

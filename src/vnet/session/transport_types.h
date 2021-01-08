@@ -19,6 +19,8 @@
 #include <vnet/vnet.h>
 #include <vnet/ip/ip.h>
 #include <vnet/tcp/tcp_debug.h>
+#include <vppinfra/bihash_24_8.h>
+
 
 #define TRANSPORT_MAX_HDRS_LEN    140	/* Max number of bytes for headers */
 
@@ -63,10 +65,10 @@ typedef enum transport_connection_flags_
 typedef struct _spacer
 {
   u64 bytes_per_sec;
-  u64 bucket;
+  i64 bucket;
   clib_us_time_t last_update;
   f32 tokens_per_period;
-  u32 idle_timeout_us;
+  u32 max_burst;
 } spacer_t;
 
 #define TRANSPORT_CONN_ID_LEN	44
@@ -144,8 +146,8 @@ typedef struct _transport_connection
 #define c_stats connection.stats
 #define c_pacer connection.pacer
 #define c_flags connection.flags
-#define s_ho_handle pacer.bucket
-#define c_s_ho_handle connection.pacer.bucket
+#define s_ho_handle pacer.bytes_per_sec
+#define c_s_ho_handle connection.pacer.bytes_per_sec
 } transport_connection_t;
 
 STATIC_ASSERT (STRUCT_OFFSET_OF (transport_connection_t, s_index)

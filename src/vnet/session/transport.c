@@ -632,9 +632,9 @@ format_transport_pacer (u8 * s, va_list * args)
 
   now = transport_us_time_now (thread_index);
   diff = now - pacer->last_update;
-  s = format (s, "rate %lu bucket %lu t/p %.3f last_update %U idle %u",
+  s = format (s, "rate %lu bucket %ld t/p %.3f last_update %U burst %u",
 	      pacer->bytes_per_sec, pacer->bucket, pacer->tokens_per_period,
-	      format_clib_us_time, diff, pacer->idle_timeout_us);
+	      format_clib_us_time, diff, pacer->max_burst);
   return s;
 }
 
@@ -644,38 +644,46 @@ spacer_max_burst (spacer_t * pacer, clib_us_time_t time_now)
   u64 n_periods = (time_now - pacer->last_update);
   u64 inc;
 
-  if (PREDICT_FALSE (n_periods > pacer->idle_timeout_us))
-    {
-      pacer->last_update = time_now;
-      pacer->bucket = TRANSPORT_PACER_MIN_BURST;
-      return TRANSPORT_PACER_MIN_BURST;
-    }
-
   if ((inc = (f32) n_periods * pacer->tokens_per_period) > 10)
     {
       pacer->last_update = time_now;
-      pacer->bucket = clib_min (pacer->bucket + inc, pacer->bytes_per_sec);
+      pacer->bucket = clib_min (pacer->bucket + inc, pacer->max_burst);
     }
 
-  return clib_min (pacer->bucket, TRANSPORT_PACER_MAX_BURST);
+  return pacer->bucket > 0 ? pacer->max_burst : 0;
 }
 
 static inline void
 spacer_update_bucket (spacer_t * pacer, u32 bytes)
 {
-  ASSERT (pacer->bucket >= bytes);
   pacer->bucket -= bytes;
 }
 
 static inline void
 spacer_set_pace_rate (spacer_t * pacer, u64 rate_bytes_per_sec,
-		      clib_us_time_t rtt)
+		      clib_us_time_t rtt, clib_time_type_t sec_per_loop)
 {
+  clib_us_time_t max_time;
+
   ASSERT (rate_bytes_per_sec != 0);
   pacer->bytes_per_sec = rate_bytes_per_sec;
   pacer->tokens_per_period = rate_bytes_per_sec * CLIB_US_TIME_PERIOD;
-  pacer->idle_timeout_us = clib_max (rtt * TRANSPORT_PACER_IDLE_FACTOR,
-				     TRANSPORT_PACER_MIN_IDLE);
+
+  /* Allow a min number of bursts per rtt, if their size is acceptable. Goal
+   * is to spread the sending of data over the rtt but to also allow for some
+   * coalescing that can potentially
+   * 1) reduce load on session layer by reducing scheduling frequency for a
+   *    session and
+   * 2) optimize sending when tso if available
+   *
+   * Max "time-length" of a burst cannot be less than 1us or more than 1ms.
+   */
+  max_time = clib_max (rtt / TRANSPORT_PACER_BURSTS_PER_RTT,
+		       (clib_us_time_t) (sec_per_loop * CLIB_US_TIME_FREQ));
+  max_time = clib_clamp (max_time, 1 /* 1us */ , 1000 /* 1ms */ );
+  pacer->max_burst = (rate_bytes_per_sec * max_time) * CLIB_US_TIME_PERIOD;
+  pacer->max_burst = clib_clamp (pacer->max_burst, TRANSPORT_PACER_MIN_BURST,
+				 TRANSPORT_PACER_MAX_BURST);
 }
 
 static inline u64
@@ -696,7 +704,8 @@ transport_connection_tx_pacer_reset (transport_connection_t * tc,
 				     u64 rate_bytes_per_sec, u32 start_bucket,
 				     clib_us_time_t rtt)
 {
-  spacer_set_pace_rate (&tc->pacer, rate_bytes_per_sec, rtt);
+  spacer_set_pace_rate (&tc->pacer, rate_bytes_per_sec, rtt,
+			transport_seconds_per_loop (tc->thread_index));
   spacer_reset (&tc->pacer, transport_us_time_now (tc->thread_index),
 		start_bucket);
 }
@@ -722,7 +731,8 @@ void
 transport_connection_tx_pacer_update (transport_connection_t * tc,
 				      u64 bytes_per_sec, clib_us_time_t rtt)
 {
-  spacer_set_pace_rate (&tc->pacer, bytes_per_sec, rtt);
+  spacer_set_pace_rate (&tc->pacer, bytes_per_sec, rtt,
+			transport_seconds_per_loop (tc->thread_index));
 }
 
 u32
@@ -767,6 +777,14 @@ transport_connection_reschedule (transport_connection_t * tc)
 	if (svm_fifo_set_event (s->tx_fifo))
 	  sesssion_reschedule_tx (tc);
     }
+}
+
+void
+transport_fifos_init_ooo (transport_connection_t * tc)
+{
+  session_t *s = session_get (tc->s_index, tc->thread_index);
+  svm_fifo_init_ooo_lookup (s->rx_fifo, 0 /* ooo enq */ );
+  svm_fifo_init_ooo_lookup (s->tx_fifo, 1 /* ooo deq */ );
 }
 
 void
