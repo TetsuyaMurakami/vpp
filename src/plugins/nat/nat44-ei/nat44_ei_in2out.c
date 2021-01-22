@@ -29,6 +29,7 @@
 #include <nat/nat_inlines.h>
 #include <nat/lib/nat_syslog.h>
 #include <nat/nat44-ei/nat44_ei_inlines.h>
+#include <nat/nat44-ei/nat44_ei.h>
 
 #include <vppinfra/hash.h>
 #include <vppinfra/error.h>
@@ -130,10 +131,10 @@ snat_not_translate (snat_main_t * sm, vlib_node_runtime_t * node,
       ip4_address_t placeholder_addr;
       u16 placeholder_port;
       u32 placeholder_fib_index;
-      if (!snat_static_mapping_match
-	  (sm, ip0->dst_address, udp0->dst_port, sm->outside_fib_index,
-	   proto0, &placeholder_addr, &placeholder_port,
-	   &placeholder_fib_index, 1, 0, 0, 0, 0, 0, 0))
+      if (!nat44_ei_static_mapping_match (ip0->dst_address, udp0->dst_port,
+					  sm->outside_fib_index, proto0,
+					  &placeholder_addr, &placeholder_port,
+					  &placeholder_fib_index, 1, 0, 0))
 	return 0;
     }
   else
@@ -270,9 +271,9 @@ slow_path (snat_main_t * sm, vlib_buffer_t * b0,
     }
 
   /* First try to match static mapping by local address and port */
-  if (snat_static_mapping_match
-      (sm, i2o_addr, i2o_port, rx_fib_index0, nat_proto, &sm_addr,
-       &sm_port, &sm_fib_index, 0, 0, 0, 0, 0, &identity_nat, 0))
+  if (nat44_ei_static_mapping_match (i2o_addr, i2o_port, rx_fib_index0,
+				     nat_proto, &sm_addr, &sm_port,
+				     &sm_fib_index, 0, 0, &identity_nat))
     {
       /* Try to create dynamic translation */
       if (sm->alloc_addr_and_port (
@@ -592,9 +593,9 @@ icmp_match_in2out_fast (snat_main_t * sm, vlib_node_runtime_t * node,
   u16 sm_port;
   u32 sm_fib_index;
 
-  if (snat_static_mapping_match
-      (sm, *addr, *port, *fib_index, *proto, &sm_addr, &sm_port,
-       &sm_fib_index, 0, &is_addr_only, 0, 0, 0, 0, 0))
+  if (nat44_ei_static_mapping_match (*addr, *port, *fib_index, *proto,
+				     &sm_addr, &sm_port, &sm_fib_index, 0,
+				     &is_addr_only, 0))
     {
       if (PREDICT_FALSE (snat_not_translate_fast (sm, node, sw_if_index0, ip0,
 						  IP_PROTOCOL_ICMP,
@@ -784,8 +785,7 @@ icmp_in2out (snat_main_t * sm,
 
   if (vnet_buffer (b0)->sw_if_index[VLIB_TX] == ~0)
     {
-      if (0 != snat_icmp_hairpinning (sm, b0, ip0, icmp0,
-				      sm->endpoint_dependent))
+      if (0 != snat_icmp_hairpinning (sm, b0, ip0, icmp0))
 	vnet_buffer (b0)->sw_if_index[VLIB_TX] = fib_index;
     }
 
@@ -1831,9 +1831,9 @@ VLIB_NODE_FN (snat_in2out_fast_node) (vlib_main_t * vm,
 	      goto trace0;
 	    }
 
-	  if (snat_static_mapping_match
-	      (sm, ip0->src_address, udp0->src_port, rx_fib_index0, proto0,
-	       &sm0_addr, &sm0_port, &sm0_fib_index, 0, 0, 0, 0, 0, 0, 0))
+	  if (nat44_ei_static_mapping_match (
+		ip0->src_address, udp0->src_port, rx_fib_index0, proto0,
+		&sm0_addr, &sm0_port, &sm0_fib_index, 0, 0, 0))
 	    {
 	      b0->error = node->errors[SNAT_IN2OUT_ERROR_NO_TRANSLATION];
 	      next0 = SNAT_IN2OUT_NEXT_DROP;
@@ -1903,9 +1903,8 @@ VLIB_NODE_FN (snat_in2out_fast_node) (vlib_main_t * vm,
 	    }
 
 	  /* Hairpinning */
-	  is_hairpinning =
-	    snat_hairpinning (vm, node, sm, b0, ip0, udp0, tcp0, proto0, 0,
-			      0 /* do_trace */ );
+	  is_hairpinning = snat_hairpinning (vm, node, sm, b0, ip0, udp0, tcp0,
+					     proto0, 0 /* do_trace */);
 
 	trace0:
 	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE)

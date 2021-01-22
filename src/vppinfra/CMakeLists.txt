@@ -59,6 +59,7 @@ set(VPPINFRA_SRCS
   graph.c
   hash.c
   heap.c
+  interrupt.c
   longjmp.S
   macros.c
   maplog.c
@@ -101,6 +102,7 @@ set(VPPINFRA_HEADERS
   sanitizer.h
   bihash_16_8.h
   bihash_24_8.h
+  bihash_32_8.h
   bihash_40_8.h
   bihash_48_8.h
   bihash_8_8.h
@@ -133,6 +135,7 @@ set(VPPINFRA_HEADERS
   graph.h
   hash.h
   heap.h
+  interrupt.h
   lb_hash_hash.h
   llist.h
   lock.h
@@ -200,9 +203,13 @@ if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
    )
 endif()
 
+option(VPP_USE_EXTERNAL_LIBEXECINFO "Use external libexecinfo (useful for non-glibc targets)." OFF)
+if(VPP_USE_EXTERNAL_LIBEXECINFO)
+  set(EXECINFO_LIB execinfo)
+endif()
 add_vpp_library(vppinfra
   SOURCES ${VPPINFRA_SRCS}
-  LINK_LIBRARIES m
+  LINK_LIBRARIES m ${EXECINFO_LIB}
   INSTALL_HEADERS ${VPPINFRA_HEADERS}
   COMPONENT libvppinfra
   LTO

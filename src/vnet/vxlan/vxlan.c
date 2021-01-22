@@ -20,6 +20,7 @@
 #include <vnet/mfib/mfib_table.h>
 #include <vnet/adj/adj_mcast.h>
 #include <vnet/adj/rewrite.h>
+#include <vnet/dpo/drop_dpo.h>
 #include <vnet/interface.h>
 #include <vnet/flow/flow.h>
 #include <vnet/udp/udp_local.h>
@@ -43,6 +44,13 @@
 
 
 vxlan_main_t vxlan_main;
+
+static u32
+vxlan_eth_flag_change (vnet_main_t *vnm, vnet_hw_interface_t *hi, u32 flags)
+{
+  /* nothing for now */
+  return 0;
+}
 
 static u8 *
 format_decap_next (u8 * s, va_list * args)
@@ -151,11 +159,19 @@ vxlan_tunnel_restack_dpo (vxlan_tunnel_t * t)
    * skip single bucket load balance dpo's */
   while (DPO_LOAD_BALANCE == dpo.dpoi_type)
     {
-      load_balance_t *lb = load_balance_get (dpo.dpoi_index);
+      const load_balance_t *lb;
+      const dpo_id_t *choice;
+
+      lb = load_balance_get (dpo.dpoi_index);
       if (lb->lb_n_buckets > 1)
 	break;
 
-      dpo_copy (&dpo, load_balance_get_bucket_i (lb, 0));
+      choice = load_balance_get_bucket_i (lb, 0);
+
+      if (DPO_RECEIVE == choice->dpoi_type)
+	dpo_copy (&dpo, drop_dpo_get (choice->dpoi_proto));
+      else
+	dpo_copy (&dpo, choice);
     }
 
   u32 encap_index = is_ip4 ?
@@ -346,6 +362,8 @@ int vnet_vxlan_add_del_tunnel
   vxlan4_tunnel_key_t key4;
   vxlan6_tunnel_key_t key6;
   u32 is_ip6 = a->is_ip6;
+  vlib_main_t *vm = vlib_get_main ();
+  u8 hw_addr[6];
 
   int not_found;
   if (!is_ip6)
@@ -412,15 +430,30 @@ int vnet_vxlan_add_del_tunnel
 	  pool_put (vxm->tunnels, t);
 	  return VNET_API_ERROR_INSTANCE_IN_USE;
 	}
+
+      f64 now = vlib_time_now (vm);
+      u32 rnd;
+      rnd = (u32) (now * 1e6);
+      rnd = random_u32 (&rnd);
+
+      memcpy (hw_addr + 2, &rnd, sizeof (rnd));
+      hw_addr[0] = 2;
+      hw_addr[1] = 0xfe;
+
+      if (ethernet_register_interface (vnm, vxlan_device_class.index,
+				       dev_instance, hw_addr, &t->hw_if_index,
+				       vxlan_eth_flag_change))
+	{
+	  pool_put (vxm->tunnels, t);
+	  return VNET_API_ERROR_SYSCALL_ERROR_2;
+	}
+
       hash_set (vxm->instance_used, user_instance, 1);
 
       t->dev_instance = dev_instance;	/* actual */
       t->user_instance = user_instance;	/* name */
       t->flow_index = ~0;
 
-      t->hw_if_index = vnet_register_interface
-	(vnm, vxlan_device_class.index, dev_instance,
-	 vxlan_hw_class.index, dev_instance);
       vnet_hw_interface_t *hi = vnet_get_hw_interface (vnm, t->hw_if_index);
 
       /* Set vxlan tunnel output node */
@@ -452,7 +485,7 @@ int vnet_vxlan_add_del_tunnel
 
       if (add_failed)
 	{
-	  vnet_delete_hw_interface (vnm, t->hw_if_index);
+	  ethernet_delete_interface (vnm, t->hw_if_index);
 	  hash_unset (vxm->instance_used, t->user_instance);
 	  pool_put (vxm->tunnels, t);
 	  return VNET_API_ERROR_INVALID_REGISTRATION;
@@ -601,7 +634,7 @@ int vnet_vxlan_add_del_tunnel
 	  mcast_shared_remove (&t->dst);
 	}
 
-      vnet_delete_hw_interface (vnm, t->hw_if_index);
+      ethernet_delete_interface (vnm, t->hw_if_index);
       hash_unset (vxm->instance_used, t->user_instance);
 
       fib_node_deinit (&t->node);

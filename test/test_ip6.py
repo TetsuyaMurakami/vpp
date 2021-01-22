@@ -19,7 +19,7 @@ from scapy.utils6 import in6_getnsma, in6_getnsmac, in6_ptop, in6_islladdr, \
     in6_mactoifaceid
 from six import moves
 
-from framework import VppTestCase, VppTestRunner
+from framework import VppTestCase, VppTestRunner, tag_run_solo
 from util import ppp, ip6_normalize, mk_ll_addr
 from vpp_papi import VppEnum
 from vpp_ip import DpoProto, VppIpPuntPolicer, VppIpPuntRedirect
@@ -162,12 +162,9 @@ class TestIPv6ND(VppTestCase):
         self.assertEqual(ip.dst, dip)
 
 
+@tag_run_solo
 class TestIPv6(TestIPv6ND):
     """ IPv6 Test Case """
-
-    @classmethod
-    def force_solo(cls):
-        return True
 
     @classmethod
     def setUpClass(cls):
@@ -1169,6 +1166,7 @@ class TestICMPv6Echo(VppTestCase):
         for i in self.pg_interfaces:
             i.admin_up()
             i.config_ip6()
+            i.resolve_ndp(link_layer=True)
             i.resolve_ndp()
 
     def tearDown(self):
@@ -1186,39 +1184,34 @@ class TestICMPv6Echo(VppTestCase):
             - Check outgoing ICMPv6 Echo Reply message on pg0 interface.
         """
 
-        icmpv6_id = 0xb
-        icmpv6_seq = 5
-        icmpv6_data = b'\x0a' * 18
-        p_echo_request = (Ether(src=self.pg0.remote_mac,
-                                dst=self.pg0.local_mac) /
-                          IPv6(src=self.pg0.remote_ip6,
-                               dst=self.pg0.local_ip6) /
-                          ICMPv6EchoRequest(
-                              id=icmpv6_id,
-                              seq=icmpv6_seq,
-                              data=icmpv6_data))
+        # test both with global and local ipv6 addresses
+        dsts = (self.pg0.local_ip6, self.pg0.local_ip6_ll)
+        id = 0xb
+        seq = 5
+        data = b'\x0a' * 18
+        p = list()
+        for dst in dsts:
+            p.append((Ether(src=self.pg0.remote_mac, dst=self.pg0.local_mac) /
+                      IPv6(src=self.pg0.remote_ip6, dst=dst) /
+                      ICMPv6EchoRequest(id=id, seq=seq, data=data)))
 
-        self.pg0.add_stream(p_echo_request)
+        self.pg0.add_stream(p)
         self.pg_enable_capture(self.pg_interfaces)
         self.pg_start()
+        rxs = self.pg0.get_capture(len(dsts))
 
-        rx = self.pg0.get_capture(1)
-        rx = rx[0]
-        ether = rx[Ether]
-        ipv6 = rx[IPv6]
-        icmpv6 = rx[ICMPv6EchoReply]
-
-        self.assertEqual(ether.src, self.pg0.local_mac)
-        self.assertEqual(ether.dst, self.pg0.remote_mac)
-
-        self.assertEqual(ipv6.src, self.pg0.local_ip6)
-        self.assertEqual(ipv6.dst, self.pg0.remote_ip6)
-
-        self.assertEqual(
-            icmp6types[icmpv6.type], "Echo Reply")
-        self.assertEqual(icmpv6.id, icmpv6_id)
-        self.assertEqual(icmpv6.seq, icmpv6_seq)
-        self.assertEqual(icmpv6.data, icmpv6_data)
+        for rx, dst in zip(rxs, dsts):
+            ether = rx[Ether]
+            ipv6 = rx[IPv6]
+            icmpv6 = rx[ICMPv6EchoReply]
+            self.assertEqual(ether.src, self.pg0.local_mac)
+            self.assertEqual(ether.dst, self.pg0.remote_mac)
+            self.assertEqual(ipv6.src, dst)
+            self.assertEqual(ipv6.dst, self.pg0.remote_ip6)
+            self.assertEqual(icmp6types[icmpv6.type], "Echo Reply")
+            self.assertEqual(icmpv6.id, id)
+            self.assertEqual(icmpv6.seq, seq)
+            self.assertEqual(icmpv6.data, data)
 
 
 class TestIPv6RD(TestIPv6ND):
@@ -2073,8 +2066,8 @@ class TestIP6LoadBalance(VppTestCase):
         #  - now only the stream with differing source address will
         #    load-balance
         #
-        self.vapi.set_ip_flow_hash(vrf_id=0, src=1, dst=1, sport=0, dport=0,
-                                   is_ipv6=1)
+        self.vapi.set_ip_flow_hash(vrf_id=0, src=1, dst=1, proto=1,
+                                   sport=0, dport=0, is_ipv6=1)
 
         self.send_and_expect_load_balancing(self.pg0, src_ip_pkts,
                                             [self.pg1, self.pg2])
@@ -2086,7 +2079,7 @@ class TestIP6LoadBalance(VppTestCase):
         # change the flow hash config back to defaults
         #
         self.vapi.set_ip_flow_hash(vrf_id=0, src=1, dst=1, sport=1, dport=1,
-                                   is_ipv6=1)
+                                   proto=1, is_ipv6=1)
 
         #
         # Recursive prefixes

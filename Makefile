@@ -85,10 +85,12 @@ else ifeq ($(OS_VERSION_ID),20.04)
 	DEB_DEPENDS += libelf-dev # for libbpf (af_xdp)
 	DEB_DEPENDS += clang-format-10
 	LIBFFI=libffi7
-else ifeq ($(OS_ID)-$(OS_VERSION_ID),debian-9)
-	DEB_DEPENDS += libssl1.0-dev
-	DEB_DEPENDS += python-all python-pip
-	DEB_DEPENDS += python-dev python-all python-pip python-virtualenv
+else ifeq ($(OS_VERSION_ID),20.10)
+        DEB_DEPENDS += python3-virtualenv
+        DEB_DEPENDS += libssl-dev
+        DEB_DEPENDS += libelf-dev # for libbpf (af_xdp)
+        DEB_DEPENDS += clang-format-10
+        LIBFFI=libffi8ubuntu1
 else ifeq ($(OS_ID)-$(OS_VERSION_ID),debian-10)
 	DEB_DEPENDS += libssl-dev
 	DEB_DEPENDS += libelf-dev # for libbpf (af_xdp)
@@ -124,7 +126,7 @@ ifeq ($(OS_ID),fedora)
 	RPM_DEPENDS_GROUPS = 'C Development Tools and Libraries'
 else ifeq ($(OS_ID)-$(OS_VERSION_ID),centos-8)
 	RPM_DEPENDS += yum-utils
-	RPM_DEPENDS += compat-openssl10
+	RPM_DEPENDS += compat-openssl10 openssl-devel
 	RPM_DEPENDS += python2-devel python36-devel python3-ply
 	RPM_DEPENDS += python3-virtualenv python3-jsonschema
 	RPM_DEPENDS += cmake
@@ -510,7 +512,7 @@ endef
 endif
 
 %.files: .FORCE
-	@find . \( -name '*\.[chyS]' -o -name '*\.java' -o -name '*\.lex' \) -and \
+	@find . \( -name '*\.[chyS]' -o -name '*\.java' -o -name '*\.lex' -o -name '*\.py' \) -and \
 		\( -not -path './build-root*' -o -path \
 		'./build-root/build-vpp_debug-native/dpdk*' \) > $@
 

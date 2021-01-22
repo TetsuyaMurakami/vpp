@@ -164,6 +164,7 @@ typedef struct
   u16 n_enqueued;
   u8 int_mode;
   u8 buffer_pool_index;
+  u32 queue_index;
 } avf_rxq_t;
 
 typedef struct
@@ -370,6 +371,17 @@ avf_reg_flush (avf_device_t * ad)
 {
   avf_reg_read (ad, AVFGEN_RSTAT);
   asm volatile ("":::"memory");
+}
+
+static inline void
+avf_tail_write (volatile u32 *addr, u32 val)
+{
+#ifdef __MOVDIRI__
+  _mm_sfence ();
+  _directstoreu_u32 ((void *) addr, val);
+#else
+  clib_atomic_store_rel_n (addr, val);
+#endif
 }
 
 static_always_inline int

@@ -70,7 +70,7 @@ list(APPEND BUILD_TYPES "release")
 string(CONCAT CMAKE_C_FLAGS_RELEASE
   "-O2 "
   "-fstack-protector "
-  "-DFORTIFY_SOURCE=2 "
+  "-D_FORTIFY_SOURCE=2 "
   "-fno-common "
 )
 
@@ -82,7 +82,7 @@ string(CONCAT CMAKE_C_FLAGS_DEBUG
   "-O0 "
   "-DCLIB_DEBUG "
   "-fstack-protector "
-  "-DFORTIFY_SOURCE=2 "
+  "-D_FORTIFY_SOURCE=2 "
   "-fno-common "
 )
 
@@ -136,7 +136,10 @@ endif (VPP_ENABLE_SANITIZE_ADDR)
 ##############################################################################
 # install config
 ##############################################################################
-set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib")
+option(VPP_SET_RPATH "Set rpath for resulting binaries and libraries." ON)
+if(VPP_SET_RPATH)
+  set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib")
+endif()
 set(CMAKE_INSTALL_MESSAGE NEVER)
 
 include_directories (
