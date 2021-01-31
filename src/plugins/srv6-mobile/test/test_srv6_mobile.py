@@ -69,7 +69,7 @@ class TestSRv6EndMGTP4E(VppTestCase):
         pkts = self.create_packets([("A::1", "B::1"), ("C::1", "D::1")])
 
         self.vapi.cli(
-            "sr localsid address {} behavior end.m.gtp4.e v4src_position 64"
+            "sr localsid address {} behavior end.m.gtp4.e v4src_position 64 fib-table 0"
             .format(pkts[0]['IPv6'].dst))
         self.logger.info(self.vapi.cli("show sr localsids"))
 
@@ -236,7 +236,7 @@ class TestSRv6EndMGTP6E(VppTestCase):
         pkts = self.create_packets([("A::1", "B::1"), ("C::1", "D::1")])
 
         self.vapi.cli(
-            "sr localsid prefix {}/64 behavior end.m.gtp6.e"
+            "sr localsid prefix {}/64 behavior end.m.gtp6.e fib-table 0"
             .format(pkts[0]['IPv6'].dst))
         self.vapi.cli(
             "ip route add a1::/64 via {}".format(self.ip6_nhop))

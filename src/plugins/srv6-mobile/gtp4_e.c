@@ -72,6 +72,8 @@ clb_format_srv6_end_m_gtp4_e (u8 * s, va_list * args)
 
   s = format (s, "IPv4 address position: %d\n", ls_mem->v4src_position);
 
+  s = format (s, "Fib Table %d\n", ls_mem->fib_table);
+
   return s;
 }
 
@@ -81,8 +83,9 @@ clb_unformat_srv6_end_m_gtp4_e (unformat_input_t * input, va_list * args)
   void **plugin_mem_p = va_arg (*args, void **);
   srv6_end_gtp4_param_t *ls_mem;
   u32 v4src_position;
+  u32 fib_table;
 
-  if (!unformat (input, "end.m.gtp4.e v4src_position %d", &v4src_position))
+  if (!unformat (input, "end.m.gtp4.e v4src_position %d fib-table %d", &v4src_position, &fib_table))
     return 0;
 
   ls_mem = clib_mem_alloc_aligned_at_offset (sizeof *ls_mem, 0, 0, 1);
@@ -90,6 +93,7 @@ clb_unformat_srv6_end_m_gtp4_e (unformat_input_t * input, va_list * args)
   *plugin_mem_p = ls_mem;
 
   ls_mem->v4src_position = v4src_position;
+  ls_mem->fib_table = fib_table;
 
   return 1;
 }

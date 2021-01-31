@@ -613,6 +613,8 @@ VLIB_NODE_FN (srv6_end_m_gtp4_e) (vlib_main_t * vm,
 	      offset = ls_param->v4src_position / 8;
 	      shift = ls_param->v4src_position % 8;
 
+          vnet_buffer (b0)->sw_if_index[VLIB_TX] = ls_param->fib_table;
+
 	      if (PREDICT_TRUE (shift == 0))
 		{
 		  for (index = 0; index < 4; index++)
@@ -1261,6 +1263,7 @@ VLIB_NODE_FN (srv6_end_m_gtp6_e) (vlib_main_t * vm,
 	  u32 bi0;
 	  vlib_buffer_t *b0;
 	  ip6_sr_localsid_t *ls0;
+      srv6_end_gtp6_e_param_t *ls_param;
 
 	  ip6srv_combo_header_t *ip6srv0;
 	  ip6_address_t dst0, src0, seg0;
@@ -1287,6 +1290,8 @@ VLIB_NODE_FN (srv6_end_m_gtp6_e) (vlib_main_t * vm,
 	  ls0 =
 	    pool_elt_at_index (sm2->localsids,
 			       vnet_buffer (b0)->ip.adj_index[VLIB_TX]);
+
+      ls_param = (srv6_end_gtp6_e_param_t *) ls0->plugin_mem;
 
 	  ip6srv0 = vlib_buffer_get_current (b0);
 	  dst0 = ip6srv0->ip.dst_address;
@@ -1529,6 +1534,8 @@ VLIB_NODE_FN (srv6_end_m_gtp6_e) (vlib_main_t * vm,
 	      key = hash_memory (p, plen < 40 ? plen : 40, 0);
 	      port = hash_uword_to_u16 (&key);
 	      hdr0->udp.src_port = port;
+
+          vnet_buffer (b0)->sw_if_index[VLIB_TX] = ls_param->fib_table;
 
 	      good_n++;
 
