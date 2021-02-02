@@ -68,12 +68,12 @@ static u8 keyword_str[] = "t.m.gtp4.d";
 static u8 def_str[] =
   "Transit function with decapsulation for IPv4/GTP tunnel";
 static u8 param_str[] =
-  "<sr-prefix>/<sr-prefixlen> v6src_prefix <v6src_prefix>/<prefixlen> [nhtype <nhtype>]";
+  "<sr-prefix>/<sr-prefixlen> v6src_prefix <v6src_prefix>/<prefixlen> [nhtype <nhtype>] fib-table <id>";
 
 static u8 *
 clb_format_srv6_t_m_gtp4_d (u8 * s, va_list * args)
 {
-  srv6_end_gtp4_param_t *ls_mem = va_arg (*args, void *);
+  srv6_end_gtp4_d_param_t *ls_mem = va_arg (*args, void *);
 
   s = format (s, "SRv6 T.M.GTP4.D\n\t");
 
@@ -88,16 +88,16 @@ clb_format_srv6_t_m_gtp4_d (u8 * s, va_list * args)
   if (ls_mem->nhtype != SRV6_NHTYPE_NONE)
     {
       if (ls_mem->nhtype == SRV6_NHTYPE_IPV4)
-	s = format (s, ", NHType IPv4\n");
+	s = format (s, ", NHType IPv4");
       else if (ls_mem->nhtype == SRV6_NHTYPE_IPV6)
-	s = format (s, ", NHType IPv6\n");
+	s = format (s, ", NHType IPv6");
       else if (ls_mem->nhtype == SRV6_NHTYPE_NON_IP)
-	s = format (s, ", NHType Non-IP\n");
+	s = format (s, ", NHType Non-IP");
       else
-	s = format (s, ", NHType Unknow(%d)\n", ls_mem->nhtype);
+	s = format (s, ", NHType Unknow(%d)", ls_mem->nhtype);
     }
-  else
-    s = format (s, "\n");
+
+  s = format (s, ", FIB table %d\n", ls_mem->fib_table);
 
   return s;
 }
@@ -106,24 +106,27 @@ static uword
 clb_unformat_srv6_t_m_gtp4_d (unformat_input_t * input, va_list * args)
 {
   void **plugin_mem_p = va_arg (*args, void **);
-  srv6_end_gtp4_param_t *ls_mem;
+  srv6_end_gtp4_d_param_t *ls_mem;
   ip6_address_t sr_prefix;
   u32 sr_prefixlen;
   ip6_address_t v6src_prefix;
   u32 v6src_prefixlen;
+  u32 fib_table = 0;
   u8 nhtype;
 
-  if (unformat (input, "t.m.gtp4.d %U/%d v6src_prefix %U/%d nhtype ipv4",
-		unformat_ip6_address, &sr_prefix, &sr_prefixlen,
-		unformat_ip6_address, &v6src_prefix, &v6src_prefixlen))
+  if (unformat
+      (input, "t.m.gtp4.d %U/%d v6src_prefix %U/%d nhtype ipv4 fib-table %d",
+       unformat_ip6_address, &sr_prefix, &sr_prefixlen, unformat_ip6_address,
+       &v6src_prefix, &v6src_prefixlen, &fib_table))
     {
       nhtype = SRV6_NHTYPE_IPV4;
     }
   else
     if (unformat
-	(input, "t.m.gtp4.d %U/%d v6src_prefix %U/%d nhtype ipv6",
+	(input,
+	 "t.m.gtp4.d %U/%d v6src_prefix %U/%d nhtype ipv6 fib-table %d",
 	 unformat_ip6_address, &sr_prefix, &sr_prefixlen,
-	 unformat_ip6_address, &v6src_prefix, &v6src_prefixlen))
+	 unformat_ip6_address, &v6src_prefix, &v6src_prefixlen, &fib_table))
     {
       nhtype = SRV6_NHTYPE_IPV6;
     }
@@ -135,9 +138,11 @@ clb_unformat_srv6_t_m_gtp4_d (unformat_input_t * input, va_list * args)
     {
       nhtype = SRV6_NHTYPE_NON_IP;
     }
-  else if (unformat (input, "t.m.gtp4.d %U/%d v6src_prefix %U/%d",
-		     unformat_ip6_address, &sr_prefix, &sr_prefixlen,
-		     unformat_ip6_address, &v6src_prefix, &v6src_prefixlen))
+  else
+    if (unformat
+	(input, "t.m.gtp4.d %U/%d v6src_prefix %U/%d fib-table %d",
+	 unformat_ip6_address, &sr_prefix, &sr_prefixlen,
+	 unformat_ip6_address, &v6src_prefix, &v6src_prefixlen, &fib_table))
     {
       nhtype = SRV6_NHTYPE_NONE;
     }
@@ -158,6 +163,8 @@ clb_unformat_srv6_t_m_gtp4_d (unformat_input_t * input, va_list * args)
 
   ls_mem->nhtype = nhtype;
 
+  ls_mem->fib_table = fib_table;
+
   return 1;
 }
 
@@ -170,9 +177,9 @@ clb_creation_srv6_t_m_gtp4_d (ip6_sr_policy_t * sr_policy)
 static int
 clb_removal_srv6_t_m_gtp4_d (ip6_sr_policy_t * sr_policy)
 {
-  srv6_end_gtp4_param_t *ls_mem;
+  srv6_end_gtp4_d_param_t *ls_mem;
 
-  ls_mem = (srv6_end_gtp4_param_t *) sr_policy->plugin_mem;
+  ls_mem = (srv6_end_gtp4_d_param_t *) sr_policy->plugin_mem;
 
   clib_mem_free (ls_mem);
 

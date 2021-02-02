@@ -174,14 +174,20 @@ typedef struct
 
 #define USER_PLANE_SUB_TLV_IE	0x01
 
-typedef struct srv6_end_gtp6_param_s
+/* SRv6 mobile Plugin Params */
+
+/* GTP6.D, GTP6.Di */
+typedef struct srv6_end_gtp6_d_param_s
 {
   u8 nhtype;
 
   ip6_address_t sr_prefix;
   u32 sr_prefixlen;
-} srv6_end_gtp6_param_t;
 
+  u32 fib_table;
+} srv6_end_gtp6_d_param_t;
+
+/* GTP6.DT */
 typedef struct srv6_end_gtp6_dt_param_s
 {
   u8 type;
@@ -191,6 +197,13 @@ typedef struct srv6_end_gtp6_dt_param_s
   u32 local_fib_index;
 } srv6_end_gtp6_dt_param_t;
 
+/* GTP6.E */
+typedef struct srv6_end_gtp6_e_param_s
+{
+  u32 fib_table;
+} srv6_end_gtp6_e_param_t;
+
+/* GTP4.DT */
 typedef struct srv6_t_gtp4_dt_param_s
 {
   u8 type;
@@ -200,7 +213,16 @@ typedef struct srv6_t_gtp4_dt_param_s
   u32 local_fib_index;
 } srv6_t_gtp4_dt_param_t;
 
-typedef struct srv6_end_gtp4_param_s
+/* GTP4.E */
+typedef struct srv6_end_gtp4_e_param_s
+{
+  u32 v4src_position;
+
+  u32 fib_table;
+} srv6_end_gtp4_e_param_t;
+
+/* GTP4.D */
+typedef struct srv6_end_gtp4_d_param_s
 {
   u8 nhtype;
 
@@ -210,10 +232,8 @@ typedef struct srv6_end_gtp4_param_s
   ip6_address_t v6src_prefix;
   u32 v6src_prefixlen;
 
-  u32 v4src_position;
-
   u32 fib_table;
-} srv6_end_gtp4_param_t;
+} srv6_end_gtp4_d_param_t;
 
 typedef struct srv6_end_main_v4_s
 {
@@ -310,11 +330,6 @@ typedef struct srv6_t_main_v4_dt_s
 
 extern srv6_t_main_v4_dt_t srv6_t_main_v4_dt;
 extern vlib_node_registration_t srv6_t_m_gtp4_dt;
-
-typedef struct srv6_end_gtp6_d_param_s
-{
-  u32 fib_table;
-} srv6_end_gtp6_e_param_t;
 
 #endif /* __included_srv6_end_h__ */
 

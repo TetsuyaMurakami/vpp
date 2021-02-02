@@ -66,7 +66,7 @@ static u8 param_str[] = "";
 static u8 *
 clb_format_srv6_end_m_gtp4_e (u8 * s, va_list * args)
 {
-  srv6_end_gtp4_param_t *ls_mem = va_arg (*args, void *);
+  srv6_end_gtp4_e_param_t *ls_mem = va_arg (*args, void *);
 
   s = format (s, "SRv6 End gtp4.e\n\t");
 
@@ -81,11 +81,13 @@ static uword
 clb_unformat_srv6_end_m_gtp4_e (unformat_input_t * input, va_list * args)
 {
   void **plugin_mem_p = va_arg (*args, void **);
-  srv6_end_gtp4_param_t *ls_mem;
+  srv6_end_gtp4_e_param_t *ls_mem;
   u32 v4src_position;
   u32 fib_table;
 
-  if (!unformat (input, "end.m.gtp4.e v4src_position %d fib-table %d", &v4src_position, &fib_table))
+  if (!unformat
+      (input, "end.m.gtp4.e v4src_position %d fib-table %d", &v4src_position,
+       &fib_table))
     return 0;
 
   ls_mem = clib_mem_alloc_aligned_at_offset (sizeof *ls_mem, 0, 0, 1);
@@ -107,7 +109,7 @@ clb_creation_srv6_end_m_gtp4_e (ip6_sr_localsid_t * localsid)
 static int
 clb_removal_srv6_end_m_gtp4_e (ip6_sr_localsid_t * localsid)
 {
-  srv6_end_gtp4_param_t *ls_mem;
+  srv6_end_gtp4_e_param_t *ls_mem;
 
   ls_mem = localsid->plugin_mem;
 
