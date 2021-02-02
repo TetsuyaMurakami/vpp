@@ -151,7 +151,7 @@ class TestSRv6TMGTP4D(VppTestCase):
         self.vapi.cli("sr policy add bsid D4:: next D2:: next D3::")
         self.vapi.cli(
             "sr policy add bsid D5:: behavior t.m.gtp4.d"
-            "D4::/32 v6src_prefix C1::/64 nhtype ipv6")
+            "D4::/32 v6src_prefix C1::/64 nhtype ipv6 fib-table 0")
         self.vapi.cli("sr steer l3 {}/32 via bsid D5::".format(self.ip4_dst))
         self.vapi.cli("ip route add D2::/32 via {}".format(self.ip6_dst))
 
@@ -316,7 +316,7 @@ class TestSRv6EndMGTP6D(VppTestCase):
         self.vapi.cli("set sr encaps source addr A1::1")
         self.vapi.cli("sr policy add bsid D4:: next D2:: next D3::")
         self.vapi.cli(
-            "sr localsid prefix 2001::/64 behavior end.m.gtp6.d D4::/64")
+            "sr localsid prefix 2001::/64 behavior end.m.gtp6.d D4::/64 fib-table 0")
         self.vapi.cli("ip route add D2::/64 via {}".format(self.ip6_nhop))
 
         self.logger.info(self.vapi.cli("show sr policies"))
