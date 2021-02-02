@@ -76,7 +76,7 @@ typedef struct
   u8 *rewrite;					/**< Precomputed rewrite header */
   u8 *rewrite_bsid;				/**< Precomputed rewrite header for bindingSID */
 
-  u32 fib_table;			/**< FIB table */
+  u32 egress_fib_table;			/**< Egress FIB table */
 
   dpo_id_t bsid_dpo;				/**< DPO for Encaps/Insert for BSID */
   dpo_id_t ip6_dpo;				/**< DPO for Encaps/Insert IPv6 */
