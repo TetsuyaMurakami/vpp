@@ -95,7 +95,10 @@ clb_unformat_srv6_end_m_gtp4_e (unformat_input_t * input, va_list * args)
   *plugin_mem_p = ls_mem;
 
   ls_mem->v4src_position = v4src_position;
+
   ls_mem->fib_table = fib_table;
+  ls_mem->fib4_index = ip4_fib_index_from_table_id (fib_table);
+  ls_mem->fib6_index = ip6_fib_index_from_table_id (fib_table);
 
   return 1;
 }

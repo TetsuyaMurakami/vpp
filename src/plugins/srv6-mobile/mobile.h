@@ -20,6 +20,8 @@
 
 #include <vnet/vnet.h>
 #include <vnet/ip/ip.h>
+#include <vnet/fib/ip4_fib.h>
+#include <vnet/fib/ip6_fib.h>
 #include <vnet/srv6/sr.h>
 #include <vnet/srv6/sr_packet.h>
 
@@ -185,6 +187,8 @@ typedef struct srv6_end_gtp6_d_param_s
   u32 sr_prefixlen;
 
   u32 fib_table;
+  u32 fib4_index;
+  u32 fib6_index;
 } srv6_end_gtp6_d_param_t;
 
 /* GTP6.DT */
@@ -201,6 +205,8 @@ typedef struct srv6_end_gtp6_dt_param_s
 typedef struct srv6_end_gtp6_e_param_s
 {
   u32 fib_table;
+  u32 fib4_index;
+  u32 fib6_index;
 } srv6_end_gtp6_e_param_t;
 
 /* GTP4.DT */
@@ -219,6 +225,8 @@ typedef struct srv6_end_gtp4_e_param_s
   u32 v4src_position;
 
   u32 fib_table;
+  u32 fib4_index;
+  u32 fib6_index;
 } srv6_end_gtp4_e_param_t;
 
 /* GTP4.D */
@@ -233,6 +241,8 @@ typedef struct srv6_end_gtp4_d_param_s
   u32 v6src_prefixlen;
 
   u32 fib_table;
+  u32 fib4_index;
+  u32 fib6_index;
 } srv6_end_gtp4_d_param_t;
 
 typedef struct srv6_end_main_v4_s

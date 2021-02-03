@@ -164,6 +164,8 @@ clb_unformat_srv6_t_m_gtp4_d (unformat_input_t * input, va_list * args)
   ls_mem->nhtype = nhtype;
 
   ls_mem->fib_table = fib_table;
+  ls_mem->fib4_index = ip4_fib_index_from_table_id (fib_table);
+  ls_mem->fib6_index = ip6_fib_index_from_table_id (fib_table);
 
   return 1;
 }

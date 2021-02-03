@@ -353,7 +353,7 @@ create_sl (ip6_sr_policy_t * sr_policy, ip6_address_t * sl, u32 weight,
 
   segment_list->segments = vec_dup (sl);
 
-  segment_list->egress_fib_table = sr_policy->fib_table;
+  segment_list->egress_fib_table = ip6_fib_index_from_table_id (sr_policy->fib_table);
 
   if (is_encap)
     {
