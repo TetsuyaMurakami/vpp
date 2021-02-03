@@ -2155,7 +2155,7 @@ VLIB_NODE_FN (srv6_end_m_gtp6_d) (vlib_main_t * vm,
             {
               ip6_header_t *ip6;
     
-              hdrlen = sizeof (ip4_gtpu_header_t);
+              hdrlen = sizeof (ip6_gtpu_header_t);
     
               if (hdr->gtpu.ver_flags & (GTPU_EXTHDR_FLAG | GTPU_SEQ_FLAG))
                 {
