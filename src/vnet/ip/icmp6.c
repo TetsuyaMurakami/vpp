@@ -813,8 +813,10 @@ icmp6_init (vlib_main_t * vm)
   cm->min_valid_length_by_type[ICMP6_redirect] =
     sizeof (icmp6_redirect_header_t);
 
+#if 0
   icmp6_register_type (vm, ICMP6_echo_request,
 		       ip6_icmp_echo_request_node.index);
+#endif
 
   return (NULL);
 }
