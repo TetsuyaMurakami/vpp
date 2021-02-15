@@ -186,6 +186,8 @@ typedef struct srv6_end_gtp6_d_param_s
   ip6_address_t sr_prefix;
   u32 sr_prefixlen;
 
+  bool drop_in;
+
   u32 fib_table;
   u32 fib4_index;
   u32 fib6_index;
@@ -239,6 +241,8 @@ typedef struct srv6_end_gtp4_d_param_s
 
   ip6_address_t v6src_prefix;
   u32 v6src_prefixlen;
+
+  bool drop_in;
 
   u32 fib_table;
   u32 fib4_index;

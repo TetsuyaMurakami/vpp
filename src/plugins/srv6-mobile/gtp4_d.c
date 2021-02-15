@@ -97,7 +97,9 @@ clb_format_srv6_t_m_gtp4_d (u8 * s, va_list * args)
 	s = format (s, ", NHType Unknow(%d)", ls_mem->nhtype);
     }
 
-  s = format (s, ", FIB table %d\n", ls_mem->fib_table);
+  s = format (s, ", FIB table %d", ls_mem->fib_table);
+
+  s = format (s, ", Drop In %d\n", ls_mem->drop_in);
 
   return s;
 }
@@ -112,43 +114,49 @@ clb_unformat_srv6_t_m_gtp4_d (unformat_input_t * input, va_list * args)
   ip6_address_t v6src_prefix;
   u32 v6src_prefixlen;
   u32 fib_table = 0;
+  bool drop_in = false;
   u8 nhtype;
 
-  if (unformat
-      (input, "t.m.gtp4.d %U/%d v6src_prefix %U/%d nhtype ipv4 fib-table %d",
-       unformat_ip6_address, &sr_prefix, &sr_prefixlen, unformat_ip6_address,
-       &v6src_prefix, &v6src_prefixlen, &fib_table))
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
     {
-      nhtype = SRV6_NHTYPE_IPV4;
-    }
-  else
-    if (unformat
-	(input,
-	 "t.m.gtp4.d %U/%d v6src_prefix %U/%d nhtype ipv6 fib-table %d",
-	 unformat_ip6_address, &sr_prefix, &sr_prefixlen,
-	 unformat_ip6_address, &v6src_prefix, &v6src_prefixlen, &fib_table))
-    {
-      nhtype = SRV6_NHTYPE_IPV6;
-    }
-  else
-    if (unformat
-	(input, "t.m.gtp4.d %U/%d v6src_prefix %U/%d nhtype non-ip",
-	 unformat_ip6_address, &sr_prefix, &sr_prefixlen,
-	 unformat_ip6_address, &v6src_prefix, &v6src_prefixlen))
-    {
-      nhtype = SRV6_NHTYPE_NON_IP;
-    }
-  else
-    if (unformat
-	(input, "t.m.gtp4.d %U/%d v6src_prefix %U/%d fib-table %d",
-	 unformat_ip6_address, &sr_prefix, &sr_prefixlen,
-	 unformat_ip6_address, &v6src_prefix, &v6src_prefixlen, &fib_table))
-    {
-      nhtype = SRV6_NHTYPE_NONE;
-    }
-  else
-    {
-      return 0;
+      if (unformat
+        (input, "t.m.gtp4.d %U/%d v6src_prefix %U/%d nhtype ipv4 fib-table %d",
+        unformat_ip6_address, &sr_prefix, &sr_prefixlen, unformat_ip6_address,
+        &v6src_prefix, &v6src_prefixlen, &fib_table))
+        {
+          nhtype = SRV6_NHTYPE_IPV4;
+        }
+      else if (unformat
+	    (input,
+	    "t.m.gtp4.d %U/%d v6src_prefix %U/%d nhtype ipv6 fib-table %d",
+	    unformat_ip6_address, &sr_prefix, &sr_prefixlen,
+	    unformat_ip6_address, &v6src_prefix, &v6src_prefixlen, &fib_table))
+        {
+          nhtype = SRV6_NHTYPE_IPV6;
+        }
+      else if (unformat
+	    (input, "t.m.gtp4.d %U/%d v6src_prefix %U/%d nhtype non-ip",
+	    unformat_ip6_address, &sr_prefix, &sr_prefixlen,
+	    unformat_ip6_address, &v6src_prefix, &v6src_prefixlen))
+        {
+          nhtype = SRV6_NHTYPE_NON_IP;
+        }
+      else if (unformat
+	    (input, "t.m.gtp4.d %U/%d v6src_prefix %U/%d fib-table %d",
+	    unformat_ip6_address, &sr_prefix, &sr_prefixlen,
+	    unformat_ip6_address, &v6src_prefix, &v6src_prefixlen, &fib_table))
+        {
+          nhtype = SRV6_NHTYPE_NONE;
+        }
+      else if (unformat
+        (input, "drop-in"))
+        {
+          drop_in = true;
+        }
+      else
+        {
+          return 0;
+        }
     }
 
   ls_mem = clib_mem_alloc_aligned_at_offset (sizeof *ls_mem, 0, 0, 1);
@@ -162,6 +170,8 @@ clb_unformat_srv6_t_m_gtp4_d (unformat_input_t * input, va_list * args)
   ls_mem->v6src_prefixlen = v6src_prefixlen;
 
   ls_mem->nhtype = nhtype;
+
+  ls_mem->drop_in = drop_in;
 
   ls_mem->fib_table = fib_table;
   ls_mem->fib4_index = ip4_fib_index_from_table_id (fib_table);

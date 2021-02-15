@@ -1208,7 +1208,7 @@ VLIB_NODE_FN (srv6_t_m_gtp4_d) (vlib_main_t * vm,
           gtp4 = false;
           ipv4 = true;
     
-          if (PREDICT_FALSE (gtpu_type != GTPU_TYPE_GTPU))
+          if (PREDICT_FALSE (gtpu_type != GTPU_TYPE_GTPU || ls_param->drop_in))
             {
               gtp4 = true;
             }
@@ -2147,7 +2147,7 @@ VLIB_NODE_FN (srv6_end_m_gtp6_d) (vlib_main_t * vm,
           gtp6 = false;
           ipv4 = true;
     
-          if (PREDICT_FALSE (gtpu_type != GTPU_TYPE_GTPU))
+          if (PREDICT_FALSE (gtpu_type != GTPU_TYPE_GTPU || ls_param->drop_in))
             {
               gtp6 = true;
             }
