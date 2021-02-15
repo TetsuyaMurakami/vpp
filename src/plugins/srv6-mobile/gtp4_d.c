@@ -115,7 +115,8 @@ clb_unformat_srv6_t_m_gtp4_d (unformat_input_t * input, va_list * args)
   u32 v6src_prefixlen;
   u32 fib_table = 0;
   bool drop_in = false;
-  u8 nhtype;
+  u8 nhtype = SRV6_NHTYPE_NONE;
+  bool config = false;
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
     {
@@ -124,6 +125,7 @@ clb_unformat_srv6_t_m_gtp4_d (unformat_input_t * input, va_list * args)
         unformat_ip6_address, &sr_prefix, &sr_prefixlen, unformat_ip6_address,
         &v6src_prefix, &v6src_prefixlen, &fib_table))
         {
+          config = true;
           nhtype = SRV6_NHTYPE_IPV4;
         }
       else if (unformat
@@ -132,6 +134,7 @@ clb_unformat_srv6_t_m_gtp4_d (unformat_input_t * input, va_list * args)
 	    unformat_ip6_address, &sr_prefix, &sr_prefixlen,
 	    unformat_ip6_address, &v6src_prefix, &v6src_prefixlen, &fib_table))
         {
+          config = true;
           nhtype = SRV6_NHTYPE_IPV6;
         }
       else if (unformat
@@ -139,6 +142,7 @@ clb_unformat_srv6_t_m_gtp4_d (unformat_input_t * input, va_list * args)
 	    unformat_ip6_address, &sr_prefix, &sr_prefixlen,
 	    unformat_ip6_address, &v6src_prefix, &v6src_prefixlen))
         {
+          config = true;
           nhtype = SRV6_NHTYPE_NON_IP;
         }
       else if (unformat
@@ -146,6 +150,7 @@ clb_unformat_srv6_t_m_gtp4_d (unformat_input_t * input, va_list * args)
 	    unformat_ip6_address, &sr_prefix, &sr_prefixlen,
 	    unformat_ip6_address, &v6src_prefix, &v6src_prefixlen, &fib_table))
         {
+          config = true;
           nhtype = SRV6_NHTYPE_NONE;
         }
       else if (unformat
@@ -157,6 +162,11 @@ clb_unformat_srv6_t_m_gtp4_d (unformat_input_t * input, va_list * args)
         {
           return 0;
         }
+    }
+
+  if (! config)
+    {
+      return 0;
     }
 
   ls_mem = clib_mem_alloc_aligned_at_offset (sizeof *ls_mem, 0, 0, 1);
