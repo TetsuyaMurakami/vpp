@@ -134,7 +134,7 @@ clb_unformat_srv6_end_m_gtp6_d (unformat_input_t * input, va_list * args)
           config = true;
           nhtype = SRV6_NHTYPE_NONE;
         }
-      else if (unformat (input, "drop-in")) {
+      else if (unformat (input, "drop-in"))
         {
           drop_in = true;
         }
