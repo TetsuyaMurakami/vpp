@@ -68,11 +68,11 @@ clb_format_srv6_end_m_gtp4_e (u8 * s, va_list * args)
 {
   srv6_end_gtp4_e_param_t *ls_mem = va_arg (*args, void *);
 
-  s = format (s, "SRv6 End gtp4.e\n\t");
+  s = format (s, "SRv6 End gtp4.e\n");
 
-  s = format (s, "IPv4 address position: %d\n", ls_mem->v4src_position);
+  s = format (s, "\tIPv4 address position: %d\n", ls_mem->v4src_position);
 
-  s = format (s, "Fib Table %d\n", ls_mem->fib_table);
+  s = format (s, "\tFib Table %d\n", ls_mem->fib_table);
 
   return s;
 }
