@@ -57,6 +57,10 @@ class VppPolicer(VppObject):
         self._test.vapi.policer_add_del(is_add=False, name=self.name)
         self._policer_index = INVALID_INDEX
 
+    def bind_vpp_config(self, worker, bind):
+        self._test.vapi.policer_bind(name=self.name, worker_index=worker,
+                                     bind_enable=bind)
+
     def query_vpp_config(self):
         dump = self._test.vapi.policer_dump(
             match_name_valid=True, match_name=self.name)
@@ -67,3 +71,24 @@ class VppPolicer(VppObject):
 
     def object_id(self):
         return ("policer-%s" % (self.name))
+
+    def get_stats(self, worker=None):
+        conform = self._test.statistics.get_counter("/net/policer/conform")
+        exceed = self._test.statistics.get_counter("/net/policer/exceed")
+        violate = self._test.statistics.get_counter("/net/policer/violate")
+
+        counters = {"conform": conform, "exceed": exceed, "violate": violate}
+
+        total = {}
+        for name, c in counters.items():
+            total[f'{name}_packets'] = 0
+            total[f'{name}_bytes'] = 0
+            for i in range(len(c)):
+                t = c[i]
+                if worker is not None and i != worker + 1:
+                    continue
+                stat_index = self._policer_index
+                total[f'{name}_packets'] += t[stat_index]['packets']
+                total[f'{name}_bytes'] += t[stat_index]['bytes']
+
+        return total

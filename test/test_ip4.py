@@ -11,18 +11,19 @@ from scapy.layers.l2 import Ether, Dot1Q, ARP
 from scapy.packet import Raw
 from six import moves
 
+from framework import tag_fixme_vpp_workers
 from framework import VppTestCase, VppTestRunner
 from util import ppp
 from vpp_ip_route import VppIpRoute, VppRoutePath, VppIpMRoute, \
     VppMRoutePath, VppMplsIpBind, \
     VppMplsTable, VppIpTable, FibPathType, find_route, \
     VppIpInterfaceAddress, find_route_in_dump, find_mroute_in_dump
-from vpp_ip import VppIpPuntPolicer, VppIpPuntRedirect
+from vpp_ip import VppIpPuntPolicer, VppIpPuntRedirect, VppIpPathMtu
 from vpp_sub_interface import VppSubInterface, VppDot1QSubint, VppDot1ADSubint
 from vpp_papi import VppEnum
 from vpp_neighbor import VppNeighbor
 from vpp_lo_interface import VppLoInterface
-from vpp_policer import VppPolicer
+from vpp_policer import VppPolicer, PolicerAction
 
 NUM_PKTS = 67
 
@@ -1118,6 +1119,7 @@ class TestIPLoadBalance(VppTestCase):
         super(TestIPLoadBalance, self).tearDown()
 
     def send_and_expect_load_balancing(self, input, pkts, outputs):
+        self.vapi.cli("clear trace")
         input.add_stream(pkts)
         self.pg_enable_capture(self.pg_interfaces)
         self.pg_start()
@@ -1125,8 +1127,7 @@ class TestIPLoadBalance(VppTestCase):
         for oo in outputs:
             rx = oo._get_capture(1)
             self.assertNotEqual(0, len(rx))
-            for r in rx:
-                rxs.append(r)
+            rxs.append(rx)
         return rxs
 
     def send_and_expect_one_itf(self, input, pkts, itf):
@@ -1134,6 +1135,12 @@ class TestIPLoadBalance(VppTestCase):
         self.pg_enable_capture(self.pg_interfaces)
         self.pg_start()
         rx = itf.get_capture(len(pkts))
+
+    def total_len(self, rxs):
+        n = 0
+        for rx in rxs:
+            n += len(rx)
+        return n
 
     def test_ip_load_balance(self):
         """ IP Load-Balancing """
@@ -1195,14 +1202,29 @@ class TestIPLoadBalance(VppTestCase):
         # be guaranteed. But with 64 different packets we do expect some
         # balancing. So instead just ensure there is traffic on each link.
         #
-        self.send_and_expect_load_balancing(self.pg0, port_ip_pkts,
-                                            [self.pg1, self.pg2])
+        rx = self.send_and_expect_load_balancing(self.pg0, port_ip_pkts,
+                                                 [self.pg1, self.pg2])
+        n_ip_pg0 = len(rx[0])
         self.send_and_expect_load_balancing(self.pg0, src_ip_pkts,
                                             [self.pg1, self.pg2])
         self.send_and_expect_load_balancing(self.pg0, port_mpls_pkts,
                                             [self.pg1, self.pg2])
-        self.send_and_expect_load_balancing(self.pg0, src_mpls_pkts,
-                                            [self.pg1, self.pg2])
+        rx = self.send_and_expect_load_balancing(self.pg0, src_mpls_pkts,
+                                                 [self.pg1, self.pg2])
+        n_mpls_pg0 = len(rx[0])
+
+        #
+        # change the router ID and expect the distribution changes
+        #
+        self.vapi.set_ip_flow_hash_router_id(router_id=0x11111111)
+
+        rx = self.send_and_expect_load_balancing(self.pg0, port_ip_pkts,
+                                                 [self.pg1, self.pg2])
+        self.assertNotEqual(n_ip_pg0, len(rx[0]))
+
+        rx = self.send_and_expect_load_balancing(self.pg0, src_mpls_pkts,
+                                                 [self.pg1, self.pg2])
+        self.assertNotEqual(n_mpls_pg0, len(rx[0]))
 
         #
         # change the flow hash config so it's only IP src,dst
@@ -1273,23 +1295,23 @@ class TestIPLoadBalance(VppTestCase):
                                              self.pg3, self.pg4])
 
         #
-        # bring down pg1 expect LB to adjust to use only those that are pu
+        # bring down pg1 expect LB to adjust to use only those that are up
         #
         self.pg1.link_down()
 
         rx = self.send_and_expect_load_balancing(self.pg0, src_pkts,
                                                  [self.pg2, self.pg3,
                                                   self.pg4])
-        self.assertEqual(len(src_pkts), len(rx))
+        self.assertEqual(len(src_pkts), self.total_len(rx))
 
         #
-        # bring down pg2 expect LB to adjust to use only those that are pu
+        # bring down pg2 expect LB to adjust to use only those that are up
         #
         self.pg2.link_down()
 
         rx = self.send_and_expect_load_balancing(self.pg0, src_pkts,
                                                  [self.pg3, self.pg4])
-        self.assertEqual(len(src_pkts), len(rx))
+        self.assertEqual(len(src_pkts), self.total_len(rx))
 
         #
         # bring the links back up - expect LB over all again
@@ -1300,7 +1322,7 @@ class TestIPLoadBalance(VppTestCase):
         rx = self.send_and_expect_load_balancing(self.pg0, src_pkts,
                                                  [self.pg1, self.pg2,
                                                   self.pg3, self.pg4])
-        self.assertEqual(len(src_pkts), len(rx))
+        self.assertEqual(len(src_pkts), self.total_len(rx))
 
         #
         # The same link-up/down but this time admin state
@@ -1309,7 +1331,7 @@ class TestIPLoadBalance(VppTestCase):
         self.pg2.admin_down()
         rx = self.send_and_expect_load_balancing(self.pg0, src_pkts,
                                                  [self.pg3, self.pg4])
-        self.assertEqual(len(src_pkts), len(rx))
+        self.assertEqual(len(src_pkts), self.total_len(rx))
         self.pg1.admin_up()
         self.pg2.admin_up()
         self.pg1.resolve_arp()
@@ -1317,7 +1339,7 @@ class TestIPLoadBalance(VppTestCase):
         rx = self.send_and_expect_load_balancing(self.pg0, src_pkts,
                                                  [self.pg1, self.pg2,
                                                   self.pg3, self.pg4])
-        self.assertEqual(len(src_pkts), len(rx))
+        self.assertEqual(len(src_pkts), self.total_len(rx))
 
         #
         # Recursive prefixes
@@ -1375,7 +1397,7 @@ class TestIPLoadBalance(VppTestCase):
 
         rx = self.send_and_expect_load_balancing(self.pg0, port_pkts,
                                                  [self.pg3, self.pg4])
-        self.assertEqual(len(src_pkts), len(rx))
+        self.assertEqual(len(src_pkts), self.total_len(rx))
 
 
 class TestIPVlan0(VppTestCase):
@@ -1427,35 +1449,16 @@ class TestIPVlan0(VppTestCase):
         self.send_and_expect(self.pg0, pkts, self.pg1)
 
 
-class TestIPPunt(VppTestCase):
-    """ IPv4 Punt Police/Redirect """
+class IPPuntSetup(object):
+    """ Setup for IPv4 Punt Police/Redirect """
 
-    @classmethod
-    def setUpClass(cls):
-        super(TestIPPunt, cls).setUpClass()
-
-    @classmethod
-    def tearDownClass(cls):
-        super(TestIPPunt, cls).tearDownClass()
-
-    def setUp(self):
-        super(TestIPPunt, self).setUp()
-
+    def punt_setup(self):
         self.create_pg_interfaces(range(4))
 
         for i in self.pg_interfaces:
             i.admin_up()
             i.config_ip4()
             i.resolve_arp()
-
-    def tearDown(self):
-        super(TestIPPunt, self).tearDown()
-        for i in self.pg_interfaces:
-            i.unconfig_ip4()
-            i.admin_down()
-
-    def test_ip_punt(self):
-        """ IP punt police and redirect """
 
         # use UDP packet that have a port we need to explicitly
         # register to get punted.
@@ -1475,13 +1478,33 @@ class TestIPPunt(VppTestCase):
 
         self.vapi.set_punt(is_add=1, punt=punt_udp)
 
-        p = (Ether(src=self.pg0.remote_mac,
-                   dst=self.pg0.local_mac) /
-             IP(src=self.pg0.remote_ip4, dst=self.pg0.local_ip4) /
-             UDP(sport=1234, dport=1234) /
-             Raw(b'\xa5' * 100))
+        self.pkt = (Ether(src=self.pg0.remote_mac,
+                          dst=self.pg0.local_mac) /
+                    IP(src=self.pg0.remote_ip4, dst=self.pg0.local_ip4) /
+                    UDP(sport=1234, dport=1234) /
+                    Raw(b'\xa5' * 100))
 
-        pkts = p * 1025
+    def punt_teardown(self):
+        for i in self.pg_interfaces:
+            i.unconfig_ip4()
+            i.admin_down()
+
+
+class TestIPPunt(IPPuntSetup, VppTestCase):
+    """ IPv4 Punt Police/Redirect """
+
+    def setUp(self):
+        super(TestIPPunt, self).setUp()
+        super(TestIPPunt, self).punt_setup()
+
+    def tearDown(self):
+        super(TestIPPunt, self).punt_teardown()
+        super(TestIPPunt, self).tearDown()
+
+    def test_ip_punt(self):
+        """ IP punt police and redirect """
+
+        pkts = self.pkt * 1025
 
         #
         # Configure a punt redirect via pg1.
@@ -1511,6 +1534,14 @@ class TestIPPunt(VppTestCase):
         # but not equal to the number sent, since some were policed
         #
         rx = self.pg1._get_capture(1)
+
+        stats = policer.get_stats()
+
+        # Single rate policer - expect conform, violate but no exceed
+        self.assertGreater(stats['conform_packets'], 0)
+        self.assertEqual(stats['exceed_packets'], 0)
+        self.assertGreater(stats['violate_packets'], 0)
+
         self.assertGreater(len(rx), 0)
         self.assertLess(len(rx), len(pkts))
 
@@ -1570,6 +1601,117 @@ class TestIPPunt(VppTestCase):
             self.assertEqual(p.punt.tx_sw_if_index, self.pg3.sw_if_index)
         self.assertNotEqual(punts[1].punt.nh, self.pg3.remote_ip4)
         self.assertEqual(str(punts[2].punt.nh), '0.0.0.0')
+
+
+class TestIPPuntHandoff(IPPuntSetup, VppTestCase):
+    """ IPv4 Punt Policer thread handoff """
+    worker_config = "workers 2"
+
+    def setUp(self):
+        super(TestIPPuntHandoff, self).setUp()
+        super(TestIPPuntHandoff, self).punt_setup()
+
+    def tearDown(self):
+        super(TestIPPuntHandoff, self).punt_teardown()
+        super(TestIPPuntHandoff, self).tearDown()
+
+    def test_ip_punt_policer_handoff(self):
+        """ IP4 punt policer thread handoff """
+        pkts = self.pkt * NUM_PKTS
+
+        #
+        # Configure a punt redirect via pg1.
+        #
+        nh_addr = self.pg1.remote_ip4
+        ip_punt_redirect = VppIpPuntRedirect(self, self.pg0.sw_if_index,
+                                             self.pg1.sw_if_index, nh_addr)
+        ip_punt_redirect.add_vpp_config()
+
+        action_tx = PolicerAction(
+            VppEnum.vl_api_sse2_qos_action_type_t.SSE2_QOS_ACTION_API_TRANSMIT,
+            0)
+        #
+        # This policer drops no packets, we are just
+        # testing that they get to the right thread.
+        #
+        policer = VppPolicer(self, "ip4-punt", 400, 0, 10, 0, 1,
+                             0, 0, False, action_tx, action_tx, action_tx)
+        policer.add_vpp_config()
+        ip_punt_policer = VppIpPuntPolicer(self, policer.policer_index)
+        ip_punt_policer.add_vpp_config()
+
+        for worker in [0, 1]:
+            self.send_and_expect(self.pg0, pkts, self.pg1, worker=worker)
+            self.logger.debug(self.vapi.cli("show trace max 100"))
+
+        # Combined stats, all threads
+        stats = policer.get_stats()
+
+        # Single rate policer - expect conform, violate but no exceed
+        self.assertGreater(stats['conform_packets'], 0)
+        self.assertEqual(stats['exceed_packets'], 0)
+        self.assertGreater(stats['violate_packets'], 0)
+
+        # Worker 0, should have done all the policing
+        stats0 = policer.get_stats(worker=0)
+        self.assertEqual(stats, stats0)
+
+        # Worker 1, should have handed everything off
+        stats1 = policer.get_stats(worker=1)
+        self.assertEqual(stats1['conform_packets'], 0)
+        self.assertEqual(stats1['exceed_packets'], 0)
+        self.assertEqual(stats1['violate_packets'], 0)
+
+        # Bind the policer to worker 1 and repeat
+        policer.bind_vpp_config(1, True)
+        for worker in [0, 1]:
+            self.send_and_expect(self.pg0, pkts, self.pg1, worker=worker)
+            self.logger.debug(self.vapi.cli("show trace max 100"))
+
+        # The 2 workers should now have policed the same amount
+        stats = policer.get_stats()
+        stats0 = policer.get_stats(worker=0)
+        stats1 = policer.get_stats(worker=1)
+
+        self.assertGreater(stats0['conform_packets'], 0)
+        self.assertEqual(stats0['exceed_packets'], 0)
+        self.assertGreater(stats0['violate_packets'], 0)
+
+        self.assertGreater(stats1['conform_packets'], 0)
+        self.assertEqual(stats1['exceed_packets'], 0)
+        self.assertGreater(stats1['violate_packets'], 0)
+
+        self.assertEqual(stats0['conform_packets'] + stats1['conform_packets'],
+                         stats['conform_packets'])
+
+        self.assertEqual(stats0['violate_packets'] + stats1['violate_packets'],
+                         stats['violate_packets'])
+
+        # Unbind the policer and repeat
+        policer.bind_vpp_config(1, False)
+        for worker in [0, 1]:
+            self.send_and_expect(self.pg0, pkts, self.pg1, worker=worker)
+            self.logger.debug(self.vapi.cli("show trace max 100"))
+
+        # The policer should auto-bind to worker 0 when packets arrive
+        stats = policer.get_stats()
+        stats0new = policer.get_stats(worker=0)
+        stats1new = policer.get_stats(worker=1)
+
+        self.assertGreater(stats0new['conform_packets'],
+                           stats0['conform_packets'])
+        self.assertEqual(stats0new['exceed_packets'], 0)
+        self.assertGreater(stats0new['violate_packets'],
+                           stats0['violate_packets'])
+
+        self.assertEqual(stats1, stats1new)
+
+        #
+        # Clean up
+        #
+        ip_punt_policer.remove_vpp_config()
+        policer.remove_vpp_config()
+        ip_punt_redirect.remove_vpp_config()
 
 
 class TestIPDeag(VppTestCase):
@@ -1997,6 +2139,7 @@ class TestIPLPM(VppTestCase):
         rx = self.send_and_expect(self.pg0, p_24 * NUM_PKTS, self.pg1)
 
 
+@tag_fixme_vpp_workers
 class TestIPv4Frag(VppTestCase):
     """ IPv4 fragmentation """
 
@@ -2420,6 +2563,174 @@ class TestIP4Replace(VppTestCase):
             self.assertEqual(self.get_n_pfxs(intf), 1)
         for pfx in pfxs:
             self.assertTrue(pfx.query_vpp_config())
+
+
+class TestIPv4PathMTU(VppTestCase):
+    """ IPv4 Path MTU """
+
+    @classmethod
+    def setUpClass(cls):
+        super(TestIPv4PathMTU, cls).setUpClass()
+
+        cls.create_pg_interfaces(range(2))
+
+        # setup all interfaces
+        for i in cls.pg_interfaces:
+            i.admin_up()
+            i.config_ip4()
+            i.resolve_arp()
+
+    @classmethod
+    def tearDownClass(cls):
+        super(TestIPv4PathMTU, cls).tearDownClass()
+
+    def test_path_mtu(self):
+        """ Path MTU """
+
+        #
+        # The goal here is not to test that fragmentation works correctly,
+        # that's done elsewhere, the intent is to ensure that the Path MTU
+        # settings are honoured.
+        #
+        self.vapi.cli("adjacency counters enable")
+
+        # set the interface MTU to a reasonable value
+        self.vapi.sw_interface_set_mtu(self.pg1.sw_if_index,
+                                       [1800, 0, 0, 0])
+
+        self.pg1.generate_remote_hosts(4)
+
+        p_2k = (Ether(dst=self.pg0.local_mac,
+                      src=self.pg0.remote_mac) /
+                IP(src=self.pg0.remote_ip4,
+                   dst=self.pg1.remote_ip4) /
+                UDP(sport=1234, dport=5678) /
+                Raw(b'0xa' * 640))
+        p_1k = (Ether(dst=self.pg0.local_mac,
+                      src=self.pg0.remote_mac) /
+                IP(src=self.pg0.remote_ip4,
+                   dst=self.pg1.remote_ip4) /
+                UDP(sport=1234, dport=5678) /
+                Raw(b'0xa' * 320))
+
+        nbr = VppNeighbor(self,
+                          self.pg1.sw_if_index,
+                          self.pg1.remote_mac,
+                          self.pg1.remote_ip4).add_vpp_config()
+
+        # this is now the interface MTU frags
+        self.send_and_expect(self.pg0, [p_2k], self.pg1, n_rx=2)
+        self.send_and_expect(self.pg0, [p_1k], self.pg1)
+
+        # drop the path MTU for this neighbour to below the interface MTU
+        # expect more frags
+        pmtu = VppIpPathMtu(self, self.pg1.remote_ip4, 900).add_vpp_config()
+
+        self.send_and_expect(self.pg0, [p_2k], self.pg1, n_rx=3)
+        self.send_and_expect(self.pg0, [p_1k], self.pg1, n_rx=2)
+
+        # print/format the adj delegate
+        self.logger.info(self.vapi.cli("sh adj 5"))
+
+        # increase the path MTU to more than the interface
+        # expect to use the interface MTU
+        pmtu.modify(8192)
+
+        self.send_and_expect(self.pg0, [p_2k], self.pg1, n_rx=2)
+        self.send_and_expect(self.pg0, [p_1k], self.pg1)
+
+        # go back to an MTU from the path
+        # wrap the call around mark-n-sweep to enusre updates clear stale
+        self.vapi.ip_path_mtu_replace_begin()
+        pmtu.modify(900)
+        self.vapi.ip_path_mtu_replace_end()
+
+        self.send_and_expect(self.pg0, [p_2k], self.pg1, n_rx=3)
+        self.send_and_expect(self.pg0, [p_1k], self.pg1, n_rx=2)
+
+        # raise the interface's MTU
+        # should still use that of the path
+        self.vapi.sw_interface_set_mtu(self.pg1.sw_if_index,
+                                       [2000, 0, 0, 0])
+        self.send_and_expect(self.pg0, [p_2k], self.pg1, n_rx=3)
+        self.send_and_expect(self.pg0, [p_1k], self.pg1, n_rx=2)
+
+        # set path high and interface low
+        pmtu.modify(2000)
+        self.vapi.sw_interface_set_mtu(self.pg1.sw_if_index,
+                                       [900, 0, 0, 0])
+        self.send_and_expect(self.pg0, [p_2k], self.pg1, n_rx=3)
+        self.send_and_expect(self.pg0, [p_1k], self.pg1, n_rx=2)
+
+        # remove the path MTU using the mark-n-sweep semantics
+        self.vapi.sw_interface_set_mtu(self.pg1.sw_if_index,
+                                       [1800, 0, 0, 0])
+        self.vapi.ip_path_mtu_replace_begin()
+        self.vapi.ip_path_mtu_replace_end()
+
+        self.send_and_expect(self.pg0, [p_2k], self.pg1, n_rx=2)
+        self.send_and_expect(self.pg0, [p_1k], self.pg1)
+
+        #
+        # set path MTU for a neighbour that doesn't exist, yet
+        #
+        pmtu2 = VppIpPathMtu(self,
+                             self.pg1.remote_hosts[2].ip4,
+                             900).add_vpp_config()
+
+        p_2k = (Ether(dst=self.pg0.local_mac,
+                      src=self.pg0.remote_mac) /
+                IP(src=self.pg0.remote_ip4,
+                   dst=self.pg1.remote_hosts[2].ip4) /
+                UDP(sport=1234, dport=5678) /
+                Raw(b'0xa' * 640))
+        p_1k = (Ether(dst=self.pg0.local_mac,
+                      src=self.pg0.remote_mac) /
+                IP(src=self.pg0.remote_ip4,
+                   dst=self.pg1.remote_hosts[2].ip4) /
+                UDP(sport=1234, dport=5678) /
+                Raw(b'0xa' * 320))
+
+        nbr2 = VppNeighbor(self,
+                           self.pg1.sw_if_index,
+                           self.pg1.remote_hosts[2].mac,
+                           self.pg1.remote_hosts[2].ip4).add_vpp_config()
+
+        # should frag to the path MTU
+        self.send_and_expect(self.pg0, [p_2k], self.pg1, n_rx=3)
+        self.send_and_expect(self.pg0, [p_1k], self.pg1, n_rx=2)
+
+        # remove and re-add the neighbour
+        nbr2.remove_vpp_config()
+        nbr2.add_vpp_config()
+
+        # should frag to the path MTU
+        self.send_and_expect(self.pg0, [p_2k], self.pg1, n_rx=3)
+        self.send_and_expect(self.pg0, [p_1k], self.pg1, n_rx=2)
+
+        #
+        # set PMTUs for many peers
+        #
+        N_HOSTS = 16
+        self.pg1.generate_remote_hosts(16)
+        self.pg1.configure_ipv4_neighbors()
+
+        for h in range(N_HOSTS):
+            pmtu = VppIpPathMtu(self, self.pg1.remote_hosts[h].ip4, 900)
+            pmtu.add_vpp_config()
+            self.assertTrue(pmtu.query_vpp_config())
+
+        self.logger.info(self.vapi.cli("sh ip pmtu"))
+        dump = list(self.vapi.vpp.details_iter(self.vapi.ip_path_mtu_get))
+        self.assertEqual(N_HOSTS, len(dump))
+
+        for h in range(N_HOSTS):
+            p_2k[IP].dst = self.pg1.remote_hosts[h].ip4
+            p_1k[IP].dst = self.pg1.remote_hosts[h].ip4
+
+            # should frag to the path MTU
+            self.send_and_expect(self.pg0, [p_2k], self.pg1, n_rx=3)
+            self.send_and_expect(self.pg0, [p_1k], self.pg1, n_rx=2)
 
 
 if __name__ == '__main__':

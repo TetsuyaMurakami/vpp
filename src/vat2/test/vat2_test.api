@@ -28,3 +28,69 @@ enumflag test_enumflags {
 autoreply define test_enum {
   vl_api_test_enumflags_t flags;
 };
+
+typedef test_stringtype {
+  string str[];
+};
+
+autoreply define test_string {
+  vl_api_test_stringtype_t str;
+};
+
+autoreply define test_string2 {
+  string str[];
+};
+
+/* Test of toplevel VLA with basetype */
+autoreply define test_vla {
+  u32 count;
+  u32 vla[count];
+};
+
+/* Test of toplevel VLA with u8 */
+autoreply define test_vla2 {
+  u32 count;
+  u8 vla[count];
+};
+/* Test of toplevel VLA with user type */
+typedef test_vlatype {
+  u32 data;
+};
+autoreply define test_vla3 {
+  u32 count;
+  vl_api_test_vlatype_t vla[count];
+};
+/* Test of typedefed VLA */
+typedef test_vlatype2 {
+  u32 count;
+  u32 vla[count];
+};
+autoreply define test_vla4 {
+  vl_api_test_vlatype2_t data;
+};
+/* u8 string in typedef */
+typedef test_vlatype3 {
+  u32 count;
+  u8 vla[count];
+};
+autoreply define test_vla5 {
+  vl_api_test_vlatype3_t data;
+};
+
+/* Addresses */
+autoreply define test_addresses {
+  vl_api_address_t a;
+};
+autoreply define test_addresses2 {
+  vl_api_address_t a[2];
+};
+autoreply define test_addresses3 {
+  u32 n;
+  vl_api_address_t a[n];
+};
+
+/* Empty */
+autoreply define test_empty {
+  u32 client_index;
+  u32 context;
+};

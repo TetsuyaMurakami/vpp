@@ -22,6 +22,15 @@ typedef enum
   POLICE_VIOLATE = 2,
 } policer_result_e;
 
+#define NUM_POLICE_RESULTS 3
+
+typedef enum
+{
+  QOS_ACTION_DROP = 0,
+  QOS_ACTION_TRANSMIT,
+  QOS_ACTION_MARK_AND_TRANSMIT
+} __clib_packed qos_action_type_en;
+
 // This is the hardware representation of the policer.
 // To be multithread-safe, the policer is accessed through a spin-lock
 // on the lock field. (For a policer update operation, 24B needs to be
@@ -50,23 +59,26 @@ typedef enum
 // computes the shift amount be the largest possible that still supports the
 // burst size. This makes the rate accuracy as high as possible.
 //
-// The 64-bit last_update_time supports a 4Ghz CPU without rollover for 100 years
+// The 64-bit last_update_time supports a 4Ghz CPU without rollover for 100
+// years
 //
-// The lock field should be used for a spin-lock on the struct.
+// The lock field should be used for a spin-lock on the struct. Alternatively,
+// a thread index field is provided so that policed packets may be handed
+// off to a single worker thread.
 
 #define POLICER_TICKS_PER_PERIOD_SHIFT 17
 #define POLICER_TICKS_PER_PERIOD       (1 << POLICER_TICKS_PER_PERIOD_SHIFT)
 
 typedef struct
 {
-
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
   u32 lock;			// for exclusive access to the struct
 
   u32 single_rate;		// 1 = single rate policer, 0 = two rate policer
   u32 color_aware;		// for hierarchical policing
   u32 scale;			// power-of-2 shift amount for lower rates
-  u8 action[3];
-  u8 mark_dscp[3];
+  qos_action_type_en action[3];
+  ip_dscp_t mark_dscp[3];
   u8 pad[2];
 
   // Fields are marked as 2R if they are only used for a 2-rate policer,
@@ -82,13 +94,15 @@ typedef struct
   u32 extended_bucket;		// MOD
 
   u64 last_update_time;		// MOD
-  u64 pad64;
+  u32 thread_index;		// Tie policer to a thread, rather than lock
+  u32 pad32;
 
-} policer_read_response_type_st;
+} policer_t;
+
+STATIC_ASSERT_SIZEOF (policer_t, CLIB_CACHE_LINE_BYTES);
 
 static inline policer_result_e
-vnet_police_packet (policer_read_response_type_st * policer,
-		    u32 packet_length,
+vnet_police_packet (policer_t *policer, u32 packet_length,
 		    policer_result_e packet_color, u64 time)
 {
   u64 n_periods;

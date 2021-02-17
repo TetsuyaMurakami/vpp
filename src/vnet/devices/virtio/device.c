@@ -282,6 +282,8 @@ static_always_inline void
 set_checksum_offsets (vlib_buffer_t * b, virtio_net_hdr_v1_t * hdr,
 		      const int is_l2)
 {
+  u32 oflags = vnet_buffer2 (b)->oflags;
+
   if (b->flags & VNET_BUFFER_F_IS_IP4)
     {
       ip4_header_t *ip4;
@@ -290,11 +292,11 @@ set_checksum_offsets (vlib_buffer_t * b, virtio_net_hdr_v1_t * hdr,
 					 0 /* ip6 */ );
       hdr->flags = VIRTIO_NET_HDR_F_NEEDS_CSUM;
       hdr->csum_start = gho.l4_hdr_offset;	// 0x22;
-      if (b->flags & VNET_BUFFER_F_OFFLOAD_TCP_CKSUM)
+      if (oflags & VNET_BUFFER_OFFLOAD_F_TCP_CKSUM)
 	{
 	  hdr->csum_offset = STRUCT_OFFSET_OF (tcp_header_t, checksum);
 	}
-      else if (b->flags & VNET_BUFFER_F_OFFLOAD_UDP_CKSUM)
+      else if (oflags & VNET_BUFFER_OFFLOAD_F_UDP_CKSUM)
 	{
 	  hdr->csum_offset = STRUCT_OFFSET_OF (udp_header_t, checksum);
 	}
@@ -305,7 +307,7 @@ set_checksum_offsets (vlib_buffer_t * b, virtio_net_hdr_v1_t * hdr,
        */
       ip4 =
 	(ip4_header_t *) (vlib_buffer_get_current (b) + gho.l3_hdr_offset);
-      if (b->flags & VNET_BUFFER_F_OFFLOAD_IP_CKSUM)
+      if (oflags & VNET_BUFFER_OFFLOAD_F_IP_CKSUM)
 	ip4->checksum = ip4_header_checksum (ip4);
     }
   else if (b->flags & VNET_BUFFER_F_IS_IP6)
@@ -315,11 +317,11 @@ set_checksum_offsets (vlib_buffer_t * b, virtio_net_hdr_v1_t * hdr,
 					 1 /* ip6 */ );
       hdr->flags = VIRTIO_NET_HDR_F_NEEDS_CSUM;
       hdr->csum_start = gho.l4_hdr_offset;	// 0x36;
-      if (b->flags & VNET_BUFFER_F_OFFLOAD_TCP_CKSUM)
+      if (oflags & VNET_BUFFER_OFFLOAD_F_TCP_CKSUM)
 	{
 	  hdr->csum_offset = STRUCT_OFFSET_OF (tcp_header_t, checksum);
 	}
-      else if (b->flags & VNET_BUFFER_F_OFFLOAD_UDP_CKSUM)
+      else if (oflags & VNET_BUFFER_OFFLOAD_F_UDP_CKSUM)
 	{
 	  hdr->csum_offset = STRUCT_OFFSET_OF (udp_header_t, checksum);
 	}
@@ -330,6 +332,8 @@ static_always_inline void
 set_gso_offsets (vlib_buffer_t * b, virtio_net_hdr_v1_t * hdr,
 		 const int is_l2)
 {
+  u32 oflags = vnet_buffer2 (b)->oflags;
+
   if (b->flags & VNET_BUFFER_F_IS_IP4)
     {
       ip4_header_t *ip4;
@@ -348,7 +352,7 @@ set_gso_offsets (vlib_buffer_t * b, virtio_net_hdr_v1_t * hdr,
        * virtio devices do not support IP4 checksum offload. So driver takes care
        * of it while doing tx.
        */
-      if (b->flags & VNET_BUFFER_F_OFFLOAD_IP_CKSUM)
+      if (oflags & VNET_BUFFER_OFFLOAD_F_IP_CKSUM)
 	ip4->checksum = ip4_header_checksum (ip4);
     }
   else if (b->flags & VNET_BUFFER_F_IS_IP6)
@@ -392,8 +396,7 @@ add_buffer_to_slot (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  goto done;
 	}
     }
-  else if (b->flags & (VNET_BUFFER_F_OFFLOAD_TCP_CKSUM |
-		       VNET_BUFFER_F_OFFLOAD_UDP_CKSUM))
+  else if (b->flags & VNET_BUFFER_F_OFFLOAD)
     {
       if (csum_offload)
 	set_checksum_offsets (b, hdr, is_l2);
@@ -584,8 +587,7 @@ add_buffer_to_slot_packed (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  goto done;
 	}
     }
-  else if (b->flags & (VNET_BUFFER_F_OFFLOAD_TCP_CKSUM |
-		       VNET_BUFFER_F_OFFLOAD_UDP_CKSUM))
+  else if (b->flags & VNET_BUFFER_F_OFFLOAD)
     {
       if (csum_offload)
 	set_checksum_offsets (b, hdr, is_l2);
@@ -926,11 +928,11 @@ virtio_interface_tx_split_gso_inline (vlib_main_t * vm,
 
   if (n_left != n_vectors || n_buffers != n_buffers_left)
     {
-      CLIB_MEMORY_STORE_BARRIER ();
-      vring->avail->idx = avail;
+      clib_atomic_store_seq_cst (&vring->avail->idx, avail);
       vring->desc_next = next;
       vring->desc_in_use = used;
-      if ((vring->used->flags & VRING_USED_F_NO_NOTIFY) == 0)
+      if ((clib_atomic_load_seq_cst (&vring->used->flags) &
+	   VRING_USED_F_NO_NOTIFY) == 0)
 	virtio_kick (vm, vring, vif);
     }
 
@@ -996,12 +998,6 @@ VNET_DEVICE_CLASS_TX_FN (virtio_device_class) (vlib_main_t * vm,
   u16 n_vectors = frame->n_vectors;
 
   clib_spinlock_lock_if_init (&vring->lockp);
-
-  if (packed && (vring->device_event->flags != VRING_EVENT_F_DISABLE))
-    virtio_kick (vm, vring, vif);
-  else if ((vring->used->flags & VRING_USED_F_NO_NOTIFY) == 0 &&
-	   (vring->last_kick_avail_idx != vring->avail->idx))
-    virtio_kick (vm, vring, vif);
 
   if (vif->packet_coalesce)
     {

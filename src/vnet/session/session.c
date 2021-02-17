@@ -228,9 +228,6 @@ session_is_valid (u32 si, u8 thread_index)
 
   s = pool_elt_at_index (session_main.wrk[thread_index].sessions, si);
 
-  if (!s)
-    return 1;
-
   if (s->thread_index != thread_index || s->session_index != si)
     return 0;
 
@@ -1548,9 +1545,6 @@ session_vpp_event_queues_allocate (session_main_t * smm)
       cfg->ring_cfgs = rc;
 
       smm->wrk[i].vpp_event_queue = fifo_segment_msg_q_alloc (eqs, i, cfg);
-
-      if (svm_msg_q_alloc_consumer_eventfd (smm->wrk[i].vpp_event_queue))
-	clib_warning ("eventfd returned");
     }
 }
 
@@ -1828,7 +1822,7 @@ session_main_init (vlib_main_t * vm)
   smm->evt_qs_segment_size = 1 << 20;
 #endif
 
-  smm->last_transport_proto_type = TRANSPORT_PROTO_QUIC;
+  smm->last_transport_proto_type = TRANSPORT_PROTO_DTLS;
 
   return 0;
 }

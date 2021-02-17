@@ -46,7 +46,7 @@ vcl_mq_epoll_add_evfd (vcl_worker_t * wrk, svm_msg_q_t * mq)
   u32 mqc_index;
   int mq_fd;
 
-  mq_fd = svm_msg_q_get_consumer_eventfd (mq);
+  mq_fd = svm_msg_q_get_eventfd (mq);
 
   if (wrk->mqs_epfd < 0 || mq_fd == -1)
     return -1;
@@ -450,6 +450,29 @@ vcl_segment_attach_mq (uword segment_handle, uword mq_offset, u32 mq_index,
 
   fs = fifo_segment_get_segment (&vcm->segment_main, fs_index);
   *mq = fifo_segment_msg_q_attach (fs, mq_offset, mq_index);
+
+  clib_rwlock_reader_unlock (&vcm->segment_table_lock);
+
+  return 0;
+}
+
+int
+vcl_segment_discover_mqs (uword segment_handle, int *fds, u32 n_fds)
+{
+  fifo_segment_t *fs;
+  u32 fs_index;
+
+  fs_index = vcl_segment_table_lookup (segment_handle);
+  if (fs_index == VCL_INVALID_SEGMENT_INDEX)
+    {
+      VDBG (0, "ERROR: mq segment %lx for is not attached!", segment_handle);
+      return -1;
+    }
+
+  clib_rwlock_reader_lock (&vcm->segment_table_lock);
+
+  fs = fifo_segment_get_segment (&vcm->segment_main, fs_index);
+  fifo_segment_msg_qs_discover (fs, fds, n_fds);
 
   clib_rwlock_reader_unlock (&vcm->segment_table_lock);
 

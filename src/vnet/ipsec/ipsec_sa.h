@@ -48,6 +48,11 @@ typedef enum
     (_alg == IPSEC_CRYPTO_ALG_AES_GCM_192) ||             \
     (_alg == IPSEC_CRYPTO_ALG_AES_GCM_256)))
 
+#define IPSEC_CRYPTO_ALG_IS_CTR(_alg)                                         \
+  (((_alg == IPSEC_CRYPTO_ALG_AES_CTR_128) ||                                 \
+    (_alg == IPSEC_CRYPTO_ALG_AES_CTR_192) ||                                 \
+    (_alg == IPSEC_CRYPTO_ALG_AES_CTR_256)))
+
 #define foreach_ipsec_integ_alg                                            \
   _ (0, NONE, "none")                                                      \
   _ (1, MD5_96, "md5-96")           /* RFC2403 */                          \
@@ -86,16 +91,17 @@ typedef struct ipsec_key_t_
  * else IPv4 tunnel only valid if is_tunnel is non-zero
  * enable UDP encapsulation for NAT traversal
  */
-#define foreach_ipsec_sa_flags                            \
-  _ (0, NONE, "none")                                     \
-  _ (1, USE_ESN, "esn")                                   \
-  _ (2, USE_ANTI_REPLAY, "anti-replay")                   \
-  _ (4, IS_TUNNEL, "tunnel")                              \
-  _ (8, IS_TUNNEL_V6, "tunnel-v6")                        \
-  _ (16, UDP_ENCAP, "udp-encap")                          \
-  _ (32, IS_PROTECT, "Protect")                           \
-  _ (64, IS_INBOUND, "inbound")                           \
-  _ (128, IS_AEAD, "aead")                                \
+#define foreach_ipsec_sa_flags                                                \
+  _ (0, NONE, "none")                                                         \
+  _ (1, USE_ESN, "esn")                                                       \
+  _ (2, USE_ANTI_REPLAY, "anti-replay")                                       \
+  _ (4, IS_TUNNEL, "tunnel")                                                  \
+  _ (8, IS_TUNNEL_V6, "tunnel-v6")                                            \
+  _ (16, UDP_ENCAP, "udp-encap")                                              \
+  _ (32, IS_PROTECT, "Protect")                                               \
+  _ (64, IS_INBOUND, "inbound")                                               \
+  _ (128, IS_AEAD, "aead")                                                    \
+  _ (256, IS_CTR, "ctr")
 
 typedef enum ipsec_sad_flags_t_
 {
@@ -104,7 +110,7 @@ typedef enum ipsec_sad_flags_t_
 #undef _
 } __clib_packed ipsec_sa_flags_t;
 
-STATIC_ASSERT (sizeof (ipsec_sa_flags_t) == 1, "IPSEC SA flags > 1 byte");
+STATIC_ASSERT (sizeof (ipsec_sa_flags_t) == 2, "IPSEC SA flags != 2 byte");
 
 typedef struct
 {
@@ -116,8 +122,11 @@ typedef struct
   u8 crypto_iv_size;
   u8 esp_block_align;
   u8 integ_icv_size;
-  u32 encrypt_thread_index;
-  u32 decrypt_thread_index;
+
+  u8 __pad1[3];
+
+  u32 thread_index;
+
   u32 spi;
   u32 seq;
   u32 seq_hi;
@@ -150,9 +159,9 @@ typedef struct
     u64 crypto_op_data;
   };
 
-    CLIB_CACHE_LINE_ALIGN_MARK (cacheline1);
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline1);
 
-  u64 gcm_iv_counter;
+  u64 ctr_iv_counter;
   union
   {
     ip4_header_t ip4_hdr;
@@ -160,13 +169,12 @@ typedef struct
   };
   udp_header_t udp_hdr;
 
-  /* Salt used in GCM modes - stored in network byte order */
+  /* Salt used in CTR modes (incl. GCM) - stored in network byte order */
   u32 salt;
 
   ipsec_protocol_t protocol;
   tunnel_encap_decap_flags_t tunnel_flags;
-  ip_dscp_t dscp;
-  u8 __pad[1];
+  u8 __pad[2];
 
   /* data accessed by dataplane code should be above this comment */
     CLIB_CACHE_LINE_ALIGN_MARK (cacheline2);
@@ -194,8 +202,7 @@ typedef struct
     u64 data;
   } async_op_data;
 
-  ip46_address_t tunnel_src_addr;
-  ip46_address_t tunnel_dst_addr;
+  tunnel_t tunnel;
 
   fib_node_t node;
 
@@ -204,10 +211,6 @@ typedef struct
   u32 stat_index;
   vnet_crypto_alg_t integ_calg;
   vnet_crypto_alg_t crypto_calg;
-
-  fib_node_index_t fib_entry_index;
-  u32 sibling;
-  u32 tx_fib_index;
 
   /* else u8 packed */
   ipsec_crypto_alg_t crypto_alg;
@@ -219,6 +222,14 @@ typedef struct
 
 STATIC_ASSERT_OFFSET_OF (ipsec_sa_t, cacheline1, CLIB_CACHE_LINE_BYTES);
 STATIC_ASSERT_OFFSET_OF (ipsec_sa_t, cacheline2, 2 * CLIB_CACHE_LINE_BYTES);
+
+/*
+ * Ensure that the IPsec data does not overlap with the IP data in
+ * the buffer meta data
+ */
+STATIC_ASSERT (STRUCT_OFFSET_OF (vnet_buffer_opaque_t, ipsec.sad_index) ==
+		 STRUCT_OFFSET_OF (vnet_buffer_opaque_t, ip.save_protocol),
+	       "IPSec data is overlapping with IP data");
 
 #define _(a,v,s)                                                        \
   always_inline int                                                     \
@@ -249,21 +260,12 @@ extern vlib_combined_counter_main_t ipsec_sa_counters;
 
 extern void ipsec_mk_key (ipsec_key_t * key, const u8 * data, u8 len);
 
-extern int ipsec_sa_add_and_lock (u32 id,
-				  u32 spi,
-				  ipsec_protocol_t proto,
-				  ipsec_crypto_alg_t crypto_alg,
-				  const ipsec_key_t * ck,
-				  ipsec_integ_alg_t integ_alg,
-				  const ipsec_key_t * ik,
-				  ipsec_sa_flags_t flags,
-				  u32 tx_table_id,
-				  u32 salt,
-				  const ip46_address_t * tunnel_src_addr,
-				  const ip46_address_t * tunnel_dst_addr,
-				  tunnel_encap_decap_flags_t tunnel_flags,
-				  ip_dscp_t dscp,
-				  u32 * sa_index, u16 src_port, u16 dst_port);
+extern int
+ipsec_sa_add_and_lock (u32 id, u32 spi, ipsec_protocol_t proto,
+		       ipsec_crypto_alg_t crypto_alg, const ipsec_key_t *ck,
+		       ipsec_integ_alg_t integ_alg, const ipsec_key_t *ik,
+		       ipsec_sa_flags_t flags, u32 salt, u16 src_port,
+		       u16 dst_port, const tunnel_t *tun, u32 *sa_out_index);
 extern index_t ipsec_sa_find_and_lock (u32 id);
 extern int ipsec_sa_unlock_id (u32 id);
 extern void ipsec_sa_unlock (index_t sai);

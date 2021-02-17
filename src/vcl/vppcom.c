@@ -25,15 +25,14 @@ __thread uword __vcl_worker_index = ~0;
 static inline int
 vcl_mq_dequeue_batch (vcl_worker_t * wrk, svm_msg_q_t * mq, u32 n_max_msg)
 {
-  svm_msg_q_msg_t *msg;
-  u32 n_msgs;
-  int i;
+  u32 n_msgs = 0, sz, len;
 
-  n_msgs = clib_min (svm_msg_q_size (mq), n_max_msg);
-  for (i = 0; i < n_msgs; i++)
+  while ((sz = svm_msg_q_size (mq)))
     {
-      vec_add2 (wrk->mq_msg_vector, msg, 1);
-      svm_msg_q_sub_w_lock (mq, msg);
+      len = vec_len (wrk->mq_msg_vector);
+      vec_validate (wrk->mq_msg_vector, len + sz - 1);
+      svm_msg_q_sub_raw_batch (mq, wrk->mq_msg_vector + len, sz);
+      n_msgs += sz;
     }
   return n_msgs;
 }
@@ -183,6 +182,7 @@ vcl_send_session_listen (vcl_worker_t * wrk, vcl_session_t * s)
   mp->port = s->transport.lcl_port;
   mp->proto = s->session_type;
   mp->ckpair_index = s->ckpair_index;
+  mp->vrf = s->vrf;
   if (s->flags & VCL_SESSION_F_CONNECTED)
     mp->flags = TRANSPORT_CFG_F_CONNECTED;
   app_send_ctrl_evt_to_vpp (mq, app_evt);
@@ -210,6 +210,7 @@ vcl_send_session_connect (vcl_worker_t * wrk, vcl_session_t * s)
   mp->lcl_port = s->transport.lcl_port;
   mp->proto = s->session_type;
   mp->ckpair_index = s->ckpair_index;
+  mp->vrf = s->vrf;
   if (s->flags & VCL_SESSION_F_CONNECTED)
     mp->flags |= TRANSPORT_CFG_F_CONNECTED;
   app_send_ctrl_evt_to_vpp (mq, app_evt);
@@ -635,12 +636,17 @@ vcl_session_migrated_handler (vcl_worker_t * wrk, void *data)
       return;
     }
 
-  fs_index = vcl_segment_table_lookup (mp->segment_handle);
-  if (fs_index == VCL_INVALID_SEGMENT_INDEX)
+  /* Only validate if a value is provided */
+  if (mp->segment_handle != SESSION_INVALID_HANDLE)
     {
-      VDBG (0, "segment for session %u is not mounted!", s->session_index);
-      s->session_state = VCL_STATE_DETACHED;
-      return;
+      fs_index = vcl_segment_table_lookup (mp->segment_handle);
+      if (fs_index == VCL_INVALID_SEGMENT_INDEX)
+	{
+	  VDBG (0, "segment %lx for session %u is not mounted!",
+		mp->segment_handle, s->session_index);
+	  s->session_state = VCL_STATE_DETACHED;
+	  return;
+	}
     }
 
   s->vpp_handle = mp->new_handle;
@@ -1099,18 +1105,15 @@ vcl_handle_pending_wrk_updates (vcl_worker_t * wrk)
 }
 
 void
-vcl_flush_mq_events (void)
+vcl_worker_flush_mq_events (vcl_worker_t *wrk)
 {
-  vcl_worker_t *wrk = vcl_worker_get_current ();
   svm_msg_q_msg_t *msg;
   session_event_t *e;
   svm_msg_q_t *mq;
   int i;
 
   mq = wrk->app_event_queue;
-  svm_msg_q_lock (mq);
   vcl_mq_dequeue_batch (wrk, mq, ~0);
-  svm_msg_q_unlock (mq);
 
   for (i = 0; i < vec_len (wrk->mq_msg_vector); i++)
     {
@@ -1121,6 +1124,12 @@ vcl_flush_mq_events (void)
     }
   vec_reset_length (wrk->mq_msg_vector);
   vcl_handle_pending_wrk_updates (wrk);
+}
+
+void
+vcl_flush_mq_events (void)
+{
+  vcl_worker_flush_mq_events (vcl_worker_get_current ());
 }
 
 static int
@@ -1522,6 +1531,10 @@ vppcom_unformat_proto (uint8_t * proto, char *proto_str)
     *proto = VPPCOM_PROTO_QUIC;
   else if (!strcmp (proto_str, "quic"))
     *proto = VPPCOM_PROTO_QUIC;
+  else if (!strcmp (proto_str, "DTLS"))
+    *proto = VPPCOM_PROTO_DTLS;
+  else if (!strcmp (proto_str, "dtls"))
+    *proto = VPPCOM_PROTO_DTLS;
   else
     return 1;
   return 0;
@@ -1537,10 +1550,10 @@ vppcom_session_accept (uint32_t listen_session_handle, vppcom_endpt_t * ep,
   vcl_session_t *listen_session = 0;
   vcl_session_t *client_session = 0;
   vcl_session_msg_t *evt;
-  svm_msg_q_msg_t msg;
-  session_event_t *e;
   u8 is_nonblocking;
   int rv;
+
+again:
 
   listen_session = vcl_session_get_w_handle (wrk, listen_session_handle);
   if (!listen_session)
@@ -1565,19 +1578,9 @@ vppcom_session_accept (uint32_t listen_session_handle, vppcom_endpt_t * ep,
       if (svm_msg_q_is_empty (wrk->app_event_queue) && is_nonblocking)
 	return VPPCOM_EAGAIN;
 
-      if (svm_msg_q_sub (wrk->app_event_queue, &msg, SVM_Q_WAIT, 0))
-	return VPPCOM_EAGAIN;
-
-      e = svm_msg_q_msg_data (wrk->app_event_queue, &msg);
-      if (e->event_type != SESSION_CTRL_EVT_ACCEPTED)
-	{
-	  vcl_handle_mq_event (wrk, e);
-	  svm_msg_q_free_msg (wrk->app_event_queue, &msg);
-	  continue;
-	}
-      clib_memcpy_fast (&accepted_msg, e->data, sizeof (accepted_msg));
-      svm_msg_q_free_msg (wrk->app_event_queue, &msg);
-      break;
+      svm_msg_q_wait (wrk->app_event_queue, SVM_MQ_WAIT_EMPTY);
+      vcl_worker_flush_mq_events (wrk);
+      goto again;
     }
 
 handle:
@@ -1783,12 +1786,6 @@ vppcom_session_stream_connect (uint32_t session_handle,
   return rv;
 }
 
-static u8
-vcl_is_rx_evt_for_session (session_event_t * e, u32 sid, u8 is_ct)
-{
-  return (e->event_type == SESSION_IO_EVT_RX && e->session_index == sid);
-}
-
 static inline int
 vppcom_session_read_internal (uint32_t session_handle, void *buf, int n,
 			      u8 peek)
@@ -1797,7 +1794,6 @@ vppcom_session_read_internal (uint32_t session_handle, void *buf, int n,
   int rv, n_read = 0, is_nonblocking;
   vcl_session_t *s = 0;
   svm_fifo_t *rx_fifo;
-  svm_msg_q_msg_t msg;
   session_event_t *e;
   svm_msg_q_t *mq;
   u8 is_ct;
@@ -1842,16 +1838,9 @@ vppcom_session_read_internal (uint32_t session_handle, void *buf, int n,
 	  if (is_ct)
 	    svm_fifo_unset_event (s->rx_fifo);
 	  svm_fifo_unset_event (rx_fifo);
-	  svm_msg_q_lock (mq);
-	  if (svm_msg_q_is_empty (mq))
-	    svm_msg_q_wait (mq);
 
-	  svm_msg_q_sub_w_lock (mq, &msg);
-	  e = svm_msg_q_msg_data (mq, &msg);
-	  svm_msg_q_unlock (mq);
-	  if (!vcl_is_rx_evt_for_session (e, s->session_index, is_ct))
-	    vcl_handle_mq_event (wrk, e);
-	  svm_msg_q_free_msg (mq, &msg);
+	  svm_msg_q_wait (mq, SVM_MQ_WAIT_EMPTY);
+	  vcl_worker_flush_mq_events (wrk);
 	}
     }
 
@@ -1922,8 +1911,6 @@ vppcom_session_read_segments (uint32_t session_handle,
   int n_read = 0, is_nonblocking;
   vcl_session_t *s = 0;
   svm_fifo_t *rx_fifo;
-  svm_msg_q_msg_t msg;
-  session_event_t *e;
   svm_msg_q_t *mq;
   u8 is_ct;
 
@@ -1957,16 +1944,9 @@ vppcom_session_read_segments (uint32_t session_handle,
 	  if (is_ct)
 	    svm_fifo_unset_event (s->rx_fifo);
 	  svm_fifo_unset_event (rx_fifo);
-	  svm_msg_q_lock (mq);
-	  if (svm_msg_q_is_empty (mq))
-	    svm_msg_q_wait (mq);
 
-	  svm_msg_q_sub_w_lock (mq, &msg);
-	  e = svm_msg_q_msg_data (mq, &msg);
-	  svm_msg_q_unlock (mq);
-	  if (!vcl_is_rx_evt_for_session (e, s->session_index, is_ct))
-	    vcl_handle_mq_event (wrk, e);
-	  svm_msg_q_free_msg (mq, &msg);
+	  svm_msg_q_wait (mq, SVM_MQ_WAIT_EMPTY);
+	  vcl_worker_flush_mq_events (wrk);
 	}
     }
 
@@ -2013,12 +1993,6 @@ vppcom_session_free_segments (uint32_t session_handle, uint32_t n_bytes)
   s->rx_bytes_pending -= n_bytes;
 }
 
-static u8
-vcl_is_tx_evt_for_session (session_event_t * e, u32 sid, u8 is_ct)
-{
-  return (e->event_type == SESSION_IO_EVT_TX && e->session_index == sid);
-}
-
 always_inline u8
 vcl_fifo_is_writeable (svm_fifo_t * f, u32 len, u8 is_dgram)
 {
@@ -2035,9 +2009,7 @@ vppcom_session_write_inline (vcl_worker_t * wrk, vcl_session_t * s, void *buf,
 {
   int n_write, is_nonblocking;
   session_evt_type_t et;
-  svm_msg_q_msg_t msg;
   svm_fifo_t *tx_fifo;
-  session_event_t *e;
   svm_msg_q_t *mq;
   u8 is_ct;
 
@@ -2075,17 +2047,9 @@ vppcom_session_write_inline (vcl_worker_t * wrk, vcl_session_t * s, void *buf,
 	  svm_fifo_add_want_deq_ntf (tx_fifo, SVM_FIFO_WANT_DEQ_NOTIF);
 	  if (vcl_session_is_closing (s))
 	    return vcl_session_closing_error (s);
-	  svm_msg_q_lock (mq);
-	  if (svm_msg_q_is_empty (mq))
-	    svm_msg_q_wait (mq);
 
-	  svm_msg_q_sub_w_lock (mq, &msg);
-	  e = svm_msg_q_msg_data (mq, &msg);
-	  svm_msg_q_unlock (mq);
-
-	  if (!vcl_is_tx_evt_for_session (e, s->session_index, is_ct))
-	    vcl_handle_mq_event (wrk, e);
-	  svm_msg_q_free_msg (mq, &msg);
+	  svm_msg_q_wait (mq, SVM_MQ_WAIT_EMPTY);
+	  vcl_worker_flush_mq_events (wrk);
 	}
     }
 
@@ -2288,35 +2252,22 @@ vcl_select_handle_mq (vcl_worker_t * wrk, svm_msg_q_t * mq,
   session_event_t *e;
   u32 i;
 
-  svm_msg_q_lock (mq);
   if (svm_msg_q_is_empty (mq))
     {
       if (*bits_set)
-	{
-	  svm_msg_q_unlock (mq);
-	  return 0;
-	}
+	return 0;
 
       if (!time_to_wait)
-	{
-	  svm_msg_q_unlock (mq);
-	  return 0;
-	}
+	return 0;
       else if (time_to_wait < 0)
-	{
-	  svm_msg_q_wait (mq);
-	}
+	svm_msg_q_wait (mq, SVM_MQ_WAIT_EMPTY);
       else
 	{
 	  if (svm_msg_q_timedwait (mq, time_to_wait))
-	    {
-	      svm_msg_q_unlock (mq);
-	      return 0;
-	    }
+	    return 0;
 	}
     }
   vcl_mq_dequeue_batch (wrk, mq, ~0);
-  svm_msg_q_unlock (mq);
 
   for (i = 0; i < vec_len (wrk->mq_msg_vector); i++)
     {
@@ -2392,7 +2343,7 @@ vppcom_select (int n_bits, vcl_si_set * read_map, vcl_si_set * write_map,
 {
   u32 sid, minbits = clib_max (n_bits, BITS (uword)), bits_set = 0;
   vcl_worker_t *wrk = vcl_worker_get_current ();
-  vcl_session_t *session = 0;
+  vcl_session_t *s = 0;
   int i;
 
   if (n_bits && read_map)
@@ -2423,43 +2374,46 @@ vppcom_select (int n_bits, vcl_si_set * read_map, vcl_si_set * write_map,
   if (!write_map)
     goto check_rd;
 
-  /* *INDENT-OFF* */
-  clib_bitmap_foreach (sid, wrk->wr_bitmap)  {
-    if (!(session = vcl_session_get (wrk, sid)))
-      {
-	clib_bitmap_set_no_check ((uword*)write_map, sid, 1);
-	bits_set++;
-	continue;
-      }
+  clib_bitmap_foreach (sid, wrk->wr_bitmap)
+    {
+      if (!(s = vcl_session_get (wrk, sid)))
+	{
+	  clib_bitmap_set_no_check ((uword *) write_map, sid, 1);
+	  bits_set++;
+	  continue;
+	}
 
-    if (vcl_session_write_ready (session))
-      {
-        clib_bitmap_set_no_check ((uword*)write_map, sid, 1);
-        bits_set++;
-      }
-    else
-      svm_fifo_add_want_deq_ntf (session->tx_fifo, SVM_FIFO_WANT_DEQ_NOTIF);
-  }
+      if (vcl_session_write_ready (s))
+	{
+	  clib_bitmap_set_no_check ((uword *) write_map, sid, 1);
+	  bits_set++;
+	}
+      else
+	{
+	  svm_fifo_t *txf = vcl_session_is_ct (s) ? s->ct_tx_fifo : s->tx_fifo;
+	  svm_fifo_add_want_deq_ntf (txf, SVM_FIFO_WANT_DEQ_NOTIF);
+	}
+    }
 
 check_rd:
   if (!read_map)
     goto check_mq;
 
-  clib_bitmap_foreach (sid, wrk->rd_bitmap)  {
-    if (!(session = vcl_session_get (wrk, sid)))
-      {
-	clib_bitmap_set_no_check ((uword*)read_map, sid, 1);
-	bits_set++;
-	continue;
-      }
+  clib_bitmap_foreach (sid, wrk->rd_bitmap)
+    {
+      if (!(s = vcl_session_get (wrk, sid)))
+	{
+	  clib_bitmap_set_no_check ((uword *) read_map, sid, 1);
+	  bits_set++;
+	  continue;
+	}
 
-    if (vcl_session_read_ready (session))
-      {
-        clib_bitmap_set_no_check ((uword*)read_map, sid, 1);
-        bits_set++;
-      }
-  }
-  /* *INDENT-ON* */
+      if (vcl_session_read_ready (s))
+	{
+	  clib_bitmap_set_no_check ((uword *) read_map, sid, 1);
+	  bits_set++;
+	}
+    }
 
 check_mq:
 
@@ -2934,30 +2888,20 @@ vcl_epoll_wait_handle_mq (vcl_worker_t * wrk, svm_msg_q_t * mq,
   if (vec_len (wrk->mq_msg_vector) && svm_msg_q_is_empty (mq))
     goto handle_dequeued;
 
-  svm_msg_q_lock (mq);
   if (svm_msg_q_is_empty (mq))
     {
       if (!wait_for_time)
-	{
-	  svm_msg_q_unlock (mq);
-	  return 0;
-	}
+	return 0;
       else if (wait_for_time < 0)
-	{
-	  svm_msg_q_wait (mq);
-	}
+	svm_msg_q_wait (mq, SVM_MQ_WAIT_EMPTY);
       else
 	{
 	  if (svm_msg_q_timedwait (mq, wait_for_time / 1e3))
-	    {
-	      svm_msg_q_unlock (mq);
-	      return 0;
-	    }
+	    return 0;
 	}
     }
   ASSERT (maxevents > *num_ev);
   vcl_mq_dequeue_batch (wrk, mq, ~0);
-  svm_msg_q_unlock (mq);
 
 handle_dequeued:
   for (i = 0; i < vec_len (wrk->mq_msg_vector); i++)
@@ -3009,25 +2953,49 @@ static int
 vppcom_epoll_wait_eventfd (vcl_worker_t * wrk, struct epoll_event *events,
 			   int maxevents, u32 n_evts, double wait_for_time)
 {
-  vcl_mq_evt_conn_t *mqc;
+  double wait = 0, start = 0, now;
   int __clib_unused n_read;
+  vcl_mq_evt_conn_t *mqc;
   int n_mq_evts, i;
   u64 buf;
 
   vec_validate (wrk->mq_events, pool_elts (wrk->mq_evt_conns));
-again:
-  n_mq_evts = epoll_wait (wrk->mqs_epfd, wrk->mq_events,
-			  vec_len (wrk->mq_events), wait_for_time);
-  for (i = 0; i < n_mq_evts; i++)
+  if (!n_evts)
     {
-      mqc = vcl_mq_evt_conn_get (wrk, wrk->mq_events[i].data.u32);
-      n_read = read (mqc->mq_fd, &buf, sizeof (buf));
-      vcl_epoll_wait_handle_mq (wrk, mqc->mq, events, maxevents, 0, &n_evts);
+      wait = wait_for_time;
+      start = clib_time_now (&wrk->clib_time);
     }
-  if (!n_evts && n_mq_evts > 0)
-    goto again;
 
-  return (int) n_evts;
+  do
+    {
+      n_mq_evts = epoll_wait (wrk->mqs_epfd, wrk->mq_events,
+			      vec_len (wrk->mq_events), wait);
+      if (n_mq_evts < 0)
+	{
+	  VDBG (0, "epoll_wait error %u", errno);
+	  return n_evts;
+	}
+
+      for (i = 0; i < n_mq_evts; i++)
+	{
+	  mqc = vcl_mq_evt_conn_get (wrk, wrk->mq_events[i].data.u32);
+	  n_read = read (mqc->mq_fd, &buf, sizeof (buf));
+	  vcl_epoll_wait_handle_mq (wrk, mqc->mq, events, maxevents, 0,
+				    &n_evts);
+	}
+
+      if (n_evts)
+	return n_evts;
+      if (wait == -1)
+	continue;
+
+      now = clib_time_now (&wrk->clib_time);
+      wait -= (now - start) * 1e3;
+      start = now;
+    }
+  while (wait > 0);
+
+  return 0;
 }
 
 int
@@ -3646,6 +3614,25 @@ vppcom_session_attr (uint32_t session_handle, uint32_t op,
       session->ckpair_index = *(uint32_t *) buffer;
       break;
 
+    case VPPCOM_ATTR_SET_VRF:
+      if (!(buffer && buflen && (*buflen == sizeof (u32))))
+	{
+	  rv = VPPCOM_EINVAL;
+	  break;
+	}
+      session->vrf = *(u32 *) buffer;
+      break;
+
+    case VPPCOM_ATTR_GET_VRF:
+      if (!(buffer && buflen && (*buflen >= sizeof (u32))))
+	{
+	  rv = VPPCOM_EINVAL;
+	  break;
+	}
+      *(u32 *) buffer = session->vrf;
+      *buflen = sizeof (u32);
+      break;
+
     default:
       rv = VPPCOM_EINVAL;
       break;
@@ -3954,6 +3941,9 @@ vppcom_proto_str (vppcom_proto_t proto)
       break;
     case VPPCOM_PROTO_QUIC:
       proto_str = "QUIC";
+      break;
+    case VPPCOM_PROTO_DTLS:
+      proto_str = "DTLS";
       break;
     default:
       proto_str = "UNKNOWN";

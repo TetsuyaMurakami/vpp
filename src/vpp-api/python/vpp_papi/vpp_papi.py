@@ -47,7 +47,7 @@ except ModuleNotFoundError:
 logger = logging.getLogger('vpp_papi')
 logger.addHandler(logging.NullHandler())
 
-__all__ = ('FuncWrapper', 'VPP', 'VppApiDynamicMethodHolder',
+__all__ = ('FuncWrapper', 'VppApiDynamicMethodHolder',
            'VppEnum', 'VppEnumType', 'VppEnumFlag',
            'VPPIOError', 'VPPRuntimeError', 'VPPValueError',
            'VPPApiClient', )
@@ -685,6 +685,15 @@ class VPPApiClient:
             s += '{:<30} {:>4} {:>6.2f} {:>6.2f}\n'.format(n[0], n[1]['count'],
                                                            n[1]['avg'], n[1]['max'])
         return s
+
+    def get_field_options(self, msg, fld_name):
+        # when there is an option, the msgdef has 3 elements.
+        # ['u32', 'ring_size', {'default': 1024}]
+        for _def in self.messages[msg].msgdef:
+            if isinstance(_def, list) and \
+                    len(_def) == 3 and \
+                    _def[1] == fld_name:
+                return _def[2]
 
     def _call_vpp(self, i, msgdef, service, **kwargs):
         """Given a message, send the message and await a reply.

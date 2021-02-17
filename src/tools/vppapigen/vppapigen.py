@@ -44,7 +44,7 @@ def exception_handler(exception_type, exception, traceback):
 #
 # Lexer
 #
-class VPPAPILexer(object):
+class VPPAPILexer:
     def __init__(self, filename):
         self.filename = filename
 
@@ -64,6 +64,7 @@ class VPPAPILexer(object):
         'manual_endian': 'MANUAL_ENDIAN',
         'dont_trace': 'DONT_TRACE',
         'autoreply': 'AUTOREPLY',
+        'autoendian': 'AUTOENDIAN',
         'option': 'OPTION',
         'u8': 'U8',
         'u16': 'U16',
@@ -308,6 +309,7 @@ class Define(Processable):
         self.manual_print = False
         self.manual_endian = False
         self.autoreply = False
+        self.autoendian = 0
         self.options = {}
         for f in flags:
             if f == 'dont_trace':
@@ -318,6 +320,8 @@ class Define(Processable):
                 self.manual_endian = True
             elif f == 'autoreply':
                 self.autoreply = True
+            elif f == 'autoendian':
+                self.autoendian = 1
 
         remove = []
         for b in block:
@@ -520,7 +524,7 @@ class Paths(Processable):
         )
 
 
-class Coord(object):
+class Coord:
     """ Coordinates of a syntactic element. Consists of:
             - File name
             - Line number
@@ -547,7 +551,7 @@ class ParseError(Exception):
 #
 # Grammar rules
 #
-class VPPAPIParser(object):
+class VPPAPIParser:
     tokens = VPPAPILexer.tokens
 
     def __init__(self, filename, logger, revision=None):
@@ -631,7 +635,7 @@ class VPPAPIParser(object):
         '''counter_elements : counter_element
                             | counter_elements counter_element'''
         if len(p) == 2:
-            p[0] = p[1]
+            p[0] = [p[1]]
         else:
             if type(p[1]) is dict:
                 p[0] = [p[1], p[2]]
@@ -719,7 +723,7 @@ class VPPAPIParser(object):
         p[0] = EnumFlag(p[2], p[4])
 
     def p_enumflag_type(self, p):
-        ''' enumflag : ENUMFLAG ID ':' enum_size '{' enum_statements '}' ';' '''  # noqa : E502
+        ''' enumflag : ENUMFLAG ID ':' enumflag_size '{' enum_statements '}' ';' '''  # noqa : E502
         if len(p) == 9:
             p[0] = EnumFlag(p[2], p[6], enumtype=p[4])
         else:
@@ -728,7 +732,16 @@ class VPPAPIParser(object):
     def p_enum_size(self, p):
         ''' enum_size : U8
                       | U16
-                      | U32 '''
+                      | U32
+                      | I8
+                      | I16
+                      | I32 '''
+        p[0] = p[1]
+
+    def p_enumflag_size(self, p):
+        ''' enumflag_size : U8
+                          | U16
+                          | U32 '''
         p[0] = p[1]
 
     def p_define(self, p):
@@ -759,6 +772,7 @@ class VPPAPIParser(object):
                 | MANUAL_ENDIAN
                 | DONT_TRACE
                 | TYPEONLY
+                | AUTOENDIAN
                 | AUTOREPLY'''
         if len(p) == 1:
             return

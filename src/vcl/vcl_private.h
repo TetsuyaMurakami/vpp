@@ -161,6 +161,7 @@ typedef struct vcl_session_
   u32 attributes;		/**< see @ref vppcom_session_attr_t */
   int libc_epfd;
   u32 ckpair_index;
+  u32 vrf;
 
   u32 sndbuf_size;		// VPP-TBD: Hack until support setsockopt(SO_SNDBUF)
   u32 rcvbuf_size;		// VPP-TBD: Hack until support setsockopt(SO_RCVBUF)
@@ -541,7 +542,8 @@ static inline u8
 vcl_session_has_crypto (vcl_session_t *s)
 {
   return (s->session_type == VPPCOM_PROTO_TLS ||
-	  s->session_type == VPPCOM_PROTO_QUIC);
+	  s->session_type == VPPCOM_PROTO_QUIC ||
+	  s->session_type == VPPCOM_PROTO_DTLS);
 }
 
 static inline u8
@@ -607,7 +609,7 @@ vcl_ip_copy_to_ep (ip46_address_t * ip, vppcom_endpt_t * ep, u8 is_ip4)
 static inline int
 vcl_proto_is_dgram (uint8_t proto)
 {
-  return proto == VPPCOM_PROTO_UDP;
+  return proto == VPPCOM_PROTO_UDP || proto == VPPCOM_PROTO_DTLS;
 }
 
 static inline u8
@@ -699,6 +701,7 @@ int vcl_segment_attach_session (uword segment_handle, uword rxf_offset,
 				vcl_session_t *s);
 int vcl_segment_attach_mq (uword segment_handle, uword mq_offset, u32 mq_index,
 			   svm_msg_q_t **mq);
+int vcl_segment_discover_mqs (uword segment_handle, int *fds, u32 n_fds);
 
 /*
  * VCL Binary API

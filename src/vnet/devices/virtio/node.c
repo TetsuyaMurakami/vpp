@@ -122,7 +122,7 @@ more:
        * initialized.
        */
       b->current_data = -hdr_sz;
-      memset (vlib_buffer_get_current (b), 0, hdr_sz);
+      clib_memset (vlib_buffer_get_current (b), 0, hdr_sz);
       d->addr =
 	((type == VIRTIO_IF_TYPE_PCI) ? vlib_buffer_get_current_pa (vm,
 								    b) :
@@ -135,12 +135,11 @@ more:
       n_slots--;
       used++;
     }
-  CLIB_MEMORY_STORE_BARRIER ();
-  vring->avail->idx = avail;
+  clib_atomic_store_seq_cst (&vring->avail->idx, avail);
   vring->desc_next = next;
   vring->desc_in_use = used;
-
-  if ((vring->used->flags & VRING_USED_F_NO_NOTIFY) == 0)
+  if ((clib_atomic_load_seq_cst (&vring->used->flags) &
+       VRING_USED_F_NO_NOTIFY) == 0)
     {
       virtio_kick (vm, vring, vif);
     }
@@ -189,7 +188,7 @@ more:
        * initialized.
        */
       b->current_data = -hdr_sz;
-      memset (vlib_buffer_get_current (b), 0, hdr_sz);
+      clib_memset (vlib_buffer_get_current (b), 0, hdr_sz);
       d->addr =
 	((type == VIRTIO_IF_TYPE_PCI) ? vlib_buffer_get_current_pa (vm,
 								    b) :
@@ -236,6 +235,7 @@ virtio_needs_csum (vlib_buffer_t * b0, virtio_net_hdr_v1_t * hdr,
   if (hdr->flags & VIRTIO_NET_HDR_F_NEEDS_CSUM)
     {
       u16 ethertype = 0, l2hdr_sz = 0;
+      u32 oflags = 0;
 
       if (type == VIRTIO_IF_TYPE_TUN)
 	{
@@ -281,11 +281,10 @@ virtio_needs_csum (vlib_buffer_t * b0, virtio_net_hdr_v1_t * hdr,
 	    (ip4_header_t *) (vlib_buffer_get_current (b0) + l2hdr_sz);
 	  vnet_buffer (b0)->l4_hdr_offset = l2hdr_sz + ip4_header_bytes (ip4);
 	  *l4_proto = ip4->protocol;
+	  oflags |= VNET_BUFFER_OFFLOAD_F_IP_CKSUM;
 	  b0->flags |=
-	    (VNET_BUFFER_F_IS_IP4 | VNET_BUFFER_F_OFFLOAD_IP_CKSUM);
-	  b0->flags |=
-	    (VNET_BUFFER_F_L2_HDR_OFFSET_VALID
-	     | VNET_BUFFER_F_L3_HDR_OFFSET_VALID |
+	    (VNET_BUFFER_F_IS_IP4 | VNET_BUFFER_F_L2_HDR_OFFSET_VALID |
+	     VNET_BUFFER_F_L3_HDR_OFFSET_VALID |
 	     VNET_BUFFER_F_L4_HDR_OFFSET_VALID);
 	}
       else if (PREDICT_TRUE (ethertype == ETHERNET_TYPE_IP6))
@@ -302,7 +301,7 @@ virtio_needs_csum (vlib_buffer_t * b0, virtio_net_hdr_v1_t * hdr,
 	}
       if (*l4_proto == IP_PROTOCOL_TCP)
 	{
-	  b0->flags |= VNET_BUFFER_F_OFFLOAD_TCP_CKSUM;
+	  oflags |= VNET_BUFFER_OFFLOAD_F_TCP_CKSUM;
 	  tcp_header_t *tcp = (tcp_header_t *) (vlib_buffer_get_current (b0) +
 						vnet_buffer
 						(b0)->l4_hdr_offset);
@@ -310,12 +309,14 @@ virtio_needs_csum (vlib_buffer_t * b0, virtio_net_hdr_v1_t * hdr,
 	}
       else if (*l4_proto == IP_PROTOCOL_UDP)
 	{
-	  b0->flags |= VNET_BUFFER_F_OFFLOAD_UDP_CKSUM;
+	  oflags |= VNET_BUFFER_OFFLOAD_F_UDP_CKSUM;
 	  udp_header_t *udp = (udp_header_t *) (vlib_buffer_get_current (b0) +
 						vnet_buffer
 						(b0)->l4_hdr_offset);
 	  *l4_hdr_sz = sizeof (*udp);
 	}
+      if (oflags)
+	vnet_buffer_offload_flags_set (b0, oflags);
     }
 }
 
@@ -588,9 +589,6 @@ virtio_device_input_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 
   if (vif->is_packed)
     {
-      if (vring->device_event->flags != VRING_EVENT_F_DISABLE)
-	virtio_kick (vm, vring, vif);
-
       if (vif->gso_enabled)
 	rv =
 	  virtio_device_input_gso_inline (vm, node, frame, vif, vring, type,
@@ -609,10 +607,6 @@ virtio_device_input_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
     }
   else
     {
-      if ((vring->used->flags & VRING_USED_F_NO_NOTIFY) == 0 &&
-	  vring->last_kick_avail_idx != vring->avail->idx)
-	virtio_kick (vm, vring, vif);
-
       if (vif->gso_enabled)
 	rv =
 	  virtio_device_input_gso_inline (vm, node, frame, vif, vring, type,

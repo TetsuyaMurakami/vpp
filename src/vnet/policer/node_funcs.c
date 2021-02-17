@@ -156,7 +156,7 @@ vnet_policer_inline (vlib_main_t * vm,
 	  act1 = vnet_policer_police (vm, b1, pi1, time_in_policer_periods,
 				      POLICE_CONFORM /* no chaining */ );
 
-	  if (PREDICT_FALSE (act0 == SSE2_QOS_ACTION_DROP))	/* drop action */
+	  if (PREDICT_FALSE (act0 == QOS_ACTION_DROP)) /* drop action */
 	    {
 	      next0 = VNET_POLICER_NEXT_DROP;
 	      b0->error = node->errors[VNET_POLICER_ERROR_DROP];
@@ -166,7 +166,7 @@ vnet_policer_inline (vlib_main_t * vm,
 	      transmitted++;
 	    }
 
-	  if (PREDICT_FALSE (act1 == SSE2_QOS_ACTION_DROP))	/* drop action */
+	  if (PREDICT_FALSE (act1 == QOS_ACTION_DROP)) /* drop action */
 	    {
 	      next1 = VNET_POLICER_NEXT_DROP;
 	      b1->error = node->errors[VNET_POLICER_ERROR_DROP];
@@ -238,7 +238,7 @@ vnet_policer_inline (vlib_main_t * vm,
 	  act0 = vnet_policer_police (vm, b0, pi0, time_in_policer_periods,
 				      POLICE_CONFORM /* no chaining */ );
 
-	  if (PREDICT_FALSE (act0 == SSE2_QOS_ACTION_DROP))	/* drop action */
+	  if (PREDICT_FALSE (act0 == QOS_ACTION_DROP)) /* drop action */
 	    {
 	      next0 = VNET_POLICER_NEXT_DROP;
 	      b0->error = node->errors[VNET_POLICER_ERROR_DROP];
@@ -332,8 +332,8 @@ int
 test_policer_add_del (u32 rx_sw_if_index, u8 * config_name, int is_add)
 {
   vnet_policer_main_t *pm = &vnet_policer_main;
-  policer_read_response_type_st *template;
-  policer_read_response_type_st *policer;
+  policer_t *template;
+  policer_t *policer;
   vnet_hw_interface_t *rxhi;
   uword *p;
 
@@ -421,7 +421,7 @@ test_policer_command_fn (vlib_main_t * vm,
   if (is_show)
     {
       u32 pi = pm->policer_index_by_sw_if_index[rx_sw_if_index];
-      policer_read_response_type_st *policer;
+      policer_t *policer;
       policer = pool_elt_at_index (pm->policers, pi);
 
       vlib_cli_output (vm, "%U", format_policer_instance, policer);
@@ -704,7 +704,7 @@ policer_classify_inline (vlib_main_t * vm,
 					      e0->next_index,
 					      time_in_policer_periods,
 					      e0->opaque_index);
-		  if (PREDICT_FALSE (act0 == SSE2_QOS_ACTION_DROP))
+		  if (PREDICT_FALSE (act0 == QOS_ACTION_DROP))
 		    {
 		      next0 = POLICER_CLASSIFY_NEXT_INDEX_DROP;
 		      b0->error = node->errors[POLICER_CLASSIFY_ERROR_DROP];
@@ -738,7 +738,7 @@ policer_classify_inline (vlib_main_t * vm,
 						      e0->next_index,
 						      time_in_policer_periods,
 						      e0->opaque_index);
-			  if (PREDICT_FALSE (act0 == SSE2_QOS_ACTION_DROP))
+			  if (PREDICT_FALSE (act0 == QOS_ACTION_DROP))
 			    {
 			      next0 = POLICER_CLASSIFY_NEXT_INDEX_DROP;
 			      b0->error =

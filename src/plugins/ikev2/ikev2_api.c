@@ -43,6 +43,8 @@ extern ikev2_main_t ikev2_main;
 #define REPLY_MSG_ID_BASE ikev2_main.msg_id_base
 #include <vlibapi/api_helper_macros.h>
 
+#define IKEV2_MAX_DATA_LEN (1 << 10)
+
 static u32
 ikev2_encode_sa_index (u32 sai, u32 ti)
 {
@@ -195,6 +197,17 @@ vl_api_ikev2_profile_dump_t_handler (vl_api_ikev2_profile_dump_t * mp)
 }
 
 static void
+ikev2_copy_stats (vl_api_ikev2_sa_stats_t *dst, const ikev2_stats_t *src)
+{
+  dst->n_rekey_req = src->n_rekey_req;
+  dst->n_keepalives = src->n_keepalives;
+  dst->n_retransmit = src->n_retransmit;
+  dst->n_init_sa_retransmit = src->n_init_retransmit;
+  dst->n_sa_init_req = src->n_sa_init_req;
+  dst->n_sa_auth_req = src->n_sa_auth_req;
+}
+
+static void
 send_sa (ikev2_sa_t * sa, vl_api_ikev2_sa_dump_t * mp, u32 api_sa_index)
 {
   vl_api_ikev2_sa_details_t *rmp = 0;
@@ -252,6 +265,8 @@ send_sa (ikev2_sa_t * sa, vl_api_ikev2_sa_dump_t * mp, u32 api_sa_index)
 
     k->sk_pr_len = vec_len (sa->sk_pr);
     clib_memcpy (&k->sk_pr, sa->sk_pr, k->sk_pr_len);
+
+    ikev2_copy_stats (&rsa->stats, &sa->stats);
 
     vl_api_ikev2_sa_t_endian(rsa);
   });
@@ -529,18 +544,24 @@ static void
   vlib_main_t *vm = vlib_get_main ();
   clib_error_t *error;
   int data_len = ntohl (mp->data_len);
-  u8 *tmp = format (0, "%s", mp->name);
-  u8 *data = vec_new (u8, data_len);
-  clib_memcpy (data, mp->data, data_len);
-  error = ikev2_set_profile_auth (vm, tmp, mp->auth_method, data, mp->is_hex);
-  vec_free (tmp);
-  vec_free (data);
-  if (error)
+  if (data_len > 0 && data_len <= IKEV2_MAX_DATA_LEN)
     {
-      ikev2_log_error ("%U", format_clib_error, error);
-      clib_error_free (error);
-      rv = VNET_API_ERROR_UNSPECIFIED;
+      u8 *tmp = format (0, "%s", mp->name);
+      u8 *data = vec_new (u8, data_len);
+      clib_memcpy (data, mp->data, data_len);
+      error =
+	ikev2_set_profile_auth (vm, tmp, mp->auth_method, data, mp->is_hex);
+      vec_free (tmp);
+      vec_free (data);
+      if (error)
+	{
+	  ikev2_log_error ("%U", format_clib_error, error);
+	  clib_error_free (error);
+	  rv = VNET_API_ERROR_UNSPECIFIED;
+	}
     }
+  else
+    rv = VNET_API_ERROR_INVALID_VALUE;
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
 #endif
@@ -559,17 +580,22 @@ vl_api_ikev2_profile_set_id_t_handler (vl_api_ikev2_profile_set_id_t * mp)
   clib_error_t *error;
   u8 *tmp = format (0, "%s", mp->name);
   int data_len = ntohl (mp->data_len);
-  u8 *data = vec_new (u8, data_len);
-  clib_memcpy (data, mp->data, data_len);
-  error = ikev2_set_profile_id (vm, tmp, mp->id_type, data, mp->is_local);
-  vec_free (tmp);
-  vec_free (data);
-  if (error)
+  if (data_len > 0 && data_len <= IKEV2_MAX_DATA_LEN)
     {
-      ikev2_log_error ("%U", format_clib_error, error);
-      clib_error_free (error);
-      rv = VNET_API_ERROR_UNSPECIFIED;
+      u8 *data = vec_new (u8, data_len);
+      clib_memcpy (data, mp->data, data_len);
+      error = ikev2_set_profile_id (vm, tmp, mp->id_type, data, mp->is_local);
+      vec_free (tmp);
+      vec_free (data);
+      if (error)
+	{
+	  ikev2_log_error ("%U", format_clib_error, error);
+	  clib_error_free (error);
+	  rv = VNET_API_ERROR_UNSPECIFIED;
+	}
     }
+  else
+    rv = VNET_API_ERROR_INVALID_VALUE;
 #else
   rv = VNET_API_ERROR_UNIMPLEMENTED;
 #endif

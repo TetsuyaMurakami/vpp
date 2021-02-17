@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 
+import os
 import unittest
 
 from framework import VppTestCase, VppTestRunner, running_gcov_tests
 from vpp_ip_route import VppIpTable, VppIpRoute, VppRoutePath
-from os import path, remove
 
 
 class TestPcap(VppTestCase):
@@ -42,7 +42,8 @@ class TestPcap(VppTestCase):
                 "  interface loop0\n"
                 "  tx-interface loop1\n"
                 "  node loop1-output\n"
-                "  buffer-flags ip4 offload-ip-cksum offload-udp-cksum\n"
+                "  buffer-flags ip4 offload\n"
+                "  buffer-offload-flags offload-ip-cksum offload-udp-cksum\n"
                 "  data {\n"
                 "    IP4: 1.2.3 -> dead.0000.0001\n"
                 "    UDP: 11.22.33.44 -> 11.22.34.44\n"
@@ -77,12 +78,13 @@ class TestPcap(VppTestCase):
                 else:
                     self.logger.info(cmd + " FAIL retval " + str(r.retval))
 
-        self.assertTrue(path.exists('/tmp/dispatch.pcap'))
-        self.assertTrue(path.exists('/tmp/rxtx.pcap'))
-        self.assertTrue(path.exists('/tmp/filt.pcap'))
+        self.assertTrue(os.path.exists('/tmp/dispatch.pcap'))
+        self.assertTrue(os.path.exists('/tmp/rxtx.pcap'))
+        self.assertTrue(os.path.exists('/tmp/filt.pcap'))
         os.remove('/tmp/dispatch.pcap')
         os.remove('/tmp/rxtx.pcap')
         os.remove('/tmp/filt.pcap')
+
 
 if __name__ == '__main__':
     unittest.main(testRunner=VppTestRunner)

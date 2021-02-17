@@ -116,7 +116,7 @@ nat44_o2i_is_idle_session_cb (clib_bihash_kv_8_8_t * kv, void *arg)
   if (ctx->now >= sess_timeout_time)
     {
       init_nat_i2o_k (&s_kv, s);
-      if (clib_bihash_add_del_8_8 (&tsm->in2out, &s_kv, 0))
+      if (clib_bihash_add_del_8_8 (&sm->in2out, &s_kv, 0))
 	nat_elog_warn ("out2in key del failed");
 
       nat_ipfix_logging_nat44_ses_delete (ctx->thread_index,
@@ -222,16 +222,16 @@ create_session_for_static_mapping (snat_main_t * sm,
   /* Add to translation hashes */
   ctx0.now = now;
   ctx0.thread_index = thread_index;
-  init_nat_i2o_kv (&kv0, s, s - sm->per_thread_data[thread_index].sessions);
-  if (clib_bihash_add_or_overwrite_stale_8_8
-      (&sm->per_thread_data[thread_index].in2out, &kv0,
-       nat44_i2o_is_idle_session_cb, &ctx0))
+  init_nat_i2o_kv (&kv0, s, thread_index,
+		   s - sm->per_thread_data[thread_index].sessions);
+  if (clib_bihash_add_or_overwrite_stale_8_8 (
+	&sm->in2out, &kv0, nat44_i2o_is_idle_session_cb, &ctx0))
     nat_elog_notice ("in2out key add failed");
 
-  init_nat_o2i_kv (&kv0, s, s - sm->per_thread_data[thread_index].sessions);
-  if (clib_bihash_add_or_overwrite_stale_8_8
-      (&sm->per_thread_data[thread_index].out2in, &kv0,
-       nat44_o2i_is_idle_session_cb, &ctx0))
+  init_nat_o2i_kv (&kv0, s, thread_index,
+		   s - sm->per_thread_data[thread_index].sessions);
+  if (clib_bihash_add_or_overwrite_stale_8_8 (
+	&sm->out2in, &kv0, nat44_o2i_is_idle_session_cb, &ctx0))
     nat_elog_notice ("out2in key add failed");
 
   /* log NAT event */
@@ -315,12 +315,11 @@ icmp_get_key (vlib_buffer_t * b, ip4_header_t * ip0,
  * @param e                      optional parameter
  */
 u32
-icmp_match_out2in_slow (snat_main_t * sm, vlib_node_runtime_t * node,
-			u32 thread_index, vlib_buffer_t * b0,
-			ip4_header_t * ip0, ip4_address_t * addr,
-			u16 * port, u32 * fib_index,
-			nat_protocol_t * proto, void *d, void *e,
-			u8 * dont_translate)
+icmp_match_out2in_slow (snat_main_t *sm, vlib_node_runtime_t *node,
+			u32 thread_index, vlib_buffer_t *b0, ip4_header_t *ip0,
+			ip4_address_t *addr, u16 *port, u32 *fib_index,
+			nat_protocol_t *proto, snat_session_t **p_s0,
+			u8 *dont_translate)
 {
   snat_main_per_thread_data_t *tsm = &sm->per_thread_data[thread_index];
   u32 sw_if_index0;
@@ -351,7 +350,7 @@ icmp_match_out2in_slow (snat_main_t * sm, vlib_node_runtime_t * node,
   u32 mapping_fib_index;
 
   init_nat_k (&kv0, *addr, *port, *fib_index, *proto);
-  if (clib_bihash_search_8_8 (&tsm->out2in, &kv0, &value0))
+  if (clib_bihash_search_8_8 (&sm->out2in, &kv0, &value0))
     {
       /* Try to match static mapping by external address and port,
          destination address and port in packet */
@@ -423,7 +422,8 @@ icmp_match_out2in_slow (snat_main_t * sm, vlib_node_runtime_t * node,
 	  goto out;
 	}
 
-      s0 = pool_elt_at_index (tsm->sessions, value0.value);
+      s0 = pool_elt_at_index (tsm->sessions,
+			      nat_value_get_session_index (&value0));
     }
 
 out:
@@ -433,8 +433,8 @@ out:
       *port = s0->in2out.port;
       *fib_index = s0->in2out.fib_index;
     }
-  if (d)
-    *(snat_session_t **) d = s0;
+  if (p_s0)
+    *p_s0 = s0;
   return next0;
 }
 #endif
@@ -455,12 +455,11 @@ out:
  * @param e                      optional parameter
  */
 u32
-icmp_match_out2in_fast (snat_main_t * sm, vlib_node_runtime_t * node,
-			u32 thread_index, vlib_buffer_t * b0,
-			ip4_header_t * ip0, ip4_address_t * mapping_addr,
-			u16 * mapping_port, u32 * mapping_fib_index,
-			nat_protocol_t * proto, void *d, void *e,
-			u8 * dont_translate)
+icmp_match_out2in_fast (snat_main_t *sm, vlib_node_runtime_t *node,
+			u32 thread_index, vlib_buffer_t *b0, ip4_header_t *ip0,
+			ip4_address_t *mapping_addr, u16 *mapping_port,
+			u32 *mapping_fib_index, nat_protocol_t *proto,
+			snat_session_t **p_s0, u8 *dont_translate)
 {
   u32 sw_if_index0;
   u32 rx_fib_index0;
@@ -513,16 +512,17 @@ out:
 }
 #endif
 
+u32 icmp_out2in (snat_main_t *sm, vlib_buffer_t *b0, ip4_header_t *ip0,
+		 icmp46_header_t *icmp0, u32 sw_if_index0, u32 rx_fib_index0,
+		 vlib_node_runtime_t *node, u32 next0, u32 thread_index,
+		 snat_session_t **p_s0);
+
 #ifndef CLIB_MARCH_VARIANT
 u32
-icmp_out2in (snat_main_t * sm,
-	     vlib_buffer_t * b0,
-	     ip4_header_t * ip0,
-	     icmp46_header_t * icmp0,
-	     u32 sw_if_index0,
-	     u32 rx_fib_index0,
-	     vlib_node_runtime_t * node,
-	     u32 next0, u32 thread_index, void *d, void *e)
+icmp_out2in (snat_main_t *sm, vlib_buffer_t *b0, ip4_header_t *ip0,
+	     icmp46_header_t *icmp0, u32 sw_if_index0, u32 rx_fib_index0,
+	     vlib_node_runtime_t *node, u32 next0, u32 thread_index,
+	     snat_session_t **p_s0)
 {
   icmp_echo_header_t *echo0, *inner_echo0 = 0;
   ip4_header_t *inner_ip0 = 0;
@@ -542,9 +542,9 @@ icmp_out2in (snat_main_t * sm,
 
   echo0 = (icmp_echo_header_t *) (icmp0 + 1);
 
-  next0_tmp = sm->icmp_match_out2in_cb (sm, node, thread_index, b0, ip0,
-					&addr, &port, &fib_index, &proto,
-					d, e, &dont_translate);
+  next0_tmp =
+    sm->icmp_match_out2in_cb (sm, node, thread_index, b0, ip0, &addr, &port,
+			      &fib_index, &proto, p_s0, &dont_translate);
   if (next0_tmp != ~0)
     next0 = next0_tmp;
   if (next0 == SNAT_OUT2IN_NEXT_DROP || dont_translate)
@@ -669,7 +669,7 @@ icmp_out2in_slow_path (snat_main_t * sm,
   vlib_main_t *vm = vlib_get_main ();
 
   next0 = icmp_out2in (sm, b0, ip0, icmp0, sw_if_index0, rx_fib_index0, node,
-		       next0, thread_index, p_s0, 0);
+		       next0, thread_index, p_s0);
   snat_session_t *s0 = *p_s0;
   if (PREDICT_TRUE (next0 != SNAT_OUT2IN_NEXT_DROP && s0))
     {
@@ -823,8 +823,7 @@ VLIB_NODE_FN (snat_out2in_node) (vlib_main_t * vm,
       init_nat_k (&kv0, ip0->dst_address,
 		  vnet_buffer (b0)->ip.reass.l4_dst_port, rx_fib_index0,
 		  proto0);
-      if (clib_bihash_search_8_8
-	  (&sm->per_thread_data[thread_index].out2in, &kv0, &value0))
+      if (clib_bihash_search_8_8 (&sm->out2in, &kv0, &value0))
 	{
 	  /* Try to match static mapping by external address and port,
 	     destination address and port in packet */
@@ -873,7 +872,8 @@ VLIB_NODE_FN (snat_out2in_node) (vlib_main_t * vm,
 	    }
 	}
       else
-	s0 = pool_elt_at_index (tsm->sessions, value0.value);
+	s0 = pool_elt_at_index (tsm->sessions,
+				nat_value_get_session_index (&value0));
 
       old_addr0 = ip0->dst_address.as_u32;
       ip0->dst_address = s0->in2out.addr;
@@ -1002,8 +1002,7 @@ VLIB_NODE_FN (snat_out2in_node) (vlib_main_t * vm,
       init_nat_k (&kv1, ip1->dst_address,
 		  vnet_buffer (b1)->ip.reass.l4_dst_port, rx_fib_index1,
 		  proto1);
-      if (clib_bihash_search_8_8
-	  (&sm->per_thread_data[thread_index].out2in, &kv1, &value1))
+      if (clib_bihash_search_8_8 (&sm->out2in, &kv1, &value1))
 	{
 	  /* Try to match static mapping by external address and port,
 	     destination address and port in packet */
@@ -1052,9 +1051,8 @@ VLIB_NODE_FN (snat_out2in_node) (vlib_main_t * vm,
 	    }
 	}
       else
-	s1 =
-	  pool_elt_at_index (sm->per_thread_data[thread_index].sessions,
-			     value1.value);
+	s1 = pool_elt_at_index (sm->per_thread_data[thread_index].sessions,
+				nat_value_get_session_index (&value1));
 
       old_addr1 = ip1->dst_address.as_u32;
       ip1->dst_address = s1->in2out.addr;
@@ -1219,8 +1217,7 @@ VLIB_NODE_FN (snat_out2in_node) (vlib_main_t * vm,
 		  vnet_buffer (b0)->ip.reass.l4_dst_port, rx_fib_index0,
 		  proto0);
 
-      if (clib_bihash_search_8_8
-	  (&sm->per_thread_data[thread_index].out2in, &kv0, &value0))
+      if (clib_bihash_search_8_8 (&sm->out2in, &kv0, &value0))
 	{
 	  /* Try to match static mapping by external address and port,
 	     destination address and port in packet */
@@ -1269,9 +1266,8 @@ VLIB_NODE_FN (snat_out2in_node) (vlib_main_t * vm,
 	    }
 	}
       else
-	s0 =
-	  pool_elt_at_index (sm->per_thread_data[thread_index].sessions,
-			     value0.value);
+	s0 = pool_elt_at_index (sm->per_thread_data[thread_index].sessions,
+				nat_value_get_session_index (&value0));
 
       old_addr0 = ip0->dst_address.as_u32;
       ip0->dst_address = s0->in2out.addr;
@@ -1445,8 +1441,8 @@ VLIB_NODE_FN (snat_out2in_fast_node) (vlib_main_t * vm,
 
       if (PREDICT_FALSE (proto0 == NAT_PROTOCOL_ICMP))
 	{
-	  next0 = icmp_out2in (sm, b0, ip0, icmp0, sw_if_index0,
-			       rx_fib_index0, node, next0, ~0, 0, 0);
+	  next0 = icmp_out2in (sm, b0, ip0, icmp0, sw_if_index0, rx_fib_index0,
+			       node, next0, ~0, 0);
 	  goto trace00;
 	}
 

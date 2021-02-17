@@ -38,6 +38,7 @@ add_vpp_plugin(unittest
   mem_bulk_test.c
   mfib_test.c
   mpcap_node.c
+  policer_test.c
   punt_test.c
   rbtree_test.c
   session_test.c
@@ -50,4 +51,5 @@ add_vpp_plugin(unittest
   unittest.c
   util_test.c
   vlib_test.c
+  counter_test.c
 )

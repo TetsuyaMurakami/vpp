@@ -20,7 +20,7 @@
     called through a shared memory interface.
 */
 
-option version = "3.0.2";
+option version = "3.0.3";
 
 import "vnet/interface_types.api";
 import "vnet/fib/fib_types.api";
@@ -275,6 +275,20 @@ autoreply define set_ip_flow_hash_v2
   u32 table_id;
   vl_api_address_family_t af;
   vl_api_ip_flow_hash_config_t flow_hash_config;
+};
+
+/** \brief Set the ip flow hash router ID
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param router_id - The ID of the router. Mixed into the hash.
+                       Used to prevent polarisation across a network,
+                       since each router is assumed to have a different ID
+*/
+autoreply define set_ip_flow_hash_router_id
+{
+  u32 client_index;
+  u32 context;
+  u32 router_id;
 };
 
 /** \brief IPv6 interface enable / disable request
@@ -688,6 +702,63 @@ autoreply define ip_reassembly_enable_disable
   bool enable_ip4;
   bool enable_ip6;
   vl_api_ip_reass_type_t type;
+};
+
+/**
+    @brief Set a Path MTU value. i.e. a MTU value for a given neighbour.
+           The neighbour can be described as attached (w/ interface and next-hop)
+           or remote (w/ table_id and next-hop);
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param table_id - table-ID for next-hop
+    @param nh - Next hop
+    @param path_mtu - value to set, 0 is disable.
+*/
+typedef ip_path_mtu
+{
+  u32 client_index;
+  u32 context;
+  u32 table_id;
+  vl_api_address_t nh;
+  u16 path_mtu;
+};
+autoreply define ip_path_mtu_update
+{
+  u32 client_index;
+  u32 context;
+  vl_api_ip_path_mtu_t pmtu;
+};
+define ip_path_mtu_get
+{
+  u32 client_index;
+  u32 context;
+  u32 cursor;
+};
+define ip_path_mtu_get_reply
+{
+  u32 context;
+  i32 retval;
+  u32 cursor;
+};
+define ip_path_mtu_details
+{
+  u32 context;
+  vl_api_ip_path_mtu_t pmtu;
+};
+service {
+  rpc ip_path_mtu_get returns ip_path_mtu_get_reply
+    stream ip_path_mtu_details;
+};
+
+autoreply define ip_path_mtu_replace_begin
+{
+  u32 client_index;
+  u32 context;
+};
+autoreply define ip_path_mtu_replace_end
+{
+  u32 client_index;
+  u32 context;
 };
 
 /*

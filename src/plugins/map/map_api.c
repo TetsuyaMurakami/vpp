@@ -152,12 +152,6 @@ vl_api_map_domains_get_t_handler (vl_api_map_domains_get_t * mp)
 
   i32 rv = 0;
 
-  if (pool_elts (mm->domains) == 0)
-    {
-      REPLY_MACRO (VL_API_MAP_DOMAINS_GET_REPLY);
-      return;
-    }
-
   /* *INDENT-OFF* */
   REPLY_AND_DETAILS_MACRO (VL_API_MAP_DOMAINS_GET_REPLY, mm->domains,
   ({
@@ -560,8 +554,6 @@ map_plugin_api_hookup (vlib_main_t * vm)
 
   mm->msg_id_base = setup_message_id_table ();
 
-  api_main_t *am = vlibapi_get_main ();
-  am->is_autoendian[mm->msg_id_base + VL_API_MAP_ADD_DOMAIN] = 1;
   return 0;
 }
 

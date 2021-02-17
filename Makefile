@@ -67,10 +67,11 @@ DEB_DEPENDS += debhelper dkms git libtool libapr1-dev dh-systemd dh-python
 DEB_DEPENDS += libconfuse-dev git-review exuberant-ctags cscope pkg-config
 DEB_DEPENDS += lcov chrpath autoconf libnuma-dev
 DEB_DEPENDS += python3-all python3-setuptools check
-DEB_DEPENDS += libboost-all-dev libffi-dev python3-ply libmbedtls-dev
+DEB_DEPENDS += libffi-dev python3-ply libmbedtls-dev
 DEB_DEPENDS += cmake ninja-build uuid-dev python3-jsonschema python3-yaml
 DEB_DEPENDS += python3-venv  # ensurepip
 DEB_DEPENDS += python3-dev   # needed for python3 -m pip install psutil
+DEB_DEPENDS += libnl-3-dev libnl-route-3-dev
 # python3.6 on 16.04 requires python36-dev
 
 LIBFFI=libffi6 # works on all but 20.04 and debian-testing
@@ -92,6 +93,7 @@ else ifeq ($(OS_VERSION_ID),20.10)
         DEB_DEPENDS += clang-format-10
         LIBFFI=libffi8ubuntu1
 else ifeq ($(OS_ID)-$(OS_VERSION_ID),debian-10)
+	DEB_DEPENDS += python3-virtualenv virtualenv
 	DEB_DEPENDS += libssl-dev
 	DEB_DEPENDS += libelf-dev # for libbpf (af_xdp)
 else
@@ -106,7 +108,6 @@ RPM_DEPENDS  = redhat-lsb glibc-static
 RPM_DEPENDS += apr-devel
 RPM_DEPENDS += numactl-devel
 RPM_DEPENDS += check check-devel
-RPM_DEPENDS += boost boost-devel
 RPM_DEPENDS += selinux-policy selinux-policy-devel
 RPM_DEPENDS += ninja-build
 RPM_DEPENDS += libuuid-devel
@@ -114,6 +115,7 @@ RPM_DEPENDS += mbedtls-devel
 RPM_DEPENDS += ccache
 RPM_DEPENDS += xmlto
 RPM_DEPENDS += elfutils-libelf-devel
+RPM_DEPENDS += libnl3-devel
 
 ifeq ($(OS_ID),fedora)
 	RPM_DEPENDS += dnf-utils

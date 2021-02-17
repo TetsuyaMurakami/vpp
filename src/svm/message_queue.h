@@ -22,7 +22,28 @@
 
 #include <vppinfra/clib.h>
 #include <vppinfra/error.h>
+#include <vppinfra/lock.h>
 #include <svm/queue.h>
+
+typedef struct svm_msg_q_shr_queue_
+{
+  pthread_mutex_t mutex;  /* 8 bytes */
+  pthread_cond_t condvar; /* 8 bytes */
+  u32 head;
+  u32 tail;
+  volatile u32 cursize;
+  u32 maxsize;
+  u32 elsize;
+  u32 pad;
+  u8 data[0];
+} svm_msg_q_shared_queue_t;
+
+typedef struct svm_msg_q_queue_
+{
+  svm_msg_q_shared_queue_t *shr; /**< pointer to shared queue */
+  int evtfd;			 /**< producer/consumer eventfd */
+  clib_spinlock_t lock;		 /**< private lock for multi-producer */
+} svm_msg_q_queue_t;
 
 typedef struct svm_msg_q_ring_shared_
 {
@@ -43,14 +64,14 @@ typedef struct svm_msg_q_ring_
 
 typedef struct svm_msg_q_shared_
 {
-  u32 n_rings;	    /**< number of rings after q */
-  u32 pad;	    /**< 8 byte alignment for q */
-  svm_queue_t q[0]; /**< queue for exchanging messages */
+  u32 n_rings;			 /**< number of rings after q */
+  u32 pad;			 /**< 8 byte alignment for q */
+  svm_msg_q_shared_queue_t q[0]; /**< queue for exchanging messages */
 } __clib_packed svm_msg_q_shared_t;
 
 typedef struct svm_msg_q_
 {
-  svm_queue_t *q;			/**< queue for exchanging messages */
+  svm_msg_q_queue_t q;			/**< queue for exchanging messages */
   svm_msg_q_ring_t *rings;		/**< rings with message data*/
 } __clib_packed svm_msg_q_t;
 
@@ -80,6 +101,13 @@ typedef union
 } svm_msg_q_msg_t;
 
 #define SVM_MQ_INVALID_MSG { .as_u64 = ~0 }
+
+typedef enum svm_msg_q_wait_type_
+{
+  SVM_MQ_WAIT_EMPTY,
+  SVM_MQ_WAIT_FULL
+} svm_msg_q_wait_type_t;
+
 /**
  * Allocate message queue
  *
@@ -187,6 +215,7 @@ void svm_msg_q_add_and_unlock (svm_msg_q_t * mq, svm_msg_q_msg_t * msg);
  * Consumer dequeue one message from queue
  *
  * This returns the message pointing to the data in the message rings.
+ * Should only be used in single consumer scenarios as no locks are grabbed.
  * The consumer is expected to call @ref svm_msg_q_free_msg once it
  * finishes processing/copies the message data.
  *
@@ -200,18 +229,34 @@ int svm_msg_q_sub (svm_msg_q_t * mq, svm_msg_q_msg_t * msg,
 		   svm_q_conditional_wait_t cond, u32 time);
 
 /**
- * Consumer dequeue one message from queue with mutex held
+ * Consumer dequeue one message from queue
  *
- * Returns the message pointing to the data in the message rings under the
- * assumption that the message queue lock is already held. The consumer is
- * expected to call @ref svm_msg_q_free_msg once it finishes
+ * Returns the message pointing to the data in the message rings. Should only
+ * be used in single consumer scenarios as no locks are grabbed. The consumer
+ * is expected to call @ref svm_msg_q_free_msg once it finishes
  * processing/copies the message data.
  *
  * @param mq		message queue
  * @param msg		pointer to structure where message is to be received
  * @return		success status
  */
-void svm_msg_q_sub_w_lock (svm_msg_q_t * mq, svm_msg_q_msg_t * msg);
+int svm_msg_q_sub_raw (svm_msg_q_t *mq, svm_msg_q_msg_t *elem);
+
+/**
+ * Consumer dequeue multiple messages from queue
+ *
+ * Returns the message pointing to the data in the message rings. Should only
+ * be used in single consumer scenarios as no locks are grabbed. The consumer
+ * is expected to call @ref svm_msg_q_free_msg once it finishes
+ * processing/copies the message data.
+ *
+ * @param mq		message queue
+ * @param msg_buf	pointer to array of messages to received
+ * @param n_msgs	lengt of msg_buf array
+ * @return		number of messages dequeued
+ */
+int svm_msg_q_sub_raw_batch (svm_msg_q_t *mq, svm_msg_q_msg_t *msg_buf,
+			     u32 n_msgs);
 
 /**
  * Get data for message in queue
@@ -232,7 +277,7 @@ void *svm_msg_q_msg_data (svm_msg_q_t * mq, svm_msg_q_msg_t * msg);
 svm_msg_q_ring_t *svm_msg_q_ring (svm_msg_q_t * mq, u32 ring_index);
 
 /**
- * Set event fd for queue consumer
+ * Set event fd for queue
  *
  * If set, queue will exclusively use eventfds for signaling. Moreover,
  * afterwards, the queue should only be used in non-blocking mode. Waiting
@@ -241,35 +286,26 @@ svm_msg_q_ring_t *svm_msg_q_ring (svm_msg_q_t * mq, u32 ring_index);
  * @param mq		message queue
  * @param fd		consumer eventfd
  */
-void svm_msg_q_set_consumer_eventfd (svm_msg_q_t * mq, int fd);
+void svm_msg_q_set_eventfd (svm_msg_q_t *mq, int fd);
 
 /**
- * Set event fd for queue producer
- *
- * If set, queue will exclusively use eventfds for signaling. Moreover,
- * afterwards, the queue should only be used in non-blocking mode. Waiting
- * for events should be done externally using something like epoll.
- *
- * @param mq		message queue
- * @param fd		producer eventfd
+ * Allocate event fd for queue
  */
-void svm_msg_q_set_producer_eventfd (svm_msg_q_t * mq, int fd);
-
-/**
- * Allocate event fd for queue consumer
- */
-int svm_msg_q_alloc_consumer_eventfd (svm_msg_q_t * mq);
-
-/**
- * Allocate event fd for queue consumer
- */
-int svm_msg_q_alloc_producer_eventfd (svm_msg_q_t * mq);
-
+int svm_msg_q_alloc_eventfd (svm_msg_q_t *mq);
 
 /**
  * Format message queue, shows msg count for each ring
  */
-u8 *format_svm_msg_q (u8 * s, va_list * args);
+u8 *format_svm_msg_q (u8 *s, va_list *args);
+
+/**
+ * Check length of message queue
+ */
+static inline u32
+svm_msg_q_size (svm_msg_q_t *mq)
+{
+  return clib_atomic_load_relax_n (&mq->q.shr->cursize);
+}
 
 /**
  * Check if message queue is full
@@ -277,14 +313,14 @@ u8 *format_svm_msg_q (u8 * s, va_list * args);
 static inline u8
 svm_msg_q_is_full (svm_msg_q_t * mq)
 {
-  return (mq->q->cursize == mq->q->maxsize);
+  return (svm_msg_q_size (mq) == mq->q.shr->maxsize);
 }
 
 static inline u8
 svm_msg_q_ring_is_full (svm_msg_q_t * mq, u32 ring_index)
 {
   svm_msg_q_ring_t *ring = vec_elt_at_index (mq->rings, ring_index);
-  return (ring->shr->cursize >= ring->nitems);
+  return (clib_atomic_load_relax_n (&ring->shr->cursize) >= ring->nitems);
 }
 
 /**
@@ -293,16 +329,7 @@ svm_msg_q_ring_is_full (svm_msg_q_t * mq, u32 ring_index)
 static inline u8
 svm_msg_q_is_empty (svm_msg_q_t * mq)
 {
-  return (mq->q->cursize == 0);
-}
-
-/**
- * Check length of message queue
- */
-static inline u32
-svm_msg_q_size (svm_msg_q_t * mq)
-{
-  return mq->q->cursize;
+  return (svm_msg_q_size (mq) == 0);
 }
 
 /**
@@ -320,10 +347,17 @@ svm_msg_q_msg_is_invalid (svm_msg_q_msg_t * msg)
 static inline int
 svm_msg_q_try_lock (svm_msg_q_t * mq)
 {
-  int rv = pthread_mutex_trylock (&mq->q->mutex);
-  if (PREDICT_FALSE (rv == EOWNERDEAD))
-    rv = pthread_mutex_consistent (&mq->q->mutex);
-  return rv;
+  if (mq->q.evtfd == -1)
+    {
+      int rv = pthread_mutex_trylock (&mq->q.shr->mutex);
+      if (PREDICT_FALSE (rv == EOWNERDEAD))
+	rv = pthread_mutex_consistent (&mq->q.shr->mutex);
+      return rv;
+    }
+  else
+    {
+      return !clib_spinlock_trylock (&mq->q.lock);
+    }
 }
 
 /**
@@ -332,10 +366,18 @@ svm_msg_q_try_lock (svm_msg_q_t * mq)
 static inline int
 svm_msg_q_lock (svm_msg_q_t * mq)
 {
-  int rv = pthread_mutex_lock (&mq->q->mutex);
-  if (PREDICT_FALSE (rv == EOWNERDEAD))
-    rv = pthread_mutex_consistent (&mq->q->mutex);
-  return rv;
+  if (mq->q.evtfd == -1)
+    {
+      int rv = pthread_mutex_lock (&mq->q.shr->mutex);
+      if (PREDICT_FALSE (rv == EOWNERDEAD))
+	rv = pthread_mutex_consistent (&mq->q.shr->mutex);
+      return rv;
+    }
+  else
+    {
+      clib_spinlock_lock (&mq->q.lock);
+      return 0;
+    }
 }
 
 /**
@@ -344,7 +386,14 @@ svm_msg_q_lock (svm_msg_q_t * mq)
 static inline void
 svm_msg_q_unlock (svm_msg_q_t * mq)
 {
-  pthread_mutex_unlock (&mq->q->mutex);
+  if (mq->q.evtfd == -1)
+    {
+      pthread_mutex_unlock (&mq->q.shr->mutex);
+    }
+  else
+    {
+      clib_spinlock_unlock (&mq->q.lock);
+    }
 }
 
 /**
@@ -353,11 +402,7 @@ svm_msg_q_unlock (svm_msg_q_t * mq)
  * Must be called with mutex held. The queue only works non-blocking
  * with eventfds, so handle blocking calls as an exception here.
  */
-static inline void
-svm_msg_q_wait (svm_msg_q_t * mq)
-{
-  svm_queue_wait (mq->q);
-}
+int svm_msg_q_wait (svm_msg_q_t *mq, svm_msg_q_wait_type_t type);
 
 /**
  * Timed wait for message queue event
@@ -367,22 +412,12 @@ svm_msg_q_wait (svm_msg_q_t * mq)
  * @param mq 		message queue
  * @param timeout	time in seconds
  */
-static inline int
-svm_msg_q_timedwait (svm_msg_q_t * mq, double timeout)
-{
-  return svm_queue_timedwait (mq->q, timeout);
-}
+int svm_msg_q_timedwait (svm_msg_q_t *mq, double timeout);
 
 static inline int
-svm_msg_q_get_consumer_eventfd (svm_msg_q_t * mq)
+svm_msg_q_get_eventfd (svm_msg_q_t *mq)
 {
-  return mq->q->consumer_evtfd;
-}
-
-static inline int
-svm_msg_q_get_producer_eventfd (svm_msg_q_t * mq)
-{
-  return mq->q->producer_evtfd;
+  return mq->q.evtfd;
 }
 
 #endif /* SRC_SVM_MESSAGE_QUEUE_H_ */

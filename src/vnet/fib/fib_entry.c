@@ -473,7 +473,7 @@ fib_entry_contribute_forwarding (fib_node_index_t fib_entry_index,
              *      then up on the right trigger is more code. i favour the latter.
              */
             fib_entry_src_mk_lb(fib_entry,
-                                fib_entry_get_best_src_i(fib_entry),
+                                fib_entry_get_best_source(fib_entry_index),
                                 fct,
                                 &tmp);
 
@@ -1362,7 +1362,7 @@ fib_entry_cover_updated (fib_node_index_t fib_entry_index)
 	if (0 == index)
 	{
 	    /*
-	     * only the best source gets to set the back walk flags
+	     * only the best source gets to set the install result
 	     */
 	    res = fib_entry_src_action_cover_update(fib_entry, esrc);
             bflags = fib_entry_src_get_flags(esrc);
@@ -1370,7 +1370,23 @@ fib_entry_cover_updated (fib_node_index_t fib_entry_index)
 	}
 	else
 	{
-	    fib_entry_src_action_cover_update(fib_entry, esrc);
+	    /*
+	     * contirubting sources can set backwalk flags
+	     */
+            if (esrc->fes_flags & FIB_ENTRY_SRC_FLAG_CONTRIBUTING)
+            {
+                fib_entry_src_cover_res_t tmp = {
+                    .install = !0,
+                    .bw_reason = FIB_NODE_BW_REASON_FLAG_NONE,
+                };
+
+                tmp = fib_entry_src_action_cover_update(fib_entry, esrc);
+                res.bw_reason |= tmp.bw_reason;
+            }
+            else
+            {
+                fib_entry_src_action_cover_update(fib_entry, esrc);
+            }
 	}
 	index++;
     }));
@@ -1435,7 +1451,7 @@ fib_entry_recursive_loop_detect (fib_node_index_t entry_index,
             FOR_EACH_DELEGATE_CHAIN(fib_entry, fdt, fed,
             {
                 fib_entry_src_mk_lb(fib_entry,
-                                    fib_entry_get_best_src_i(fib_entry),
+                                    fib_entry_get_best_source(entry_index),
                                     fib_entry_delegate_type_to_chain_type(fdt),
                                     &fed->fd_dpo);
 	    });

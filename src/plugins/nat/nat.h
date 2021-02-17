@@ -36,8 +36,8 @@
 #include <nat/lib/lib.h>
 #include <nat/lib/inlines.h>
 
-/* number of worker handoff frame queue elements */
-#define NAT_FQ_NELTS 64
+/* default number of worker handoff frame queue elements */
+#define NAT_FQ_NELTS_DEFAULT 64
 
 /* NAT buffer flags */
 #define SNAT_FLAG_HAIRPINNING (1 << 0)
@@ -492,10 +492,6 @@ typedef struct
 
 typedef struct
 {
-  /* Main lookup tables */
-  clib_bihash_8_8_t out2in;
-  clib_bihash_8_8_t in2out;
-
   /* Find-a-user => src address lookup */
   clib_bihash_8_8_t user_hash;
 
@@ -529,17 +525,11 @@ typedef struct
 struct snat_main_s;
 
 /* ICMP session match function */
-typedef u32 (snat_icmp_match_function_t) (struct snat_main_s * sm,
-					  vlib_node_runtime_t * node,
-					  u32 thread_index,
-					  vlib_buffer_t * b0,
-					  ip4_header_t * ip0,
-					  ip4_address_t * addr,
-					  u16 * port,
-					  u32 * fib_index,
-					  nat_protocol_t * proto,
-					  void *d, void *e,
-					  u8 * dont_translate);
+typedef u32 (snat_icmp_match_function_t) (
+  struct snat_main_s *sm, vlib_node_runtime_t *node, u32 thread_index,
+  vlib_buffer_t *b0, ip4_header_t *ip0, ip4_address_t *addr, u16 *port,
+  u32 *fib_index, nat_protocol_t *proto, snat_session_t **s_out,
+  u8 *dont_translate);
 
 /* Return worker thread index for given packet */
 typedef u32 (snat_get_worker_in2out_function_t) (ip4_header_t * ip,
@@ -589,6 +579,10 @@ typedef struct snat_main_s
 
   /* Static mapping pool */
   snat_static_mapping_t *static_mappings;
+
+  /* Endpoint independent lookup tables */
+  clib_bihash_8_8_t in2out;
+  clib_bihash_8_8_t out2in;
 
   /* Endpoint dependent lookup table */
   clib_bihash_16_8_t flow_hash;
@@ -782,10 +776,18 @@ typedef struct snat_main_s
   /* pat - dynamic mapping enabled or conneciton tracking */
   u8 pat;
 
+  /* number of worker handoff frame queue elements */
+  u32 frame_queue_nelts;
+
   /* nat44 plugin enabled */
   u8 enabled;
 
   vnet_main_t *vnet_main;
+
+  u32 nat44_in2out_hairpinning_finish_ip4_lookup_node_fq_index;
+  u32 nat44_in2out_hairpinning_finish_interface_output_node_fq_index;
+  u32 nat44_hairpinning_fq_index;
+  u32 snat_hairpin_dst_fq_index;
 } snat_main_t;
 
 typedef struct
@@ -1129,51 +1131,40 @@ do                                                        \
   nat_elog_X1(SNAT_LOG_INFO, "[info] " nat_elog_fmt_str, nat_elog_fmt_arg, nat_elog_val1)
 
 /* ICMP session match functions */
-u32 icmp_match_in2out_fast (snat_main_t * sm, vlib_node_runtime_t * node,
-			    u32 thread_index, vlib_buffer_t * b0,
-			    ip4_header_t * ip0, ip4_address_t * addr,
-			    u16 * port, u32 * fib_index,
-			    nat_protocol_t * proto, void *d, void *e,
-			    u8 * dont_translate);
-u32 icmp_match_in2out_slow (snat_main_t * sm, vlib_node_runtime_t * node,
-			    u32 thread_index, vlib_buffer_t * b0,
-			    ip4_header_t * ip0, ip4_address_t * addr,
-			    u16 * port, u32 * fib_index,
-			    nat_protocol_t * proto, void *d, void *e,
-			    u8 * dont_translate);
-u32 icmp_match_out2in_fast (snat_main_t * sm, vlib_node_runtime_t * node,
-			    u32 thread_index, vlib_buffer_t * b0,
-			    ip4_header_t * ip0, ip4_address_t * addr,
-			    u16 * port, u32 * fib_index,
-			    nat_protocol_t * proto, void *d, void *e,
-			    u8 * dont_translate);
-u32 icmp_match_out2in_slow (snat_main_t * sm, vlib_node_runtime_t * node,
-			    u32 thread_index, vlib_buffer_t * b0,
-			    ip4_header_t * ip0, ip4_address_t * addr,
-			    u16 * port, u32 * fib_index,
-			    nat_protocol_t * proto, void *d, void *e,
-			    u8 * dont_translate);
-
-u32 icmp_in2out (snat_main_t * sm, vlib_buffer_t * b0, ip4_header_t * ip0,
-		 icmp46_header_t * icmp0, u32 sw_if_index0, u32 rx_fib_index0,
-		 vlib_node_runtime_t * node, u32 next0, u32 thread_index,
-		 void *d, void *e);
-
-u32 icmp_out2in (snat_main_t * sm, vlib_buffer_t * b0, ip4_header_t * ip0,
-		 icmp46_header_t * icmp0, u32 sw_if_index0, u32 rx_fib_index0,
-		 vlib_node_runtime_t * node, u32 next0, u32 thread_index,
-		 void *d, void *e);
+u32 icmp_match_in2out_fast (snat_main_t *sm, vlib_node_runtime_t *node,
+			    u32 thread_index, vlib_buffer_t *b0,
+			    ip4_header_t *ip0, ip4_address_t *addr, u16 *port,
+			    u32 *fib_index, nat_protocol_t *proto,
+			    snat_session_t **s0, u8 *dont_translate);
+u32 icmp_match_in2out_slow (snat_main_t *sm, vlib_node_runtime_t *node,
+			    u32 thread_index, vlib_buffer_t *b0,
+			    ip4_header_t *ip0, ip4_address_t *addr, u16 *port,
+			    u32 *fib_index, nat_protocol_t *proto,
+			    snat_session_t **s0, u8 *dont_translate);
+u32 icmp_match_out2in_fast (snat_main_t *sm, vlib_node_runtime_t *node,
+			    u32 thread_index, vlib_buffer_t *b0,
+			    ip4_header_t *ip0, ip4_address_t *addr, u16 *port,
+			    u32 *fib_index, nat_protocol_t *proto,
+			    snat_session_t **s0, u8 *dont_translate);
+u32 icmp_match_out2in_slow (snat_main_t *sm, vlib_node_runtime_t *node,
+			    u32 thread_index, vlib_buffer_t *b0,
+			    ip4_header_t *ip0, ip4_address_t *addr, u16 *port,
+			    u32 *fib_index, nat_protocol_t *proto,
+			    snat_session_t **s0, u8 *dont_translate);
 
 /* hairpinning functions */
 u32 snat_icmp_hairpinning (snat_main_t *sm, vlib_buffer_t *b0,
-			   ip4_header_t *ip0, icmp46_header_t *icmp0);
+			   u32 thread_index, ip4_header_t *ip0,
+			   icmp46_header_t *icmp0, u32 *required_thread_index);
 
 void nat_hairpinning_sm_unknown_proto (snat_main_t * sm, vlib_buffer_t * b,
 				       ip4_header_t * ip);
+
 int snat_hairpinning (vlib_main_t *vm, vlib_node_runtime_t *node,
-		      snat_main_t *sm, vlib_buffer_t *b0, ip4_header_t *ip0,
-		      udp_header_t *udp0, tcp_header_t *tcp0, u32 proto0,
-		      int do_trace);
+		      snat_main_t *sm, u32 thread_index, vlib_buffer_t *b0,
+		      ip4_header_t *ip0, udp_header_t *udp0,
+		      tcp_header_t *tcp0, u32 proto0, int do_trace,
+		      u32 *required_thread_index);
 
 /* Call back functions for clib_bihash_add_or_overwrite_stale */
 int nat44_i2o_is_idle_session_cb (clib_bihash_kv_8_8_t * kv, void *arg);
@@ -1297,6 +1288,15 @@ clib_error_t *nat44_api_hookup (vlib_main_t * vm);
  * @return 0 on success, non-zero value otherwise
  */
 int snat_set_workers (uword * bitmap);
+
+/**
+ * @brief Set NAT plugin number of frame queue elements
+ *
+ * @param frame_queue_nelts number of worker handoff frame queue elements
+ *
+ * @return 0 on success, non-zero value otherwise
+ */
+int snat_set_frame_queue_nelts (u32 frame_queue_nelts);
 
 /**
  * @brief Enable/disable NAT44 feature on the interface

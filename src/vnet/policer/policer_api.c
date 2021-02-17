@@ -42,9 +42,10 @@
 
 #include <vlibapi/api_helper_macros.h>
 
-#define foreach_vpe_api_msg                             \
-_(POLICER_ADD_DEL, policer_add_del)                     \
-_(POLICER_DUMP, policer_dump)
+#define foreach_vpe_api_msg                                                   \
+  _ (POLICER_ADD_DEL, policer_add_del)                                        \
+  _ (POLICER_BIND, policer_bind)                                              \
+  _ (POLICER_DUMP, policer_dump)
 
 static void
 vl_api_policer_add_del_t_handler (vl_api_policer_add_del_t * mp)
@@ -53,7 +54,7 @@ vl_api_policer_add_del_t_handler (vl_api_policer_add_del_t * mp)
   vl_api_policer_add_del_reply_t *rmp;
   int rv = 0;
   u8 *name = NULL;
-  sse2_qos_pol_cfg_params_st cfg;
+  qos_pol_cfg_params_st cfg;
   clib_error_t *error;
   u32 policer_index;
 
@@ -61,21 +62,20 @@ vl_api_policer_add_del_t_handler (vl_api_policer_add_del_t * mp)
   vec_terminate_c_string (name);
 
   clib_memset (&cfg, 0, sizeof (cfg));
-  cfg.rfc = mp->type;
-  cfg.rnd_type = mp->round_type;
-  cfg.rate_type = mp->rate_type;
+  cfg.rfc = (qos_policer_type_en) mp->type;
+  cfg.rnd_type = (qos_round_type_en) mp->round_type;
+  cfg.rate_type = (qos_rate_type_en) mp->rate_type;
   cfg.rb.kbps.cir_kbps = ntohl (mp->cir);
   cfg.rb.kbps.eir_kbps = ntohl (mp->eir);
   cfg.rb.kbps.cb_bytes = clib_net_to_host_u64 (mp->cb);
   cfg.rb.kbps.eb_bytes = clib_net_to_host_u64 (mp->eb);
   cfg.conform_action.action_type =
-    (sse2_qos_action_type_en) mp->conform_action.type;
+    (qos_action_type_en) mp->conform_action.type;
   cfg.conform_action.dscp = mp->conform_action.dscp;
-  cfg.exceed_action.action_type =
-    (sse2_qos_action_type_en) mp->exceed_action.type;
+  cfg.exceed_action.action_type = (qos_action_type_en) mp->exceed_action.type;
   cfg.exceed_action.dscp = mp->exceed_action.dscp;
   cfg.violate_action.action_type =
-    (sse2_qos_action_type_en) mp->violate_action.type;
+    (qos_action_type_en) mp->violate_action.type;
   cfg.violate_action.dscp = mp->violate_action.dscp;
 
   cfg.color_aware = mp->color_aware;
@@ -97,10 +97,29 @@ vl_api_policer_add_del_t_handler (vl_api_policer_add_del_t * mp)
 }
 
 static void
-send_policer_details (u8 * name,
-		      sse2_qos_pol_cfg_params_st * config,
-		      policer_read_response_type_st * templ,
-		      vl_api_registration_t * reg, u32 context)
+vl_api_policer_bind_t_handler (vl_api_policer_bind_t *mp)
+{
+  vl_api_policer_bind_reply_t *rmp;
+  u8 *name;
+  u32 worker_index;
+  u8 bind_enable;
+  int rv;
+
+  name = format (0, "%s", mp->name);
+  vec_terminate_c_string (name);
+
+  worker_index = ntohl (mp->worker_index);
+  bind_enable = mp->bind_enable;
+
+  rv = policer_bind_worker (name, worker_index, bind_enable);
+  vec_free (name);
+  REPLY_MACRO (VL_API_POLICER_BIND_REPLY);
+}
+
+static void
+send_policer_details (u8 *name, qos_pol_cfg_params_st *config,
+		      policer_t *templ, vl_api_registration_t *reg,
+		      u32 context)
 {
   vl_api_policer_details_t *mp;
 
@@ -112,9 +131,9 @@ send_policer_details (u8 * name,
   mp->eir = htonl (config->rb.kbps.eir_kbps);
   mp->cb = clib_host_to_net_u64 (config->rb.kbps.cb_bytes);
   mp->eb = clib_host_to_net_u64 (config->rb.kbps.eb_bytes);
-  mp->rate_type = config->rate_type;
-  mp->round_type = config->rnd_type;
-  mp->type = config->rfc;
+  mp->rate_type = (vl_api_sse2_qos_rate_type_t) config->rate_type;
+  mp->round_type = (vl_api_sse2_qos_round_type_t) config->rnd_type;
+  mp->type = (vl_api_sse2_qos_policer_type_t) config->rfc;
   mp->conform_action.type =
     (vl_api_sse2_qos_action_type_t) config->conform_action.action_type;
   mp->conform_action.dscp = config->conform_action.dscp;
@@ -150,8 +169,8 @@ vl_api_policer_dump_t_handler (vl_api_policer_dump_t * mp)
   u32 pool_index;
   u8 *match_name = 0;
   u8 *name;
-  sse2_qos_pol_cfg_params_st *config;
-  policer_read_response_type_st *templ;
+  qos_pol_cfg_params_st *config;
+  policer_t *templ;
 
   reg = vl_api_client_index_to_registration (mp->client_index);
   if (!reg)

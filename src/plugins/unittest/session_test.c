@@ -1738,9 +1738,7 @@ wait_for_event (svm_msg_q_t * mq, int fd, int epfd, u8 use_eventfd)
 {
   if (!use_eventfd)
     {
-      svm_msg_q_lock (mq);
-      while (svm_msg_q_is_empty (mq))
-	svm_msg_q_wait (mq);
+      svm_msg_q_wait (mq, SVM_MQ_WAIT_EMPTY);
     }
   else
     {
@@ -1764,10 +1762,7 @@ wait_for_event (svm_msg_q_t * mq, int fd, int epfd, u8 use_eventfd)
 	    continue;
 
 	  if (!svm_msg_q_is_empty (mq))
-	    {
-	      svm_msg_q_lock (mq);
-	      break;
-	    }
+	    break;
 	}
     }
 }
@@ -1839,9 +1834,8 @@ session_test_mq_speed (vlib_main_t * vm, unformat_input_t * input)
   mq = app_wrk->event_queue;
   if (use_eventfd)
     {
-      svm_msg_q_alloc_producer_eventfd (mq);
-      svm_msg_q_alloc_consumer_eventfd (mq);
-      prod_fd = svm_msg_q_get_producer_eventfd (mq);
+      svm_msg_q_alloc_eventfd (mq);
+      prod_fd = svm_msg_q_get_eventfd (mq);
       SESSION_TEST (prod_fd != -1, "mq producer eventd valid %u", prod_fd);
     }
 
@@ -1872,7 +1866,7 @@ session_test_mq_speed (vlib_main_t * vm, unformat_input_t * input)
       for (i = 0; i < n_test_msgs; i++)
 	{
 	  wait_for_event (mq, prod_fd, epfd, use_eventfd);
-	  svm_msg_q_sub_w_lock (mq, &msg);
+	  svm_msg_q_sub_raw (mq, &msg);
 	  svm_msg_q_free_msg (mq, &msg);
 	  svm_msg_q_unlock (mq);
 	  *counter = *counter + 1;

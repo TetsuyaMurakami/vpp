@@ -472,8 +472,10 @@ session_mq_worker_update_handler (void *data)
   evt->event_type = SESSION_CTRL_EVT_WORKER_UPDATE_REPLY;
   rmp = (session_worker_update_reply_msg_t *) evt->data;
   rmp->handle = mp->handle;
-  rmp->rx_fifo = fifo_segment_fifo_offset (s->rx_fifo);
-  rmp->tx_fifo = fifo_segment_fifo_offset (s->tx_fifo);
+  if (s->rx_fifo)
+    rmp->rx_fifo = fifo_segment_fifo_offset (s->rx_fifo);
+  if (s->tx_fifo)
+    rmp->tx_fifo = fifo_segment_fifo_offset (s->tx_fifo);
   rmp->segment_handle = session_segment_handle (s);
   svm_msg_q_add_and_unlock (app_wrk->event_queue, msg);
 
@@ -1425,16 +1427,15 @@ session_queue_node_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
    * XXX: we may need priorities here */
   mq = wrk->vpp_event_queue;
   n_to_dequeue = svm_msg_q_size (mq);
-  if (n_to_dequeue && svm_msg_q_try_lock (mq) == 0)
+  if (n_to_dequeue)
     {
       for (i = 0; i < n_to_dequeue; i++)
 	{
-	  svm_msg_q_sub_w_lock (mq, msg);
+	  svm_msg_q_sub_raw (mq, msg);
 	  evt = svm_msg_q_msg_data (mq, msg);
 	  session_evt_add_to_list (wrk, evt);
 	  svm_msg_q_free_msg (mq, msg);
 	}
-      svm_msg_q_unlock (mq);
     }
 
   SESSION_EVT (SESSION_EVT_DSP_CNTRS, MQ_DEQ, wrk, n_to_dequeue, !i);

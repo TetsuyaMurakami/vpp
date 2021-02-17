@@ -13,6 +13,7 @@ from scapy.utils6 import in6_getnsma, in6_getnsmac
 from scapy.layers.vxlan import VXLAN
 from scapy.data import ETH_P_IP, ETH_P_IPV6, ETH_P_ARP
 
+from framework import tag_fixme_vpp_workers
 from framework import VppTestCase, VppTestRunner
 from vpp_object import VppObject
 from vpp_interface import VppInterface
@@ -572,6 +573,7 @@ class VppGbpVxlanTunnel(VppInterface):
         return find_gbp_vxlan(self._test, self.vni)
 
 
+@tag_fixme_vpp_workers
 class TestGBP(VppTestCase):
     """ GBP Test Case """
 
@@ -5234,8 +5236,8 @@ class TestGBP(VppTestCase):
         self.logger.info(self.vapi.cli("sh ip6 fib 10:222::1"))
         rxs = self.send_and_expect(self.pg0, p, self.pg7)
 
-        self.assertEqual(rxs[0][VXLAN].vni, 446)
-        self.assertEqual(rxs[1][VXLAN].vni, 445)
+        self.assertEqual(rxs[0][VXLAN].vni, 445)
+        self.assertEqual(rxs[1][VXLAN].vni, 446)
 
         #
         # ping from host in remote to local external subnets
@@ -5368,8 +5370,8 @@ class TestGBP(VppTestCase):
 
         rxs = self.send_and_expect(self.pg0, p, self.pg0, 2)
 
-        self.assertEqual(rxs[0][Dot1Q].vlan, 100)
-        self.assertEqual(rxs[1][Dot1Q].vlan, 101)
+        self.assertEqual(rxs[0][Dot1Q].vlan, 101)
+        self.assertEqual(rxs[1][Dot1Q].vlan, 100)
 
         # two ip4 packets whose port are chosen so they load-balance
         p = [(Ether(src=lep1.mac, dst=str(self.router_mac)) /

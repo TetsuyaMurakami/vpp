@@ -53,6 +53,7 @@ mpls_compute_flow_hash (const mpls_unicast_header_t * hdr,
 
     ho_label = clib_net_to_host_u32(hdr->label_exp_s_ttl);
     hash = vnet_mpls_uc_get_label(ho_label);
+    hash ^= ip_flow_hash_router_id;
     next_label_is_entropy = 0;
 
     while (MPLS_EOS != vnet_mpls_uc_get_s(ho_label))
@@ -95,14 +96,14 @@ mpls_compute_flow_hash (const mpls_unicast_header_t * hdr,
     {
     case 4:
         /* incorporate the v4 flow-hash */
-        hash ^= ip4_compute_flow_hash ((const ip4_header_t *)hdr,
-                                       IP_FLOW_HASH_DEFAULT);
-        break;
+	hash ^=
+	  ip4_compute_flow_hash ((const ip4_header_t *) hdr, flow_hash_config);
+	break;
     case 6:
         /* incorporate the v6 flow-hash */
-        hash ^= ip6_compute_flow_hash ((const ip6_header_t *)hdr,
-                                       IP_FLOW_HASH_DEFAULT);
-        break;
+	hash ^=
+	  ip6_compute_flow_hash ((const ip6_header_t *) hdr, flow_hash_config);
+	break;
     case 5:
         /* incorporate the bier flow-hash */
         hash ^= bier_compute_flow_hash ((const bier_hdr_t *)hdr);

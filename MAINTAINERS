@@ -28,7 +28,7 @@ M:	Dave Barach <vpp@barachs.net>
 F:	build-root/Makefile
 F:	build-data/
 
-Link Bonding
+VNET Link Bonding
 I:	bonding
 M:	Steven Luong <sluong@cisco.com>
 F:	src/vnet/bonding/
@@ -95,7 +95,7 @@ F:	src/vnet/classify
 
 VNET Policer
 I:	policer
-M:	N/A
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/vnet/policer/
 
 VNET Device Drivers
@@ -140,7 +140,7 @@ F:	src/vnet/feature/
 
 VNET FIB
 I:	fib
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/vnet/fib/
 F:	src/vnet/mfib/
 F:	src/vnet/dpo
@@ -153,18 +153,18 @@ F:	src/vnet/ip/
 
 VNET IPv6 LPM
 I:	ip6
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 M:	Jon Loeliger <jdl@netgate.com>
 F:	src/vnet/ip/
 
 VNET IP Neighbors
 I:	ip-neighbor
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/vnet/ip-neighbor
 
 VNET QoS
 I:	qos
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/vnet/qos/
 
 VNET Interface Common
@@ -186,19 +186,19 @@ F:	src/examples/srv6-sample-localsid/
 
 VNET IPSec
 I:	ipsec
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 M:	Radu Nicolau <radu.nicolau@intel.com>
 F:	src/vnet/ipsec/
 
 VNET Crypto Infra
 I:	crypto
 M:	Damjan Marion <damarion@cisco.com>
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/vnet/crypto/
 
 VNET TEIB
 I:	teib
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/vnet/teib/
 
 VNET SPAN
@@ -218,7 +218,7 @@ F:	src/plugins/crypto_openssl/
 
 Plugin - Crypto - ipsecmb
 I:	crypto-ipsecmb
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/plugins/crypto_ipsecmb/
 
 VNET L2
@@ -242,7 +242,7 @@ F:	src/vnet/lisp-gpe/
 
 VNET GRE
 I:	gre
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/vnet/gre/
 
 VNET GSO
@@ -260,12 +260,12 @@ F:	src/plugins/map
 
 VNET MPLS
 I:	mpls
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/vnet/mpls/
 
 VNET BIER
 I:	bier
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/vnet/bier/
 
 VNET Session Layer
@@ -300,7 +300,7 @@ F:	src/vnet/vxlan-gpe/
 VNET VXLAN-GBP
 I:	vxlan-gbp
 M:	Mohsin Kazmi <sykazmi@cisco.com>
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/vnet/vxlan-gbp/
 
 VNET IPIP
@@ -311,7 +311,7 @@ F:	src/vnet/ipip/
 
 VNET tunnel
 I:	tunnel
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/vnet/tunnel'
 
 VNET TLS and TLS engine plugins
@@ -331,19 +331,19 @@ F:	src/vnet/syslog
 Plugin - DHCP
 I:	dhcp
 M:	Dave Barach <vpp@barachs.net>
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/plugins/dhcp/
 
 Plugin - ARP
 I:	arp
 M:	Dave Barach <vpp@barachs.net>
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/plugins/arp/
 
 Plugin - IP6 Neighbor Discovery
 I:	ip6-nd
 M:	Dave Barach <vpp@barachs.net>
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/plugins/ip6-nd/
 
 VNET GENEVE
@@ -356,11 +356,6 @@ I:	flow
 M:	Damjan Marion <damarion@cisco.com>
 F:	src/vnet/flow/
 
-VNET Classify
-I:	classify
-M:	N/A
-F:	src/vnet/classify/
-
 VPP Main App
 I:	vpp
 M:	Dave Barach <vpp@barachs.net>
@@ -369,7 +364,7 @@ F:	src/vpp/
 
 Plugin - Access Control List (ACL) Based Forwarding
 I:	abf
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/plugins/abf/
 
 Plugin - Allow / Deny List
@@ -382,20 +377,17 @@ I:	dns
 M:	Dave Barach <vpp@barachs.net>
 F:	src/plugins/dns/
 
-Plugin - Group Based Policy (GBP)
-I:	gbp
-M:	Neale Ranns <nranns@cisco.com>
-F:	src/plugins/gbp/
-
 Plugin - ACL
 I:	acl
 M:	Andrew Yourtchenko <ayourtch@gmail.com>
 F:	src/plugins/acl/
 
 Plugin - NAT
-I:      nat
-M:      Ole Troan <ot@cisco.com>
-F:      src/plugins/nat/
+I:	nat
+M:	Ole Troan <ot@cisco.com>
+M:  Filip Varga <fivarga@cisco.com>
+M:  Klement Sekera <ksekera@cisco.com>
+F:	src/plugins/nat/
 
 Plugin - AVF Device driver
 I:	avf
@@ -431,7 +423,7 @@ F:	src/plugins/builtinurl/
 
 Plugin - Group Based Policy (GBP)
 I:	gbp
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/plugins/gbp/
 
 Plugin - GTPU
@@ -442,19 +434,19 @@ F:	src/plugins/gtpu/
 Plugin - Internet Key Exchange (IKEv2) Protocol
 I:	ikev2
 M:	Damjan Marion <damarion@cisco.com>
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 M:	Filip Tehlar <ftehlar@cisco.com>
 M:	Benoît Ganne <bganne@cisco.com>
 F:	src/plugins/ikev2/
 
 Plugin - Internet Group Management Protocol (IGMP)
 I:	igmp
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/plugins/igmp/
 
 Plugin - L3 Cross-Connect (L3XC)
 I:	l3xc
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/plugins/l3xc/
 
 Plugin - memif device driver
@@ -498,10 +490,10 @@ M:	Francois Clad <fclad@cisco.com>
 F:	src/plugins/srv6-as/
 
 Plugin - IPv6 Segment Routing Mobile
-I:      srv6-mobile
-M:      Tetsuya Murakami <tetsuya.mrk@gmail.com>
+I:	srv6-mobile
+M:	Tetsuya Murakami <tetsuya.mrk@gmail.com>
 M:	Satoru Matsushima <satoru.matsushima@gmail.com>
-F:      src/plugins/srv6-mobile/
+F:	src/plugins/srv6-mobile/
 
 Plugin - Link Aggregation Control Protocol
 I:	lacp
@@ -540,7 +532,7 @@ F:	src/plugins/mdata/
 Plugin - Unit Tests
 I:	unittest
 M:	Dave Barach <vpp@barachs.net>
-M:	Florin Coras <fcoras@cisco.com
+M:	Florin Coras <fcoras@cisco.com>
 F:	src/plugins/unittest/
 
 Test Infrastructure
@@ -650,34 +642,40 @@ M:	Ole Troan <ot@cisco.com>
 M:	Paul Vinciguerra <pvinci@vinciconsulting.com>
 F:	src/vpp-api/python
 
-Cisco Discovery Protocol
+Plugin - Cisco Discovery Protocol
 I:	cdp
+M:	vpp-dev Mailing List <vpp-dev@fd.io>
+C:  Unmaintained
 F:	src/plugins/cdp/
 
-Source VRF Select
+Plugin - Source VRF Select
 I:	svs
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/plugins/svs/
 
-LAN Emulation
+Plugin - LAN Emulation
 I:	l2e
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/plugins/l2e/
 
-IPv6 Connection Tracker
+Plugin - IPv6 Connection Tracker
 I:	ct6
 M:	Dave Barach <vpp@barachs.net>
 F:	src/plugins/ct6
 
-Steal The NIC
+Plugin - Steal The NIC
 I:	stn
+M:	vpp-dev Mailing List <vpp-dev@fd.io>
+C:  Unmaintained
 F:	src/plugins/stn
 
-IOAM
+Plugin - IOAM
 I:	ioam
+M:	vpp-dev Mailing List <vpp-dev@fd.io>
+C:  Unmaintained
 F:	src/plugins/ioam
 
-Awkward chained buffer geometry tool
+Plugin - Awkward chained buffer geometry tool
 I:	oddbuf
 M:	Dave Barach <vpp@barachs.net>
 F:	src/plugins/oddbuf
@@ -689,13 +687,13 @@ F:	src/plugins/vrrp
 
 Plugin - Unicast Reverse Path forwarding
 I:	urpf
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/plugins/urpf
 
 Plugin - CNat
 I:	cnat
 M:	Nathan Skrzypczak <nathan.skrzypczak@gmail.com>
-M:	Neale Ranns <nranns@cisco.com>
+M:	Neale Ranns <neale@graphiant.com>
 F:	src/plugins/cnat
 
 Plugin - Wireguard
@@ -724,8 +722,25 @@ I:	geneve
 M:	community vpp-dev@lists.fd.io
 F:	src/plugins/geneve/
 
+Plugin - linux-cp
+I:	linux-cp
+M:	neale@graphiant.com
+M:	Matthew Smith <mgsmith@netgate.com>
+F:	src/plugins/linux-cp/
+
+cJSON
+I:	cjson
+M:	Ole Troan <ot@cisco.com>
+F:	src/vppinfra/cJSON.[ch]
+
+VAT2
+I:	vat2
+M:	Ole Troan <ot@cisco.com>
+F:	src/vat2/
+
 THE REST
 I:	misc
-C:	Contact vpp-dev Mailing List <vpp-dev@fd.io>
+M:	vpp-dev Mailing List <vpp-dev@fd.io>
+C:	Missing Maintainer
 F:	*
 F:	*/

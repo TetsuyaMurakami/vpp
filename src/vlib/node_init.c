@@ -89,7 +89,7 @@ unformat_vlib_node_variant (unformat_input_t * input, va_list * args)
 }
 
 static_always_inline void
-vlib_update_nr_variant_default (vlib_node_registration_t * nr, u8 * variant)
+vlib_update_nr_variant_default (vlib_node_registration_t *nr, u8 *variant)
 {
   vlib_node_fn_registration_t *fnr = nr->node_fn_registrations;
   vlib_node_fn_registration_t *p_reg = 0;

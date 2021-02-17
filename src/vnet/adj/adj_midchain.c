@@ -623,8 +623,23 @@ adj_nbr_midchain_stack_on_fib_entry (adj_index_t ai,
                 choice = load_balance_get_bucket_i (lb, hash & lb->lb_n_buckets_minus_1);
                 dpo_copy (&tmp, choice);
             }
-            else if (adj->ia_flags & ADJ_FLAG_MIDCHAIN_FIXUP_FLOW_HASH)
+            else if (lb->lb_n_buckets > 1)
             {
+                /*
+                 * the client has chosen not to use the stacking to select a
+                 * bucket, and there are more than one buckets. there's no
+                 * value in using the midchain's fixed rewrite string to select
+                 * the path, so force a flow hash on the inner.
+                 */
+                adj->rewrite_header.flags |= VNET_REWRITE_FIXUP_FLOW_HASH;
+            }
+
+            if (adj->ia_flags & ADJ_FLAG_MIDCHAIN_FIXUP_FLOW_HASH)
+            {
+                /*
+                 * The client, for reasons unbeknownst to adj, wants to force
+                 * a flow hash on the inner, we will oblige.
+                 */
                 adj->rewrite_header.flags |= VNET_REWRITE_FIXUP_FLOW_HASH;
             }
         }
@@ -729,6 +744,7 @@ const static dpo_vft_t adj_midchain_dpo_vft = {
     .dv_unlock = adj_dpo_unlock,
     .dv_format = format_adj_midchain,
     .dv_get_urpf = adj_dpo_get_urpf,
+    .dv_get_mtu = adj_dpo_get_mtu,
 };
 
 /**
