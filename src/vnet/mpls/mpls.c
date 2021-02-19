@@ -313,7 +313,7 @@ vnet_mpls_local_label (vlib_main_t * vm,
   {
       fib_node_index_t fib_index;
 
-      if (NULL == rpaths)
+      if (NULL == rpaths && is_del == 0)
       {
 	  error = clib_error_return(0 , "no paths");
 	  goto done;
