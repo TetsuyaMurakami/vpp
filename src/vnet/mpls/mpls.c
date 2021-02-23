@@ -322,7 +322,8 @@ vnet_mpls_local_label (vlib_main_t * vm,
       pfx.fp_proto = FIB_PROTOCOL_MPLS;
       pfx.fp_len = 21;
       pfx.fp_label = local_label;
-      pfx.fp_payload_proto = rpaths[0].frp_proto;
+      if (rpaths != NULL)
+        pfx.fp_payload_proto = rpaths[0].frp_proto;
 
       fib_index = mpls_fib_index_from_table_id(table_id);
 
@@ -335,10 +336,27 @@ vnet_mpls_local_label (vlib_main_t * vm,
 
       if (is_del)
       {
-          fib_table_entry_path_remove2(fib_index,
+          if (rpaths != NULL)
+            {
+              fib_table_entry_path_remove2(fib_index,
                                        &pfx,
                                        FIB_SOURCE_CLI,
                                        rpaths);
+            }
+          else
+            {
+              pfx.fp_payload_proto = FIB_PROTOCOL_IP4;
+              fib_table_entry_path_remove2(fib_index,
+                                       &pfx,
+                                       FIB_SOURCE_CLI,
+                                       rpaths);
+
+              pfx.fp_payload_proto = FIB_PROTOCOL_IP6;
+              fib_table_entry_path_remove2(fib_index,
+                                       &pfx,
+                                       FIB_SOURCE_CLI,
+                                       rpaths);
+            }
       }
       else
       {
