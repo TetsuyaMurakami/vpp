@@ -225,6 +225,7 @@ typedef struct srv6_t_gtp4_dt_param_s
 typedef struct srv6_end_gtp4_e_param_s
 {
   u32 v4src_position;
+  ip4_address_t v4src_addr;
 
   u32 fib_table;
   u32 fib4_index;

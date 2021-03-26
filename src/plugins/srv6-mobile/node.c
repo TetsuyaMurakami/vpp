@@ -612,29 +612,36 @@ VLIB_NODE_FN (srv6_end_m_gtp4_e) (vlib_main_t * vm,
             }
         }
 
-          offset = ls_param->v4src_position / 8;
-          shift = ls_param->v4src_position % 8;
-
           vnet_buffer (b0)->sw_if_index[VLIB_TX] = ls_param->fib4_index;
 
-          if (PREDICT_TRUE (shift == 0))
-        {
-          for (index = 0; index < 4; index++)
+          if (ls_param->v4src_position)
             {
-              hdr0->ip4.src_address.as_u8[index] =
-            src0.as_u8[offset + index];
+              offset = ls_param->v4src_position / 8;
+              shift = ls_param->v4src_position % 8;
+
+              if (PREDICT_TRUE (shift == 0))
+                {
+                  for (index = 0; index < 4; index++)
+                    {
+                      hdr0->ip4.src_address.as_u8[index] =
+                        src0.as_u8[offset + index];
+                    }
+                }
+              else
+                {
+                  for (index = 0; index < 4; index++)
+                    {
+                      hdr0->ip4.src_address.as_u8[index] =
+                        src0.as_u8[offset + index] << shift;
+                      hdr0->ip4.src_address.as_u8[index] |=
+                        src0.as_u8[offset + index + 1] >> (8 - shift);
+                    }
+                }
             }
-        }
           else
-        {
-          for (index = 0; index < 4; index++)
             {
-              hdr0->ip4.src_address.as_u8[index] =
-            src0.as_u8[offset + index] << shift;
-              hdr0->ip4.src_address.as_u8[index] |=
-            src0.as_u8[offset + index + 1] >> (8 - shift);
+              clib_memcpy_fast(&hdr0->ip4.src_address, &ls_param->v4src_addr, 4); 
             }
-        }
 
           key = hash_memory (p, plen < 40 ? plen : 40, 0);
           port = hash_uword_to_u16 (&key);
