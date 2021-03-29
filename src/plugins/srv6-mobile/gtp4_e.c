@@ -104,6 +104,10 @@ clb_unformat_srv6_end_m_gtp4_e (unformat_input_t * input, va_list * args)
         {
           config = true;
         }
+      else
+        {
+          return 0;
+        }
     }
 
   if (!config)
