@@ -1414,7 +1414,6 @@ VLIB_NODE_FN (srv6_end_m_gtp6_e) (vlib_main_t * vm,
           u8 ie_buf[GTPU_IE_MAX_SIZ];
 
           index = ls0->localsid_prefix_len;
-          index += 8;
           offset = index / 8;
           shift = index % 8;
 
@@ -1751,7 +1750,6 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
       offset = ls_param->sr_prefixlen / 8;
       shift = ls_param->sr_prefixlen % 8;
 
-      offset += 1;
       if (PREDICT_TRUE (shift == 0))
         {
           if (gtpu_type == GTPU_TYPE_ECHO_REQUEST
