@@ -174,11 +174,29 @@ clb_creation_srv6_end_m_gtp6_d (ip6_sr_localsid_t * localsid)
 }
 
 static int
+clb_creation_srv6_end_m_gtp6_d_2 (ip6_sr_policy_t * sr_policy)
+{
+  return 0;
+}
+
+static int
 clb_removal_srv6_end_m_gtp6_d (ip6_sr_localsid_t * localsid)
 {
   srv6_end_gtp6_d_param_t *ls_mem;
 
   ls_mem = localsid->plugin_mem;
+
+  clib_mem_free (ls_mem);
+
+  return 0;
+}
+
+static int
+clb_removal_srv6_end_m_gtp6_d_2 (ip6_sr_policy_t * sr_policy)
+{
+  srv6_end_gtp6_d_param_t *ls_mem;
+
+  ls_mem = sr_policy->plugin_mem;
 
   clib_mem_free (ls_mem);
 
@@ -223,6 +241,17 @@ srv6_end_m_gtp6_d_init (vlib_main_t * vm)
   if (rc < 0)
     clib_error_return (0, "SRv6 Endpoint GTP6.D LocalSID function"
 		       "couldn't be registered");
+
+  rc = sr_policy_register_function (vm, fn_name, keyword_str, def_str, param_str, 128,  //prefix len
+                      &dpo_type,
+                      clb_format_srv6_end_m_gtp6_d,
+                      clb_unformat_srv6_end_m_gtp6_d,
+                      clb_creation_srv6_end_m_gtp6_d_2,
+                      clb_removal_srv6_end_m_gtp6_d_2);
+  if (rc < 0)
+    clib_error_return (0, "SRv6 GTP6.D Steering function"
+		       "couldn't be registered");
+
   return 0;
 }
 
