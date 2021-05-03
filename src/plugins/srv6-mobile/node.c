@@ -2000,7 +2000,7 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
           ip6srv->ip.protocol = IP_PROTOCOL_IPV6_ROUTE;
 
           ip6srv->sr.segments_left = 1;
-          ip6srv->sr.last_entry = 0;
+          ip6srv->sr.last_entry = 1;
 
           ip6srv->sr.length = (sizeof (ip6_address_t) << 2) / 8;
           ip6srv->sr.segments[0] = dst0;
