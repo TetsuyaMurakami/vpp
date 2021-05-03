@@ -1672,7 +1672,7 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
   ip6_gtpu_header_t *hdr0 = NULL;
   uword len0;
 
-  ip6_address_t seg0, src0;
+  ip6_address_t seg0, src0, dst0;
   u32 teid = 0;
   u8 *teidp;
   u8 gtpu_type = 0;
@@ -1713,6 +1713,7 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
     {
       seg0 = ls_param->sr_prefix;
       src0 = hdr0->ip6.src_address;
+      dst0 = hdr0->ip6.dst_address;
 
       gtpu_type = hdr0->gtpu.type;
 
@@ -1752,17 +1753,6 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
 
       if (PREDICT_TRUE (shift == 0))
         {
-          if (gtpu_type == GTPU_TYPE_ECHO_REQUEST
-          || gtpu_type == GTPU_TYPE_ECHO_REPLY
-          || gtpu_type == GTPU_TYPE_ERROR_INDICATION)
-            {
-              clib_memcpy_fast (&seg0.as_u8[offset], seqp, 2);
-            }
-          else
-            {
-              clib_memcpy_fast (&seg0.as_u8[offset], teidp, 4);
-            }
-
           if (qfip)
             {
               qfi =
@@ -1774,31 +1764,23 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
                   qfi |= SRV6_PDU_SESSION_U_BIT_MASK;
                 }
 
-              seg0.as_u8[offset + 4] = qfi;
+              seg0.as_u8[offset] = qfi;
             }
-        }
-      else
-        {
-          int idx;
 
           if (gtpu_type == GTPU_TYPE_ECHO_REQUEST
           || gtpu_type == GTPU_TYPE_ECHO_REPLY
           || gtpu_type == GTPU_TYPE_ERROR_INDICATION)
             {
-              for (idx = 0; idx < 2; idx++)
-                {
-                  seg0.as_u8[offset + idx] |= seqp[idx] >> shift;
-                  seg0.as_u8[offset + idx + 1] |= seqp[idx] << (8 - shift);
-                }
+              clib_memcpy_fast (&seg0.as_u8[offset + 1], seqp, 2);
             }
           else
             {
-              for (idx = 0; idx < 4; idx++)
-                {
-                  seg0.as_u8[offset + idx] |= teidp[idx] >> shift;
-                  seg0.as_u8[offset + idx + 1] |= teidp[idx] << (8 - shift);
-                }
+              clib_memcpy_fast (&seg0.as_u8[offset + 1], teidp, 4);
             }
+        }
+      else
+        {
+          int idx;
 
           if (qfip)
             {
@@ -1811,8 +1793,27 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
                   qfi |= SRV6_PDU_SESSION_U_BIT_MASK;
                 }
 
-              seg0.as_u8[offset + 4] |= qfi >> shift;
-              seg0.as_u8[offset + 5] |= qfi << (8 - shift);
+              seg0.as_u8[offset] |= qfi >> shift;
+              seg0.as_u8[offset + 1] |= qfi << (8 - shift);
+            }
+
+          if (gtpu_type == GTPU_TYPE_ECHO_REQUEST
+          || gtpu_type == GTPU_TYPE_ECHO_REPLY
+          || gtpu_type == GTPU_TYPE_ERROR_INDICATION)
+            {
+              for (idx = 0; idx < 2; idx++)
+                {
+                  seg0.as_u8[offset + idx + 1] |= seqp[idx] >> shift;
+                  seg0.as_u8[offset + idx + 2] |= seqp[idx] << (8 - shift);
+                }
+            }
+          else
+            {
+              for (idx = 0; idx < 4; idx++)
+                {
+                  seg0.as_u8[offset + idx + 1] |= teidp[idx] >> shift;
+                  seg0.as_u8[offset + idx + 2] |= teidp[idx] << (8 - shift);
+                }
             }
         }
 
@@ -1873,16 +1874,13 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
         {
           hdr_len = sizeof (ip6srv_combo_header_t);
           hdr_len += vec_len (sl->segments) * sizeof (ip6_address_t);
-          hdr_len += sizeof (ip6_address_t);
+          hdr_len += (sizeof (ip6_address_t) << 2);
         }
       else
         {
           hdr_len = sizeof (ip6_header_t);
-          if (PREDICT_FALSE (gtpu_type) != GTPU_TYPE_GTPU)
-            {
-              hdr_len += sizeof (ip6_sr_header_t);
-              hdr_len += sizeof (ip6_address_t);
-            }
+          hdr_len += sizeof (ip6_sr_header_t);
+          hdr_len += (sizeof (ip6_address_t) << 2);
         }
 
       if (ie_size)
@@ -1909,13 +1907,14 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
 
               ip6srv->sr.tag = clib_host_to_net_u16 (srh_tagfield[gtpu_type]);
 
-              ip6srv->sr.segments_left += 1;
-              ip6srv->sr.last_entry += 1;
+              ip6srv->sr.segments_left += 2;
+              ip6srv->sr.last_entry += 2;
 
-              ip6srv->sr.length += sizeof (ip6_address_t) / 8;
-              ip6srv->sr.segments[0] = seg0;
+              ip6srv->sr.length += (sizeof (ip6_address_t) << 2) / 8;
+              ip6srv->sr.segments[0] = dst0;
+              ip6srv->sr.segments[1] = seg0;
 
-              clib_memcpy_fast (&ip6srv->sr.segments[1],
+              clib_memcpy_fast (&ip6srv->sr.segments[2],
                 (u8 *) (sl->rewrite +
                     sizeof (ip6_header_t) +
                     sizeof (ip6_sr_header_t)),
@@ -1928,19 +1927,19 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
               ip6srv->ip.protocol = IP_PROTOCOL_IPV6_ROUTE;
 
               ip6srv->sr.type = ROUTING_HEADER_TYPE_SR;
-              ip6srv->sr.segments_left = 1;
-              ip6srv->sr.last_entry = 0;
-              ip6srv->sr.length =
-                ((sizeof (ip6_sr_header_t) + sizeof (ip6_address_t)) / 8) - 1;
+              ip6srv->sr.segments_left = 2;
+              ip6srv->sr.last_entry = 1;
+              ip6srv->sr.length = (sizeof (ip6_sr_header_t) << 2) / 8;
               ip6srv->sr.flags = 0;
 
               ip6srv->sr.tag = clib_host_to_net_u16 (srh_tagfield[gtpu_type]);
 
-              ip6srv->sr.segments[0] = seg0;
+              ip6srv->sr.segments[0] = dst0;
+              ip6srv->sr.segments[1] = seg0;
 
               if (vec_len (sl->segments))
                 {
-                  ip6srv->sr.segments[1] = sl->segments[0];
+                  ip6srv->sr.segments[2] = sl->segments[0];
                   ip6srv->sr.last_entry++;
                   ip6srv->sr.length += sizeof (ip6_address_t) / 8;
                 }
@@ -1998,19 +1997,19 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
           ip6srv->ip.src_address = src0;
           ip6srv->ip.dst_address = seg0;
 
+          ip6srv->ip.protocol = IP_PROTOCOL_IPV6_ROUTE;
+
+          ip6srv->sr.segments_left = 1;
+          ip6srv->sr.last_entry = 0;
+
+          ip6srv->sr.length = (sizeof (ip6_address_t) << 2) / 8;
+          ip6srv->sr.segments[0] = dst0;
+          ip6srv->sr.segments[1] = seg0;
+
           if (PREDICT_FALSE (gtpu_type) != GTPU_TYPE_GTPU)
             {
-              ip6srv->ip.protocol = IP_PROTOCOL_IPV6_ROUTE;
-
               ip6srv->sr.protocol = IP_PROTOCOL_IP6_ETHERNET;
-
               ip6srv->sr.tag = clib_host_to_net_u16 (srh_tagfield[gtpu_type]);
-
-              ip6srv->sr.segments_left = 0;
-              ip6srv->sr.last_entry = 0;
-
-              ip6srv->sr.length = sizeof (ip6_address_t) / 8;
-              ip6srv->sr.segments[0] = seg0;
             }
           else
             {
@@ -2019,11 +2018,11 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
                   if ((clib_net_to_host_u32
                     (encap->ip_version_traffic_class_and_flow_label)
                     >> 28) != 6)
-                    ip6srv->ip.protocol = IP_PROTOCOL_IP_IN_IP;
+                    ip6srv->sr.protocol = IP_PROTOCOL_IP_IN_IP;
                 }
               else if (ls_param->nhtype == SRV6_NHTYPE_IPV4)
                 {
-                  ip6srv->ip.protocol = IP_PROTOCOL_IP_IN_IP;
+                  ip6srv->sr.protocol = IP_PROTOCOL_IP_IN_IP;
                   if ((clib_net_to_host_u32
                     (encap->ip_version_traffic_class_and_flow_label)
                     >> 28) != 4)
@@ -2035,7 +2034,7 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
                 }
               else if (ls_param->nhtype == SRV6_NHTYPE_IPV6)
                 {
-                  ip6srv->ip.protocol = IP_PROTOCOL_IPV6;
+                  ip6srv->sr.protocol = IP_PROTOCOL_IPV6;
                   if ((clib_net_to_host_u32
                     (encap->ip_version_traffic_class_and_flow_label)
                     >> 28) != 6)
@@ -2047,7 +2046,7 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
                 }
               else if (ls_param->nhtype == SRV6_NHTYPE_NON_IP)
                 {
-                  ip6srv->ip.protocol = IP_PROTOCOL_IP6_ETHERNET;
+                  ip6srv->sr.protocol = IP_PROTOCOL_IP6_ETHERNET;
                 }
             }
         }
