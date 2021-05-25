@@ -581,6 +581,11 @@ VLIB_NODE_FN (srv6_end_m_gtp4_e) (vlib_main_t * vm,
               clib_memcpy_fast (ie_ptr, ie_buf, ie_size);
             }
             }
+        } else {
+          if (qfi) {
+            hdr0->gtpu.ext->seq = 0;
+            hdr0->gtpu.ext->npdu_num = 0;
+          }
         }
 
           if (qfi)
@@ -590,9 +595,6 @@ VLIB_NODE_FN (srv6_end_m_gtp4_e) (vlib_main_t * vm,
 
           hdr0->gtpu.ver_flags |= GTPU_EXTHDR_FLAG;
 
-          hdr0->gtpu.ext->seq = 0;
-
-          hdr0->gtpu.ext->npdu_num = 0;
           hdr0->gtpu.ext->nextexthdr = GTPU_EXTHDR_PDU_SESSION;
 
           type = qfi & SRV6_PDU_SESSION_U_BIT_MASK;
@@ -1567,6 +1569,11 @@ VLIB_NODE_FN (srv6_end_m_gtp6_e) (vlib_main_t * vm,
               clib_memcpy_fast (ie_ptr, ie_buf, ie_size);
             }
             }
+        } else {
+          if (qfi) {
+            hdr0->gtpu.ext->seq = 0;
+            hdr0->gtpu.ext->npdu_num = 0;
+          }
         }
 
           if (qfi)
@@ -1576,8 +1583,6 @@ VLIB_NODE_FN (srv6_end_m_gtp6_e) (vlib_main_t * vm,
 
           hdr0->gtpu.ver_flags |= GTPU_EXTHDR_FLAG;
 
-          hdr0->gtpu.ext->seq = 0;
-          hdr0->gtpu.ext->npdu_num = 0;
           hdr0->gtpu.ext->nextexthdr = GTPU_EXTHDR_PDU_SESSION;
 
           type = qfi & SRV6_PDU_SESSION_U_BIT_MASK;
