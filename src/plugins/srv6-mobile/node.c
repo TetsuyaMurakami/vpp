@@ -551,35 +551,6 @@ VLIB_NODE_FN (srv6_end_m_gtp4_e) (vlib_main_t * vm,
 
           hdr0->gtpu.type = gtpu_type;
 
-          if (qfi)
-        {
-          u8 type = 0;
-          gtpu_pdu_session_t *sess;
-
-          hdr0->gtpu.ver_flags |= GTPU_EXTHDR_FLAG;
-
-          hdr0->gtpu.ext->seq = 0;
-
-          hdr0->gtpu.ext->npdu_num = 0;
-          hdr0->gtpu.ext->nextexthdr = GTPU_EXTHDR_PDU_SESSION;
-
-          type = qfi & SRV6_PDU_SESSION_U_BIT_MASK;
-
-          qfi =
-            ((qfi & SRV6_PDU_SESSION_QFI_MASK) >> 2) |
-            ((qfi & SRV6_PDU_SESSION_R_BIT_MASK) << 5);
-
-          sess =
-            (gtpu_pdu_session_t *) (((char *) hdr0) +
-                        sizeof (ip4_gtpu_header_t) +
-                        sizeof (gtpu_exthdr_t));
-          sess->exthdrlen = 1;
-          sess->type = type;
-          sess->spare = 0;
-          sess->u.val = qfi;
-          sess->nextexthdr = 0;
-        }
-
           if (gtpu_type == GTPU_TYPE_ECHO_REPLY
           || gtpu_type == GTPU_TYPE_ECHO_REQUEST
           || gtpu_type == GTPU_TYPE_ERROR_INDICATION)
@@ -610,6 +581,35 @@ VLIB_NODE_FN (srv6_end_m_gtp4_e) (vlib_main_t * vm,
               clib_memcpy_fast (ie_ptr, ie_buf, ie_size);
             }
             }
+        }
+
+          if (qfi)
+        {
+          u8 type = 0;
+          gtpu_pdu_session_t *sess;
+
+          hdr0->gtpu.ver_flags |= GTPU_EXTHDR_FLAG;
+
+          hdr0->gtpu.ext->seq = 0;
+
+          hdr0->gtpu.ext->npdu_num = 0;
+          hdr0->gtpu.ext->nextexthdr = GTPU_EXTHDR_PDU_SESSION;
+
+          type = qfi & SRV6_PDU_SESSION_U_BIT_MASK;
+
+          qfi =
+            ((qfi & SRV6_PDU_SESSION_QFI_MASK) >> 2) |
+            ((qfi & SRV6_PDU_SESSION_R_BIT_MASK) << 5);
+
+          sess =
+            (gtpu_pdu_session_t *) (((char *) hdr0) +
+                        sizeof (ip4_gtpu_header_t) +
+                        sizeof (gtpu_exthdr_t));
+          sess->exthdrlen = 1;
+          sess->type = type;
+          sess->spare = 0;
+          sess->u.val = qfi;
+          sess->nextexthdr = 0;
         }
 
           vnet_buffer (b0)->sw_if_index[VLIB_TX] = ls_param->fib4_index;
@@ -1537,34 +1537,6 @@ VLIB_NODE_FN (srv6_end_m_gtp6_e) (vlib_main_t * vm,
 
           hdr0->gtpu.type = gtpu_type;
 
-          if (qfi)
-        {
-          u8 type = 0;
-          gtpu_pdu_session_t *sess;
-
-          hdr0->gtpu.ver_flags |= GTPU_EXTHDR_FLAG;
-
-          hdr0->gtpu.ext->seq = 0;
-          hdr0->gtpu.ext->npdu_num = 0;
-          hdr0->gtpu.ext->nextexthdr = GTPU_EXTHDR_PDU_SESSION;
-
-          type = qfi & SRV6_PDU_SESSION_U_BIT_MASK;
-
-          qfi =
-            ((qfi & SRV6_PDU_SESSION_QFI_MASK) >> 2) |
-            ((qfi & SRV6_PDU_SESSION_R_BIT_MASK) << 5);
-
-          sess =
-            (gtpu_pdu_session_t *) (((char *) hdr0) +
-                        sizeof (ip6_gtpu_header_t) +
-                        sizeof (gtpu_exthdr_t));
-          sess->exthdrlen = 1;
-          sess->type = type;
-          sess->spare = 0;
-          sess->u.val = qfi;
-          sess->nextexthdr = 0;
-        }
-
           if (gtpu_type == GTPU_TYPE_ECHO_REQUEST
           || gtpu_type == GTPU_TYPE_ECHO_REPLY
           || gtpu_type == GTPU_TYPE_ERROR_INDICATION)
@@ -1595,6 +1567,34 @@ VLIB_NODE_FN (srv6_end_m_gtp6_e) (vlib_main_t * vm,
               clib_memcpy_fast (ie_ptr, ie_buf, ie_size);
             }
             }
+        }
+
+          if (qfi)
+        {
+          u8 type = 0;
+          gtpu_pdu_session_t *sess;
+
+          hdr0->gtpu.ver_flags |= GTPU_EXTHDR_FLAG;
+
+          hdr0->gtpu.ext->seq = 0;
+          hdr0->gtpu.ext->npdu_num = 0;
+          hdr0->gtpu.ext->nextexthdr = GTPU_EXTHDR_PDU_SESSION;
+
+          type = qfi & SRV6_PDU_SESSION_U_BIT_MASK;
+
+          qfi =
+            ((qfi & SRV6_PDU_SESSION_QFI_MASK) >> 2) |
+            ((qfi & SRV6_PDU_SESSION_R_BIT_MASK) << 5);
+
+          sess =
+            (gtpu_pdu_session_t *) (((char *) hdr0) +
+                        sizeof (ip6_gtpu_header_t) +
+                        sizeof (gtpu_exthdr_t));
+          sess->exthdrlen = 1;
+          sess->type = type;
+          sess->spare = 0;
+          sess->u.val = qfi;
+          sess->nextexthdr = 0;
         }
 
           hdr0->udp.length = clib_host_to_net_u16 (len0 +
