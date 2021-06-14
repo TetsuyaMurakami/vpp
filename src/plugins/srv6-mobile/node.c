@@ -1068,6 +1068,8 @@ srv6_gtp4_decap_processing (vlib_main_t * vm,
     
               ip6srv->sr.protocol = IP_PROTOCOL_IP6_ETHERNET;
     
+              ip6srv->sr.type = ROUTING_HEADER_TYPE_SR;
+
               ip6srv->sr.tag = clib_host_to_net_u16 (srh_tagfield[gtpu_type]);
     
               ip6srv->sr.segments_left = 0;
@@ -1879,13 +1881,13 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
         {
           hdr_len = sizeof (ip6srv_combo_header_t);
           hdr_len += vec_len (sl->segments) * sizeof (ip6_address_t);
-          hdr_len += (sizeof (ip6_address_t) << 2);
+          hdr_len += sizeof (ip6_address_t) * 2;
         }
       else
         {
           hdr_len = sizeof (ip6_header_t);
           hdr_len += sizeof (ip6_sr_header_t);
-          hdr_len += (sizeof (ip6_address_t) << 2);
+          hdr_len += sizeof (ip6_address_t) * 2;
         }
 
       if (ie_size)
@@ -1912,10 +1914,11 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
 
               ip6srv->sr.tag = clib_host_to_net_u16 (srh_tagfield[gtpu_type]);
 
+              ip6srv->sr.type = ROUTING_HEADER_TYPE_SR;
               ip6srv->sr.segments_left += 2;
               ip6srv->sr.last_entry += 2;
 
-              ip6srv->sr.length += (sizeof (ip6_address_t) << 2) / 8;
+              ip6srv->sr.length += (sizeof (ip6_address_t) * 2) / 8;
               ip6srv->sr.segments[0] = dst0;
               ip6srv->sr.segments[1] = seg0;
 
@@ -1934,7 +1937,7 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
               ip6srv->sr.type = ROUTING_HEADER_TYPE_SR;
               ip6srv->sr.segments_left = 2;
               ip6srv->sr.last_entry = 1;
-              ip6srv->sr.length = (sizeof (ip6_sr_header_t) << 2) / 8;
+              ip6srv->sr.length = (sizeof (ip6_address_t) * 2) / 8;
               ip6srv->sr.flags = 0;
 
               ip6srv->sr.tag = clib_host_to_net_u16 (srh_tagfield[gtpu_type]);
@@ -2004,10 +2007,11 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
 
           ip6srv->ip.protocol = IP_PROTOCOL_IPV6_ROUTE;
 
+          ip6srv->sr.type = ROUTING_HEADER_TYPE_SR;
           ip6srv->sr.segments_left = 1;
           ip6srv->sr.last_entry = 1;
 
-          ip6srv->sr.length = (sizeof (ip6_address_t) << 2) / 8;
+          ip6srv->sr.length = (sizeof (ip6_address_t) * 2) / 8;
           ip6srv->sr.segments[0] = dst0;
           ip6srv->sr.segments[1] = seg0;
 
