@@ -1253,8 +1253,7 @@ VLIB_NODE_FN (srv6_t_m_gtp4_d) (vlib_main_t * vm,
                   if (((ip6->dst_address.as_u8[0] == 0xff)
                     && (ip6->dst_address.as_u8[1] == 0x02)) ||
                       ((ip6->dst_address.as_u8[0] == 0xfe)
-                    && (ip6->dst_address.as_u8[1] == 0x80)
-                    && ((ip6->dst_address.as_u8[2] & 0xc0) == 0)))
+                    && ((ip6->dst_address.as_u8[1] & 0xc0) == 0x80)))
                     {
                       // Inner desitnation is IPv6 link local
                       gtp4 = true;
@@ -2197,8 +2196,7 @@ VLIB_NODE_FN (srv6_end_m_gtp6_d) (vlib_main_t * vm,
                   if (((ip6->dst_address.as_u8[0] == 0xff)
                     && (ip6->dst_address.as_u8[1] == 0x02)) ||
                       ((ip6->dst_address.as_u8[0] == 0xfe)
-                    && (ip6->dst_address.as_u8[1] == 0x80)
-                    && ((ip6->dst_address.as_u8[2] & 0xc0) == 0)))
+                    && ((ip6->dst_address.as_u8[1] & 0xc0) == 0x80)))
                     {
                       // Inner desitnation is IPv6 link local
                       gtp6 = true;
@@ -2839,8 +2837,7 @@ VLIB_NODE_FN (srv6_end_m_gtp6_dt) (vlib_main_t * vm,
           if (((ip6->dst_address.as_u8[0] == 0xff)
             && (ip6->dst_address.as_u8[1] == 0x02)) ||
               ((ip6->dst_address.as_u8[0] == 0xfe)
-            && (ip6->dst_address.as_u8[1] == 0x80)
-            && ((ip6->dst_address.as_u8[2] & 0xc0) == 0)))
+            && ((ip6->dst_address.as_u8[1] & 0xc0) == 0x80)))
             {
               vnet_buffer (b0)->sw_if_index[VLIB_TX] =
             ls_param->local_fib_index;
@@ -2863,8 +2860,7 @@ VLIB_NODE_FN (srv6_end_m_gtp6_dt) (vlib_main_t * vm,
               if (((ip6->dst_address.as_u8[0] == 0xff)
                 && (ip6->dst_address.as_u8[1] == 0x02)) ||
                   ((ip6->dst_address.as_u8[0] == 0xfe)
-                && (ip6->dst_address.as_u8[1] == 0x80)
-                && ((ip6->dst_address.as_u8[2] & 0xc0) == 0)))
+                && ((ip6->dst_address.as_u8[1] & 0xc0) == 0x80)))
             {
               vnet_buffer (b0)->sw_if_index[VLIB_TX] =
                 ls_param->local_fib_index;
@@ -3065,8 +3061,7 @@ VLIB_NODE_FN (srv6_t_m_gtp4_dt) (vlib_main_t * vm,
           if (((ip6->dst_address.as_u8[0] == 0xff)
             && (ip6->dst_address.as_u8[1] == 0x02)) ||
               ((ip6->dst_address.as_u8[0] == 0xfe)
-            && (ip6->dst_address.as_u8[1] == 0x80)
-            && ((ip6->dst_address.as_u8[2] & 0xc0) == 0)))
+            && ((ip6->dst_address.as_u8[1] & 0xc0) == 0x80)))
             {
               next0 = SRV6_T_M_GTP4_DT_NEXT_LOOKUP4;
               vnet_buffer (b0)->sw_if_index[VLIB_TX] =
@@ -3090,8 +3085,7 @@ VLIB_NODE_FN (srv6_t_m_gtp4_dt) (vlib_main_t * vm,
               if (((ip6->dst_address.as_u8[0] == 0xff)
                 && (ip6->dst_address.as_u8[1] == 0x02)) ||
                   ((ip6->dst_address.as_u8[0] == 0xfe)
-                && (ip6->dst_address.as_u8[1] == 0x80)
-                && ((ip6->dst_address.as_u8[2] & 0xc0) == 0)))
+                && ((ip6->dst_address.as_u8[1] & 0xc0) == 0x80)))
             {
               next0 = SRV6_T_M_GTP4_DT_NEXT_LOOKUP4;
               vnet_buffer (b0)->sw_if_index[VLIB_TX] =
