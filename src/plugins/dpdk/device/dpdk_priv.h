@@ -30,6 +30,7 @@
 _(no-shconf)                                    \
 _(no-hpet)                                      \
 _(no-huge)                                      \
+_(legacy-mem)                                   \
 _(vmware-tsc-map)
 
 #define foreach_eal_single_hyphen_mandatory_arg \
@@ -47,6 +48,7 @@ _(proc-type)                                    \
 _(file-prefix)                                  \
 _(vdev)                                         \
 _(log-level)                                    \
+_(vfio-intr)                                    \
 _(iova-mode)
 
 static inline void

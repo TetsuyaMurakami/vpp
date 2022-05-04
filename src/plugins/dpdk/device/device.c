@@ -526,9 +526,9 @@ dpdk_subif_add_del_function (vnet_main_t * vnm,
   dpdk_main_t *xm = &dpdk_main;
   vnet_hw_interface_t *hw = vnet_get_hw_interface (vnm, hw_if_index);
   dpdk_device_t *xd = vec_elt_at_index (xm->devices, hw->dev_instance);
-  vnet_sw_interface_t *t = (vnet_sw_interface_t *) st;
-  int r, vlan_offload;
-  u32 prev_subifs = xd->num_subifs;
+  //vnet_sw_interface_t *t = (vnet_sw_interface_t *) st;
+  //int r, vlan_offload;
+  //u32 prev_subifs = xd->num_subifs;
   clib_error_t *err = 0;
 
   if (is_add)
@@ -536,6 +536,7 @@ dpdk_subif_add_del_function (vnet_main_t * vnm,
   else if (xd->num_subifs)
     xd->num_subifs--;
 
+#if 0 /* not expecting vlan strip */
   if ((xd->flags & DPDK_DEVICE_FLAG_PMD) == 0)
     goto done;
 
@@ -576,6 +577,7 @@ dpdk_subif_add_del_function (vnet_main_t * vnm,
     }
 
 done:
+#endif
   if (xd->num_subifs)
     xd->flags |= DPDK_DEVICE_FLAG_HAVE_SUBIF;
   else
