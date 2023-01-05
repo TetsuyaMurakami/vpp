@@ -1169,6 +1169,8 @@ VLIB_NODE_FN (srv6_t_m_gtp4_d) (vlib_main_t * vm,
   ip6_sr_main_t *sm2 = &sr_main;
   u32 n_left_from, next_index, *from, *to_next;
 
+  ip6_header_t *iph;
+
   ip6_sr_sl_t *sl0;
   srv6_end_gtp4_d_param_t *ls_param;
 
@@ -1274,15 +1276,39 @@ VLIB_NODE_FN (srv6_t_m_gtp4_d) (vlib_main_t * vm,
               /* Strip off the outer header (IPv4 + GTP + UDP + IEs) */
               vlib_buffer_advance (b0, (word) hdrlen);
     
-              if (ipv4)
+              if (ls_param->sid_present)
                 {
-                  next0 = SRV6_T_M_GTP4_D_NEXT_LOOKUP4;
-                  vnet_buffer (b0)->sw_if_index[VLIB_TX] = ls_param->fib4_index;
-                } 
+                  vlib_buffer_advance (b0, -(word) sizeof ip6_header_t);
+                  iph = vlib_buffer_get_current (b0);
+
+                  clib_memory_fast (iph, &ls_param->ip, sizeof ip6_header_t);
+
+                  if (ipv4)
+                    {
+                      iph->protocol = IP_PROTOCOL_IP_IN_IP;
+                    }
+                  else
+                    {
+                      iph->protocol = IP_PROTOCOL_IPV6;
+                    }
+
+                  iph->payload_length = clib_host_to_net_u16 (b0->current_length - sizeof (ip6_header_t));
+
+                  next0 = SRV6_T_M_GTP4_D_NEXT_LOOKIP6;
+                  vnet_buffer (b0)->sw_if_index[VLIB_TX] = 0;
+                }
               else
                 {
-                  next0 = SRV6_T_M_GTP4_D_NEXT_LOOKUP6;
-                  vnet_buffer (b0)->sw_if_index[VLIB_TX] = ls_param->fib6_index;
+                  if (ipv4)
+                    {
+                      next0 = SRV6_T_M_GTP4_D_NEXT_LOOKUP4;
+                      vnet_buffer (b0)->sw_if_index[VLIB_TX] = ls_param->fib4_index;
+                    }
+                  else
+                    {
+                      next0 = SRV6_T_M_GTP4_D_NEXT_LOOKUP6;
+                      vnet_buffer (b0)->sw_if_index[VLIB_TX] = ls_param->fib6_index;
+                    }
                 }
             }
     
@@ -2225,15 +2251,39 @@ VLIB_NODE_FN (srv6_end_m_gtp6_d) (vlib_main_t * vm,
               /* Strip off the outer header (IPv6 + GTP + UDP + IEs) */
               vlib_buffer_advance (b0, (word) hdrlen);
     
-              if (ipv4)
+              if (ls_param->sid_present)
                 {
-                  next0 = SRV6_END_M_GTP6_D_NEXT_LOOKUP4;
-                  vnet_buffer (b0)->sw_if_index[VLIB_TX] = ls_param->fib4_index;
+                  vlib_buffer_advance (b0, -(word) sizeof (ip6_header_t));
+                  iph = vlib_buffer_get_current (b0);
+
+                  clib_memory_fast (iph, &ls_param->ip, sizeof (ip6_header_t));
+
+                  if (ipv4)
+                    {
+                      iph->protocol = IP_PROTOCOL_IP_IN_IP;
+                    }
+                  else
+                    {
+                      iph->protocol = IP_PROTOCOL_IPV6;
+                    }
+
+                  iph->payload_length = clib_host_to_net_u16 (b0->current_length - sizeof (ip6_header_t));
+
+                  next0 = SRV6_END_M_GTP6_D_NEXT_LOOKUP6;
+                  vnet_buffer (b0)->sw_if_index[VLIB_TX] = 0;
                 }
               else
                 {
-                  next0 = SRV6_END_M_GTP6_D_NEXT_LOOKUP6;
-                  vnet_buffer (b0)->sw_if_index[VLIB_TX] = ls_param->fib6_index;
+                  if (ipv4)
+                    {
+                      next0 = SRV6_END_M_GTP6_D_NEXT_LOOKUP4;
+                      vnet_buffer (b0)->sw_if_index[VLIB_TX] = ls_param->fib4_index;
+                    }
+                  else
+                    {
+                      next0 = SRV6_END_M_GTP6_D_NEXT_LOOKUP6;
+                      vnet_buffer (b0)->sw_if_index[VLIB_TX] = ls_param->fib6_index;
+                    }
                 }
             }
     

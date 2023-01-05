@@ -106,8 +106,8 @@ static dpo_type_t sr_pr_bsid_insert_dpo_type;
 /**
  * @brief IPv6 SA for encapsulated packets
  */
-static ip6_address_t sr_pr_encaps_src;
-static u8 sr_pr_encaps_hop_limit = IPv6_DEFAULT_HOP_LIMIT;
+ip6_address_t sr_pr_encaps_src;
+u8 sr_pr_encaps_hop_limit = IPv6_DEFAULT_HOP_LIMIT;
 
 /******************* SR rewrite set encaps IPv6 source addr *******************/
 /* Note:  This is temporal. We don't know whether to follow this path or

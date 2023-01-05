@@ -191,6 +191,10 @@ typedef struct srv6_end_gtp6_d_param_s
   u32 fib_table;
   u32 fib4_index;
   u32 fib6_index;
+
+  bool sid_present;
+  ip6_address_t sid;
+  ip6_header_t ip;
 } srv6_end_gtp6_d_param_t;
 
 /* GTP6.DT */
@@ -248,6 +252,10 @@ typedef struct srv6_end_gtp4_d_param_s
   u32 fib_table;
   u32 fib4_index;
   u32 fib6_index;
+
+  bool sid_present;
+  ip6_address_t sid;
+  ip6_header_t ip;
 } srv6_end_gtp4_d_param_t;
 
 typedef struct srv6_end_main_v4_s
