@@ -700,24 +700,17 @@ VLIB_NODE_FN (srv6_end_m_gtp4_e) (vlib_main_t * vm,
 // Function for SRv6 GTP4.D function.
 static inline u32
 srv6_gtp4_decap_processing (vlib_main_t * vm,
-                vlib_node_runtime_t * node, vlib_buffer_t * b0)
+                vlib_node_runtime_t * node, vlib_buffer_t * b0,
+                srv6_end_gtp4_d_param_t *ls_param)
 {
   srv6_t_main_v4_decap_t *sm = &srv6_t_main_v4_decap;
   ip6_sr_main_t *sm2 = &sr_main;
 
-  ip6_sr_sl_t *sl0;
-  srv6_end_gtp4_d_param_t *ls_param;
   ip4_header_t *ip4;
 
   uword len0;
 
   u32 next0 = SRV6_T_M_GTP4_D_NEXT_LOOKUP6;
-
-  sl0 =
-    pool_elt_at_index (sm2->sid_lists,
-               vnet_buffer (b0)->ip.adj_index[VLIB_TX]);
-
-  ls_param = (srv6_end_gtp4_d_param_t *) sl0->plugin_mem;
 
   len0 = vlib_buffer_length_in_chain (vm, b0);
 
@@ -1189,6 +1182,7 @@ VLIB_NODE_FN (srv6_t_m_gtp4_d) (vlib_main_t * vm,
       while (n_left_from > 0 && n_left_to_next > 0)
         {
           u32 bi0;
+          u32 teid;
           vlib_buffer_t *b0;
     
           u32 next0;
@@ -1217,6 +1211,23 @@ VLIB_NODE_FN (srv6_t_m_gtp4_d) (vlib_main_t * vm,
     
           hdr = vlib_buffer_get_current (b0);
           gtpu_type = hdr->gtpu.type;
+
+          if (ls_param->tedb != NULL)
+            {
+              struct ptree_node *node;
+
+              teid = clib_net_to_host_u32(hdr->gtpu.teid);
+              node = ptree_node_match (ls_param->tedb, (u8 *)&teid, 32);
+              if (node != NULL) {
+                ls_param = (srv6_end_gtp4_d_param_t *)ptree_node_get_data (node);
+              }
+            }
+
+          if (PREDICT_FALSE ((ls_param == NULL) || (ls_param->sr_prefixlen == 0)))
+            {
+              next0 = SRV6_T_M_GTP4_D_NEXT_DROP;
+              goto DONE;
+            }
     
           gtp4 = false;
           ipv4 = true;
@@ -1265,7 +1276,7 @@ VLIB_NODE_FN (srv6_t_m_gtp4_d) (vlib_main_t * vm,
     
           if (gtp4)
             {
-              next0 = srv6_gtp4_decap_processing (vm, node, b0);
+              next0 = srv6_gtp4_decap_processing (vm, node, b0, ls_param);
               if (PREDICT_TRUE (next0 == SRV6_T_M_GTP4_D_NEXT_LOOKUP6))
                 good_n++;
               else
@@ -1278,10 +1289,10 @@ VLIB_NODE_FN (srv6_t_m_gtp4_d) (vlib_main_t * vm,
     
               if (ls_param->sid_present)
                 {
-                  vlib_buffer_advance (b0, -(word) sizeof ip6_header_t);
+                  vlib_buffer_advance (b0, -(word) sizeof (ip6_header_t));
                   iph = vlib_buffer_get_current (b0);
 
-                  clib_memory_fast (iph, &ls_param->ip, sizeof ip6_header_t);
+                  clib_memcpy_fast (iph, &ls_param->ip, sizeof (ip6_header_t));
 
                   if (ipv4)
                     {
@@ -1294,7 +1305,7 @@ VLIB_NODE_FN (srv6_t_m_gtp4_d) (vlib_main_t * vm,
 
                   iph->payload_length = clib_host_to_net_u16 (b0->current_length - sizeof (ip6_header_t));
 
-                  next0 = SRV6_T_M_GTP4_D_NEXT_LOOKIP6;
+                  next0 = SRV6_T_M_GTP4_D_NEXT_LOOKUP6;
                   vnet_buffer (b0)->sw_if_index[VLIB_TX] = 0;
                 }
               else
@@ -1312,6 +1323,7 @@ VLIB_NODE_FN (srv6_t_m_gtp4_d) (vlib_main_t * vm,
                 }
             }
     
+DONE:
           vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next,
                            n_left_to_next, bi0, next0);
         }
@@ -1696,13 +1708,11 @@ VLIB_NODE_FN (srv6_end_m_gtp6_e) (vlib_main_t * vm,
 // Function for SRv6 GTP6.D function
 static inline u32
 srv6_gtp6_decap_processing (vlib_main_t * vm,
-                vlib_node_runtime_t * node, vlib_buffer_t * b0)
+                vlib_node_runtime_t * node, vlib_buffer_t * b0,
+                srv6_end_gtp6_d_param_t *ls_param)
 {
   srv6_end_main_v6_decap_t *sm = &srv6_end_main_v6_decap;
   ip6_sr_main_t *sm2 = &sr_main;
-
-  ip6_sr_localsid_t *ls0;
-  srv6_end_gtp6_d_param_t *ls_param;
 
   ip6_gtpu_header_t *hdr0 = NULL;
   uword len0;
@@ -1724,12 +1734,6 @@ srv6_gtp6_decap_processing (vlib_main_t * vm,
   u8 ie_buf[GTPU_IE_MAX_SIZ];
 
   u32 next0 = SRV6_END_M_GTP6_D_NEXT_LOOKUP6;
-
-  ls0 =
-    pool_elt_at_index (sm2->localsids,
-               vnet_buffer (b0)->ip.adj_index[VLIB_TX]);
-
-  ls_param = (srv6_end_gtp6_d_param_t *) ls0->plugin_mem;
 
   hdr0 = vlib_buffer_get_current (b0);
 
@@ -2142,6 +2146,10 @@ VLIB_NODE_FN (srv6_end_m_gtp6_d) (vlib_main_t * vm,
   ip6_sr_localsid_t *ls0;
   srv6_end_gtp6_d_param_t *ls_param;
 
+  ip6_header_t *iph;
+
+  u32 teid;
+
   u32 good_n = 0, bad_n = 0;
 
   from = vlib_frame_vector_args (frame);
@@ -2185,6 +2193,24 @@ VLIB_NODE_FN (srv6_end_m_gtp6_d) (vlib_main_t * vm,
           hdr = vlib_buffer_get_current (b0);
           gtpu_type = hdr->gtpu.type;
     
+          if (ls_param->tedb != NULL)
+            {
+              struct ptree_node *node;
+
+              teid = clib_net_to_host_u32 (hdr->gtpu.teid);
+              node = ptree_node_match (ls_param->tedb, (u8 *)&teid, 32);
+              if (node != NULL)
+                {
+                  ls_param = (srv6_end_gtp6_d_param_t *)ptree_node_get_data (node);
+                }
+            }
+
+          if (PREDICT_FALSE ((ls_param == NULL) || (ls_param->sr_prefixlen == 0)))
+            {
+              next0 = SRV6_END_M_GTP6_D_NEXT_DROP;
+              goto DONE;
+            }
+
           gtp6 = false;
           ipv4 = true;
     
@@ -2232,7 +2258,7 @@ VLIB_NODE_FN (srv6_end_m_gtp6_d) (vlib_main_t * vm,
     
           if (gtp6)
             {
-              next0 = srv6_gtp6_decap_processing (vm, node, b0);
+              next0 = srv6_gtp6_decap_processing (vm, node, b0, ls_param);
               if (PREDICT_TRUE (next0 == SRV6_END_M_GTP6_D_NEXT_LOOKUP6))
                 good_n++;
               else
@@ -2256,7 +2282,7 @@ VLIB_NODE_FN (srv6_end_m_gtp6_d) (vlib_main_t * vm,
                   vlib_buffer_advance (b0, -(word) sizeof (ip6_header_t));
                   iph = vlib_buffer_get_current (b0);
 
-                  clib_memory_fast (iph, &ls_param->ip, sizeof (ip6_header_t));
+                  clib_memcpy_fast (iph, &ls_param->ip, sizeof (ip6_header_t));
 
                   if (ipv4)
                     {
@@ -2287,6 +2313,7 @@ VLIB_NODE_FN (srv6_end_m_gtp6_d) (vlib_main_t * vm,
                 }
             }
     
+DONE:
           vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next,
                            n_left_to_next, bi0, next0);
         }
