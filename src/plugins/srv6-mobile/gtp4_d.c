@@ -252,6 +252,7 @@ clb_unformat_srv6_t_m_gtp4_d (unformat_input_t * input, va_list * args)
               }
           }
 
+        teid = clib_host_to_net_u32(teid);
         node = ptree_node_get (ls_mem->tedb, (u8 *)&teid, teid_len);
         if (node == NULL)
           {
