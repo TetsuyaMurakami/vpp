@@ -116,7 +116,7 @@ clb_unformat_srv6_end_m_gtp6_d (unformat_input_t * input, va_list * args)
   bool is_teid = false;
   bool config = false;
   u32 fib_table = 0;
-  struct ptree_node *node;
+  struct sr_table_node *node;
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
     {
@@ -187,7 +187,7 @@ clb_unformat_srv6_end_m_gtp6_d (unformat_input_t * input, va_list * args)
     {
       if (ls_mem->tedb == NULL)
         {
-          ls_mem->tedb = ptree_new (AF_INET, 32, NULL);
+          ls_mem->tedb = sr_table_new (AF_INET, 32, NULL);
           if (ls_mem->tedb == NULL)
             {
               return 0;
@@ -195,18 +195,18 @@ clb_unformat_srv6_end_m_gtp6_d (unformat_input_t * input, va_list * args)
         }
 
       teid = clib_host_to_net_u32(teid);
-      node = ptree_node_get (ls_mem->tedb, (u8 *)&teid, teid_len);
+      node = sr_table_node_get (ls_mem->tedb, (u8 *)&teid, teid_len);
       if (node == NULL)
         {
           return 0;
         }
 
-      p_mem = ptree_node_get_data (node);
+      p_mem = sr_table_node_get_data (node);
       if (p_mem == NULL)
         {
           p_mem = clib_mem_alloc_aligned_at_offset (sizeof *p_mem, 0, 0, 1);
           clib_memset (p_mem, 0, sizeof *p_mem);
-          ptree_node_set_data (node, p_mem);
+          sr_table_node_set_data (node, p_mem);
         }
 
       p_mem->sr_prefix = sr_prefix;
