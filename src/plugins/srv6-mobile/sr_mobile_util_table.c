@@ -9,7 +9,7 @@
 
 #include <vnet/vnet.h>
 
-#include "sr_mobile_util_sr_table.h"
+#include "sr_mobile_util_table.h"
 
 static const u_int8_t mask_bit[] = {
     0x00, 0x80, 0xc0, 0xe0, 0xf0, 0xf8, 0xfc, 0xfe, 0xff
