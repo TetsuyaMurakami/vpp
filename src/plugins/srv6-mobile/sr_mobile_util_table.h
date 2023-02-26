@@ -17,7 +17,7 @@ struct sr_table_node {
 #define left_child  link[0]
 #define right_child link[1]
 
-    struct sr_table 	    *tree;
+    struct sr_table 	    *table;
     struct sr_table_node 	*parent;
 
     void		        *info;
@@ -44,21 +44,21 @@ struct sr_table {
 };
 
 struct sr_table * sr_table_new (u8 family, u8 max_keylen, sr_table_del_cb_t del);
-int sr_table_delete (struct sr_table *tree, int force);
+int sr_table_delete (struct sr_table *table, int force);
 
 void sr_table_node_lock (struct sr_table_node *node);
 int sr_table_node_unlock (struct sr_table_node *node);
 
-struct sr_table_node *sr_table_node_new (struct sr_table *tree, u8 *key, u8 keylen);
-struct sr_table_node *sr_table_node_get (struct sr_table *tree, u8 *key, u8 keylen);
+struct sr_table_node *sr_table_node_new (struct sr_table *table, u8 *key, u8 keylen);
+struct sr_table_node *sr_table_node_get (struct sr_table *table, u8 *key, u8 keylen);
 
-struct sr_table_node *sr_table_node_lookup (struct sr_table *tree, u8 *key, u8 keylen);
-struct sr_table_node *sr_table_node_match (struct sr_table *tree, u8 *key, u8 keylen);
+struct sr_table_node *sr_table_node_lookup (struct sr_table *table, u8 *key, u8 keylen);
+struct sr_table_node *sr_table_node_match (struct sr_table *table, u8 *key, u8 keylen);
 
-int sr_table_node_delete (struct sr_table *tree, struct sr_table_node *node);
-int sr_table_node_release (struct sr_table *tree, u8 *key, u8 keylen);
+int sr_table_node_delete (struct sr_table *table, struct sr_table_node *node);
+int sr_table_node_release (struct sr_table *table, u8 *key, u8 keylen);
 
-struct sr_table_node *sr_table_top (struct sr_table *tree);
+struct sr_table_node *sr_table_top (struct sr_table *table);
 struct sr_table_node *sr_table_node_next (struct sr_table_node *node);
 
 void *sr_table_node_get_data (struct sr_table_node *node);

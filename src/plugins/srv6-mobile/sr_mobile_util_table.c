@@ -15,90 +15,90 @@ static const u_int8_t mask_bit[] = {
     0x00, 0x80, 0xc0, 0xe0, 0xf0, 0xf8, 0xfc, 0xfe, 0xff
 };
 
-/* Create a new prefix tree */
+/* Create a new prefix table */
 struct sr_table *
 sr_table_new (u_int8_t family, u_int8_t max_keylen, sr_table_del_cb_t del)
 {
-    struct sr_table *tree;
+    struct sr_table *table;
 
-    tree = clib_mem_alloc (sizeof (struct sr_table));
-    if (! tree) {
+    table = clib_mem_alloc (sizeof (struct sr_table));
+    if (! table) {
         return NULL;
     }
 
-    tree->family = family; tree->max_key_len = max_keylen;
+    table->family = family; table->max_key_len = max_keylen;
 
-    tree->max_key_siz = (max_keylen >> 3);
+    table->max_key_siz = (max_keylen >> 3);
     if ((max_keylen & 0x7) != 0) {
-        tree->max_key_siz++;
+        table->max_key_siz++;
     }
 
-    tree->delete_cb = del;
+    table->delete_cb = del;
 
-    return tree;
+    return table;
 }
 
-/* Destroy the prefix tree */
+/* Destroy the prefix table */
 int
-sr_table_delete (struct sr_table *tree, int force)
+sr_table_delete (struct sr_table *table, int force)
 {
     struct sr_table_node *node, *next;
 
     if (force == 0) {
-        if (tree->top != NULL) {
+        if (table->top != NULL) {
             return PTREE_DELETE_FAILURE;
         }
     } else {
-        for (node = sr_table_top(tree); node != NULL; node = next) {
+        for (node = sr_table_top(table); node != NULL; node = next) {
             next = sr_table_node_next (node);
 	        node->lock = 0;
             sr_table_node_unlock (node);
         }
     }
 
-    clib_mem_free (tree);
+    clib_mem_free (table);
     return PTREE_SUCCESS;
 }
 
-/* Lock the node in a given prefix tree */
+/* Lock the node in a given prefix table */
 void
 sr_table_node_lock (struct sr_table_node *node)
 {
     clib_atomic_fetch_add (&node->lock, 1);
 }
 
-/* Unlock the node in a given prefix tree and then delete the node if the lock is 0 */
+/* Unlock the node in a given prefix table and then delete the node if the lock is 0 */
 int
 sr_table_node_unlock (struct sr_table_node *node)
 {
-    struct sr_table *tree;
+    struct sr_table *table;
 
     if (node->lock != 0)
         clib_atomic_fetch_sub (&node->lock, 1);
 
     if (node->lock == 0) {
-        tree = node->tree;
+        table = node->table;
 
-        if (tree->delete_cb && node->info) {
-            tree->delete_cb (node->info);
+        if (table->delete_cb && node->info) {
+            table->delete_cb (node->info);
             node->info = NULL;
         }
 
-        sr_table_node_delete (tree, node);
+        sr_table_node_delete (table, node);
         return 1;
     }
 
     return 0;
 }
 
-/* Crate a new node in a given prefix tree */
+/* Crate a new node in a given prefix table */
 struct sr_table_node *
-sr_table_node_new (struct sr_table *tree, u_int8_t *key, u_int8_t keylen)
+sr_table_node_new (struct sr_table *table, u_int8_t *key, u_int8_t keylen)
 {
     size_t size;
     struct sr_table_node *node;
 
-    size = sizeof (struct sr_table_node) + tree->max_key_siz; 
+    size = sizeof (struct sr_table_node) + table->max_key_siz; 
 
     node = clib_mem_alloc (size);
     if (! node) {
@@ -106,16 +106,16 @@ sr_table_node_new (struct sr_table *tree, u_int8_t *key, u_int8_t keylen)
     }
 
     node->key_len = keylen;
-    memcpy (node->key, key, tree->max_key_siz);
+    memcpy (node->key, key, table->max_key_siz);
 
-    node->tree = tree;
+    node->table = table;
 
     return node;
 }
 
-/* Create a new node in a given prefix tree with the intermidiate node */
+/* Create a new node in a given prefix table with the intermidiate node */
 struct sr_table_node *
-sr_table_node_base (struct sr_table *tree, struct sr_table_node *node, u_int8_t *key, u_int8_t keylen)
+sr_table_node_base (struct sr_table *table, struct sr_table_node *node, u_int8_t *key, u_int8_t keylen)
 {
     int i, j;
     int boundary = 0;
@@ -140,14 +140,14 @@ sr_table_node_base (struct sr_table *tree, struct sr_table_node *node, u_int8_t 
         }
     }
 
-    size = sizeof (struct sr_table_node) + tree->max_key_siz;
+    size = sizeof (struct sr_table_node) + table->max_key_siz;
 
     new = clib_mem_alloc (size);
     if (! new) {
         return NULL;
     }
 
-    new->tree = tree;
+    new->table = table;
 
     new->key_len = len;
     for (j = 0; j < i; j++) {
@@ -221,20 +221,20 @@ sr_table_node_set_link (struct sr_table_node *n1, struct sr_table_node *n2)
     n2->parent = n1;
 }
 
-/* Get the node in a given prefix tree. If not present, a new node is created */
+/* Get the node in a given prefix table. If not present, a new node is created */
 struct sr_table_node *
-sr_table_node_get (struct sr_table *tree, u_int8_t *key, u_int8_t keylen)
+sr_table_node_get (struct sr_table *table, u_int8_t *key, u_int8_t keylen)
 {
     struct sr_table_node *match = NULL;
     struct sr_table_node *node;
     struct sr_table_node *new;
     struct sr_table_node *n;
 
-    if (keylen > tree->max_key_len) {
+    if (keylen > table->max_key_len) {
         return NULL;
     }
 
-    node = tree->top;
+    node = table->top;
     while (node != NULL && node->key_len <= keylen) {
         if (sr_table_node_key_match (node->key, node->key_len, key, keylen)) {
             if (node->key_len == keylen) {
@@ -253,7 +253,7 @@ sr_table_node_get (struct sr_table *tree, u_int8_t *key, u_int8_t keylen)
     }
 
     if (node == NULL) {
-        new = sr_table_node_new (tree, key, keylen);
+        new = sr_table_node_new (table, key, keylen);
         if (! new) {
             return NULL;
         }
@@ -261,10 +261,10 @@ sr_table_node_get (struct sr_table *tree, u_int8_t *key, u_int8_t keylen)
         if (match != NULL) {
             sr_table_node_set_link (match, new);
         } else {
-            tree->top = new;
+            table->top = new;
         }
     } else {
-        new = sr_table_node_base (tree, node, key, keylen);
+        new = sr_table_node_base (table, node, key, keylen);
         if (! new) {
             return NULL;
         }
@@ -274,11 +274,11 @@ sr_table_node_get (struct sr_table *tree, u_int8_t *key, u_int8_t keylen)
         if (match != NULL) {
             sr_table_node_set_link (match, new);
         } else {
-            tree->top = new;
+            table->top = new;
         }
 
         if (new->key_len != keylen) {
-          n = sr_table_node_new (tree, key, keylen);
+          n = sr_table_node_new (table, key, keylen);
           sr_table_node_set_link (new, n);
           new = n;
         }
@@ -293,15 +293,15 @@ sr_table_node_get (struct sr_table *tree, u_int8_t *key, u_int8_t keylen)
 
 /* Exact match */
 struct sr_table_node *
-sr_table_node_lookup (struct sr_table *tree, u_int8_t *key, u_int8_t keylen)
+sr_table_node_lookup (struct sr_table *table, u_int8_t *key, u_int8_t keylen)
 {
     struct sr_table_node *node;
 
-    if (keylen > tree->max_key_len) {
+    if (keylen > table->max_key_len) {
         return NULL;
     }
 
-    node = tree->top;
+    node = table->top;
     while (node != NULL && node->key_len <= keylen) {
         if (sr_table_node_key_match (node->key, node->key_len, key, keylen)) {
             if (node->key_len == keylen) {
@@ -324,16 +324,16 @@ sr_table_node_lookup (struct sr_table *tree, u_int8_t *key, u_int8_t keylen)
 
 /* Longest match */
 struct sr_table_node *
-sr_table_node_match (struct sr_table *tree, u_int8_t *key, u_int8_t keylen)
+sr_table_node_match (struct sr_table *table, u_int8_t *key, u_int8_t keylen)
 {
     struct sr_table_node *node;
     struct sr_table_node *match = NULL;
     
-    if (keylen > tree->max_key_len) {
+    if (keylen > table->max_key_len) {
         return NULL;
     }
     
-    node = tree->top;
+    node = table->top;
     while (node != NULL && node->key_len <= keylen) {
         if (sr_table_node_key_match (node->key, node->key_len, key, keylen)) {
             match = node;
@@ -351,9 +351,9 @@ sr_table_node_match (struct sr_table *tree, u_int8_t *key, u_int8_t keylen)
     return match;
 }
 
-/* Delete the node in a given prefix tree */
+/* Delete the node in a given prefix table */
 int
-sr_table_node_delete (struct sr_table *tree, struct sr_table_node *node)
+sr_table_node_delete (struct sr_table *table, struct sr_table_node *node)
 {
     struct sr_table_node *parent;
     struct sr_table_node *child;
@@ -386,7 +386,7 @@ sr_table_node_delete (struct sr_table *tree, struct sr_table_node *node)
             parent->link[1] = child;
         }
     } else {
-        tree->top = child;
+        table->top = child;
     }
 
     clib_mem_free (node);
@@ -400,11 +400,11 @@ sr_table_node_delete (struct sr_table *tree, struct sr_table_node *node)
 
 /* Delete the node having a given key */
 int
-sr_table_node_release (struct sr_table *tree, u_int8_t *key, u_int8_t keylen)
+sr_table_node_release (struct sr_table *table, u_int8_t *key, u_int8_t keylen)
 {
     struct sr_table_node *node;
 
-    node = sr_table_node_lookup (tree, key, keylen);
+    node = sr_table_node_lookup (table, key, keylen);
     if (node != NULL) {
 	    sr_table_node_unlock (node);
     }
@@ -412,13 +412,13 @@ sr_table_node_release (struct sr_table *tree, u_int8_t *key, u_int8_t keylen)
     return PTREE_SUCCESS;
 }
 
-/* Return the top node in a given prefix tree */
+/* Return the top node in a given prefix table */
 struct sr_table_node *
-sr_table_top (struct sr_table *tree)
+sr_table_top (struct sr_table *table)
 {
     struct sr_table_node *node;
 
-    node = tree->top;
+    node = table->top;
 
     sr_table_node_lock (node);
 
