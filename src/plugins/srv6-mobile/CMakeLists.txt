@@ -21,7 +21,7 @@ add_vpp_plugin(srv6mobile
   gtp6_d_di.c
   gtp6_dt.c
   node.c
-  sr_mobile_util_ptree.c
+  sr_mobile_util_table.c
 
   INSTALL_HEADERS
   mobile.h

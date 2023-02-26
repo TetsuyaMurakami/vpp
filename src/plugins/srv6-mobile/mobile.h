@@ -28,7 +28,7 @@
 #include <vppinfra/error.h>
 #include <vppinfra/elog.h>
 
-#include "sr_mobile_util_ptree.h"
+#include "sr_mobile_util_table.h"
 
 #define SRV6_GTP_UDP_DST_PORT 2152
 
@@ -198,7 +198,7 @@ typedef struct srv6_end_gtp6_d_param_s
   ip6_address_t sid;
   ip6_header_t ip;
 
-  struct ptree *tedb;
+  struct sr_table *tedb;
 } srv6_end_gtp6_d_param_t;
 
 /* GTP6.DT */
@@ -261,7 +261,7 @@ typedef struct srv6_end_gtp4_d_param_s
   ip6_address_t sid;
   ip6_header_t ip;
 
-  struct ptree *tedb;
+  struct sr_table *tedb;
 } srv6_end_gtp4_d_param_t;
 
 typedef struct srv6_end_main_v4_s

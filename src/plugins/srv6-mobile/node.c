@@ -1214,13 +1214,13 @@ VLIB_NODE_FN (srv6_t_m_gtp4_d) (vlib_main_t * vm,
 
           if (ls_param->tedb != NULL)
             {
-              struct ptree_node *node;
+              struct sr_table_node *node;
 
               //teid = clib_net_to_host_u32(hdr->gtpu.teid);
               teid = hdr->gtpu.teid;
-              node = ptree_node_match (ls_param->tedb, (u8 *)&teid, 32);
+              node = sr_table_node_match (ls_param->tedb, (u8 *)&teid, 32);
               if (node != NULL) {
-                ls_param = (srv6_end_gtp4_d_param_t *)ptree_node_get_data (node);
+                ls_param = (srv6_end_gtp4_d_param_t *)sr_table_node_get_data (node);
               }
             }
 
@@ -2196,14 +2196,14 @@ VLIB_NODE_FN (srv6_end_m_gtp6_d) (vlib_main_t * vm,
     
           if (ls_param->tedb != NULL)
             {
-              struct ptree_node *node;
+              struct sr_table_node *node;
 
               //teid = clib_net_to_host_u32 (hdr->gtpu.teid);
               teid = hdr->gtpu.teid;
-              node = ptree_node_match (ls_param->tedb, (u8 *)&teid, 32);
+              node = sr_table_node_match (ls_param->tedb, (u8 *)&teid, 32);
               if (node != NULL)
                 {
-                  ls_param = (srv6_end_gtp6_d_param_t *)ptree_node_get_data (node);
+                  ls_param = (srv6_end_gtp6_d_param_t *)sr_table_node_get_data (node);
                 }
             }
 
