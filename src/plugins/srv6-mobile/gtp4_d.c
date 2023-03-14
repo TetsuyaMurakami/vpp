@@ -205,6 +205,7 @@ clb_unformat_srv6_t_m_gtp4_d (unformat_input_t * input, va_list * args)
       clib_memset (ls_mem, 0, sizeof *ls_mem);
       *plugin_mem_p = ls_mem;
 
+      ls_mem->is_active = true;
       ls_mem->sr_prefix = sr_prefix;
       ls_mem->sr_prefixlen = sr_prefixlen;
 
@@ -239,59 +240,62 @@ clb_unformat_srv6_t_m_gtp4_d (unformat_input_t * input, va_list * args)
       if (ls_mem == NULL)
         {
           ls_mem = clib_mem_alloc_aligned_at_offset (sizeof *ls_mem, 0, 0, 1);
+          if (ls_mem == NULL)
+            return 0;
+
           clib_memset (ls_mem, 0, sizeof *ls_mem);
+
+          ls_mem->tedb = sr_table_new (AF_INET, 32, NULL);
+          if (ls_mem->tedb == NULL)
+            {
+              clib_mem_free(ls_mem);
+              return 0;
+            }
+
           *plugin_mem_p = ls_mem;
         }
 
-        if (ls_mem->tedb == NULL)
-          {
-            ls_mem->tedb = sr_table_new (AF_INET, 32, NULL);
-            if (ls_mem->tedb == NULL)
-              {
-                return 0;
-              }
-          }
+      teid = clib_host_to_net_u32(teid);
+      node = sr_table_node_get (ls_mem->tedb, (u8 *)&teid, teid_len);
+      if (node == NULL)
+        {
+          return 0;
+        }
 
-        teid = clib_host_to_net_u32(teid);
-        node = sr_table_node_get (ls_mem->tedb, (u8 *)&teid, teid_len);
-        if (node == NULL)
-          {
-            return 0;
-          }
+      p_mem = sr_table_node_get_data (node);
+      if (p_mem == NULL)
+        {
+          p_mem = clib_mem_alloc_aligned_at_offset (sizeof *p_mem, 0, 0, 1);
+          clib_memset (p_mem, 0, sizeof *p_mem);
+          sr_table_node_set_data (node, p_mem);
+        }
 
-        p_mem = sr_table_node_get_data (node);
-        if (p_mem == NULL)
-          {
-            p_mem = clib_mem_alloc_aligned_at_offset (sizeof *p_mem, 0, 0, 1);
-            clib_memset (p_mem, 0, sizeof *p_mem);
-            sr_table_node_set_data (node, p_mem);
-          }
+      p_mem->is_active = true;
+      p_mem->sr_prefix = sr_prefix;
+      p_mem->sr_prefixlen = sr_prefixlen;
 
-        p_mem->sr_prefix = sr_prefix;
-        p_mem->sr_prefixlen = sr_prefixlen;
+      p_mem->v6src_prefix = v6src_prefix;
+      p_mem->v6src_prefixlen = v6src_prefixlen;
 
-        p_mem->v6src_prefix = v6src_prefix;
-        p_mem->v6src_prefixlen = v6src_prefixlen;
+      p_mem->nhtype = nhtype;
+      p_mem->drop_in = drop_in;
 
-        p_mem->nhtype = nhtype;
-        p_mem->drop_in = drop_in;
+      p_mem->sid_present = is_sid;
+      if (is_sid)
+        {
+          iph = &p_mem->ip;
+          iph->ip_version_traffic_class_and_flow_label =
+          clib_host_to_net_u32(0 | ((6 & 0xF) << 28));
+          iph->src_address.as_u64[0] = sr_pr_encaps_src.as_u64[0];
+          iph->src_address.as_u64[1] = sr_pr_encaps_src.as_u64[1];
+          iph->dst_address.as_u64[0] = sid.as_u64[0];
+          iph->dst_address.as_u64[1] = sid.as_u64[1];
+          iph->hop_limit = sr_pr_encaps_hop_limit;
+       }           
 
-        p_mem->sid_present = is_sid;
-        if (is_sid)
-          {
-            iph = &p_mem->ip;
-            iph->ip_version_traffic_class_and_flow_label =
-            clib_host_to_net_u32(0 | ((6 & 0xF) << 28));
-            iph->src_address.as_u64[0] = sr_pr_encaps_src.as_u64[0];
-            iph->src_address.as_u64[1] = sr_pr_encaps_src.as_u64[1];
-            iph->dst_address.as_u64[0] = sid.as_u64[0];
-            iph->dst_address.as_u64[1] = sid.as_u64[1];
-            iph->hop_limit = sr_pr_encaps_hop_limit;
-        }           
-
-        p_mem->fib_table = fib_table;
-        p_mem->fib4_index = ip4_fib_index_from_table_id (fib_table);
-        p_mem->fib6_index = ip6_fib_index_from_table_id (fib_table);
+      p_mem->fib_table = fib_table;
+      p_mem->fib4_index = ip4_fib_index_from_table_id (fib_table);
+      p_mem->fib6_index = ip6_fib_index_from_table_id (fib_table);
     }
 
   return 1;

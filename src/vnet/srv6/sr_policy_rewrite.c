@@ -984,26 +984,25 @@ sr_policy_command_fn (vlib_main_t * vm, unformat_input_t * input,
 	    });
 	  /* *INDENT-ON* */
 
-      if (sr_policy_index == (u32) ~ 0)
+      if (policy_set)
         {
-          p = mhash_get (&sm->sr_policies_index_hash, &bsid);
-          if (p)
-            sr_policy = pool_elt_at_index (sm->sr_policies, p[0]);
-        }
-      else
-        {
-          sr_policy = pool_elt_at_index (sm->sr_policies, sr_policy_index);
-        }
-
-      if (sr_policy)
-        {
-          ls_plugin_mem = sr_policy->plugin_mem;
+          if (sr_policy_index == (u32) ~ 0)
+            {
+              p = mhash_get (&sm->sr_policies_index_hash, &bsid);
+              if (p)
+                sr_policy = pool_elt_at_index (sm->sr_policies, p[0]);
+            }
+          else
+            {
+              sr_policy = pool_elt_at_index (sm->sr_policies, sr_policy_index);
+            }
         }
 
 	  vec_foreach (plugin_it, vec_plugins)
 	  {
 	    if (unformat
-		(input, "%U", (*plugin_it)->ls_unformat, &ls_plugin_mem))
+		(input, "%U", (*plugin_it)->ls_unformat,
+            sr_policy ? &sr_policy->plugin_mem : &ls_plugin_mem))
 	      {
 		behavior = (*plugin_it)->sr_policy_function_number;
 		operation = 4;

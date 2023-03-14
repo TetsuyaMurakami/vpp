@@ -1224,7 +1224,7 @@ VLIB_NODE_FN (srv6_t_m_gtp4_d) (vlib_main_t * vm,
               }
             }
 
-          if (PREDICT_FALSE ((ls_param == NULL) || (ls_param->sr_prefixlen == 0)))
+          if (PREDICT_FALSE ((ls_param == NULL) || (ls_param->is_active == false)))
             {
               next0 = SRV6_T_M_GTP4_D_NEXT_DROP;
               goto DONE;
@@ -2207,7 +2207,7 @@ VLIB_NODE_FN (srv6_end_m_gtp6_d) (vlib_main_t * vm,
                 }
             }
 
-          if (PREDICT_FALSE ((ls_param == NULL) || (ls_param->sr_prefixlen == 0)))
+          if (PREDICT_FALSE ((ls_param == NULL) || (ls_param->is_active == false)))
             {
               next0 = SRV6_END_M_GTP6_D_NEXT_DROP;
               goto DONE;

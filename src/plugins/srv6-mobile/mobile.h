@@ -183,6 +183,8 @@ typedef struct
 /* GTP6.D, GTP6.Di */
 typedef struct srv6_end_gtp6_d_param_s
 {
+  bool is_active;
+
   u8 nhtype;
 
   ip6_address_t sr_prefix;
@@ -243,6 +245,8 @@ typedef struct srv6_end_gtp4_e_param_s
 /* GTP4.D */
 typedef struct srv6_end_gtp4_d_param_s
 {
+  bool is_active;
+
   u8 nhtype;
 
   ip6_address_t sr_prefix;

@@ -26,7 +26,10 @@ sr_table_new (u_int8_t family, u_int8_t max_keylen, sr_table_del_cb_t del)
         return NULL;
     }
 
-    table->family = family; table->max_key_len = max_keylen;
+    clib_memset (table, 0, sizeof(*table));
+
+    table->family = family;
+    table->max_key_len = max_keylen;
 
     table->max_key_siz = (max_keylen >> 3);
     if ((max_keylen & 0x7) != 0) {
@@ -105,6 +108,8 @@ sr_table_node_new (struct sr_table *table, u_int8_t *key, u_int8_t keylen)
         return NULL;
     }
 
+    clib_memset (node, 0, size);
+
     node->key_len = keylen;
     memcpy (node->key, key, table->max_key_siz);
 
@@ -146,6 +151,8 @@ sr_table_node_base (struct sr_table *table, struct sr_table_node *node, u_int8_t
     if (! new) {
         return NULL;
     }
+
+    clib_memset (new, 0, size);
 
     new->table = table;
 

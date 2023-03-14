@@ -209,6 +209,7 @@ clb_unformat_srv6_end_m_gtp6_d (unformat_input_t * input, va_list * args)
           sr_table_node_set_data (node, p_mem);
         }
 
+      p_mem->is_active = true;
       p_mem->sr_prefix = sr_prefix;
       p_mem->sr_prefixlen = sr_prefixlen;
 
@@ -236,6 +237,7 @@ clb_unformat_srv6_end_m_gtp6_d (unformat_input_t * input, va_list * args)
     }
   else
     {
+      ls_mem->is_active = true;
       ls_mem->sr_prefix = sr_prefix;
       ls_mem->sr_prefixlen = sr_prefixlen;
 
