@@ -73,6 +73,14 @@ static u8 def_str[] =
 static u8 param_str[] =
   "<sr-prefix>/<sr-prefixlen> v6src_prefix <v6src_prefix>/<prefixlen> [nhtype <nhtype>] fib-table <id> teid <teid>/<length> sid <sid>";
 
+static int
+gtp4_d_teid_param_free (void *info)
+{
+  clib_mem_free(info);
+
+  return 0;
+}
+
 static u8 *
 clb_format_srv6_t_m_gtp4_d (u8 * s, va_list * args)
 {
@@ -245,7 +253,7 @@ clb_unformat_srv6_t_m_gtp4_d (unformat_input_t * input, va_list * args)
 
           clib_memset (ls_mem, 0, sizeof *ls_mem);
 
-          ls_mem->tedb = sr_table_new (AF_INET, 32, NULL);
+          ls_mem->tedb = sr_table_new (AF_INET, 32, gtp4_d_teid_param_free);
           if (ls_mem->tedb == NULL)
             {
               clib_mem_free(ls_mem);
@@ -313,6 +321,10 @@ clb_removal_srv6_t_m_gtp4_d (ip6_sr_policy_t * sr_policy)
   srv6_end_gtp4_d_param_t *ls_mem;
 
   ls_mem = (srv6_end_gtp4_d_param_t *) sr_policy->plugin_mem;
+
+  if (ls_mem->tedb) {
+     sr_table_delete (ls_mem->tedb, 1);
+  } 
 
   clib_mem_free (ls_mem);
 
