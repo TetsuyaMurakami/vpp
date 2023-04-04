@@ -1668,6 +1668,7 @@ VLIB_NODE_FN (srv6_end_m_gtp6_e) (vlib_main_t * vm,
           hdr0->udp.src_port = port;
 
           vnet_buffer (b0)->sw_if_index[VLIB_TX] = ls_param->fib6_index;
+          b0->flags |= VNET_BUFFER_F_OFFLOAD_UDP_CKSUM;
 
           good_n++;
 
