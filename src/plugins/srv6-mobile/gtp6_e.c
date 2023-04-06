@@ -81,8 +81,26 @@ clb_unformat_srv6_end_m_gtp6_e (unformat_input_t * input, va_list * args)
   void **plugin_mem_p = va_arg (*args, void **);
   srv6_end_gtp6_e_param_t *ls_mem;
   u32 fib_table;
+  bool config = false;
+  bool is_cksum = false;
 
-  if (!unformat (input, "end.m.gtp6.e fib-table %d", &fib_table))
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (input, "end.m.gtp6.e fib-table %d", &fib_table))
+        {
+          config = true;
+        }
+      else if (unformat (input, "checksum"))
+        {
+          is_cksum = true;
+        }
+      else
+        {
+          return 0;
+        }
+    }
+
+  if (!config)
     return 0;
 
   ls_mem = clib_mem_alloc_aligned_at_offset (sizeof *ls_mem, 0, 0, 1);
@@ -92,6 +110,8 @@ clb_unformat_srv6_end_m_gtp6_e (unformat_input_t * input, va_list * args)
   ls_mem->fib_table = fib_table;
   ls_mem->fib4_index = ip4_fib_index_from_table_id (fib_table);
   ls_mem->fib6_index = ip6_fib_index_from_table_id (fib_table);
+
+  ls_mem->cksum = is_cksum;
 
   return 1;
 }

@@ -219,6 +219,7 @@ typedef struct srv6_end_gtp6_e_param_s
   u32 fib_table;
   u32 fib4_index;
   u32 fib6_index;
+  bool cksum;
 } srv6_end_gtp6_e_param_t;
 
 /* GTP4.DT */
