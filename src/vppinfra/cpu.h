@@ -19,34 +19,33 @@
 #include <sys/syscall.h>
 #include <vppinfra/format.h>
 
-/*
- * multiarchitecture support. Adding new entry will produce
- * new graph node function variant optimized for specific cpu
- * microarchitecture.
- * Order is important for runtime selection, as 1st match wins...
- */
-
-#if __x86_64__ && CLIB_DEBUG == 0
-#define foreach_march_variant(macro, x) \
-  macro(avx2,  x, "arch=core-avx2")
+#if defined(__x86_64__)
+#define foreach_march_variant                                                 \
+  _ (hsw, "Intel Haswell")                                                    \
+  _ (trm, "Intel Tremont")                                                    \
+  _ (skx, "Intel Skylake (server) / Cascade Lake")                            \
+  _ (icl, "Intel Ice Lake")                                                   \
+  _ (adl, "Intel Alder Lake")                                                 \
+  _ (spr, "Intel Sapphire Rapids")
+#elif defined(__aarch64__)
+#define foreach_march_variant                                                 \
+  _ (octeontx2, "Marvell Octeon TX2")                                         \
+  _ (thunderx2t99, "Marvell ThunderX2 T99")                                   \
+  _ (qdf24xx, "Qualcomm CentriqTM 2400")                                      \
+  _ (cortexa72, "ARM Cortex-A72")                                             \
+  _ (neoversen1, "ARM Neoverse N1")
 #else
-#define foreach_march_variant(macro, x)
+#define foreach_march_variant
 #endif
 
-
-#if __GNUC__ > 4  && !__clang__ && CLIB_DEBUG == 0
-#define CLIB_CPU_OPTIMIZED __attribute__ ((optimize ("O3")))
-#else
-#define CLIB_CPU_OPTIMIZED
-#endif
-
-
-#define CLIB_MULTIARCH_ARCH_CHECK(arch, fn, tgt)			\
-  if (clib_cpu_supports_ ## arch())					\
-    return & fn ## _ ##arch;
-
-/* FIXME to be removed */
-#define CLIB_MULTIARCH_SELECT_FN(fn,...)
+typedef enum
+{
+  CLIB_MARCH_VARIANT_TYPE = 0,
+#define _(s, n) CLIB_MARCH_VARIANT_TYPE_##s,
+  foreach_march_variant
+#undef _
+    CLIB_MARCH_TYPE_N_VARIANTS
+} clib_march_variant_type_t;
 
 #ifdef CLIB_MARCH_VARIANT
 #define __CLIB_MULTIARCH_FN(a,b) a##_##b
@@ -84,7 +83,10 @@ clib_march_select_fn_ptr (clib_march_fn_registration * r)
   return rv;
 }
 
-#define CLIB_MARCH_FN_POINTER(fn) \
+#define CLIB_MARCH_FN_POINTER(fn)                                             \
+  (__typeof__ (fn) *) clib_march_select_fn_ptr (fn##_march_fn_registrations);
+
+#define CLIB_MARCH_FN_VOID_POINTER(fn)                                        \
   clib_march_select_fn_ptr (fn##_march_fn_registrations);
 
 #define _CLIB_MARCH_FN_REGISTRATION(fn) \
@@ -123,6 +125,7 @@ _CLIB_MARCH_FN_REGISTRATION(fn)
   _ (avx, 1, ecx, 28)                                                         \
   _ (rdrand, 1, ecx, 30)                                                      \
   _ (avx2, 7, ebx, 5)                                                         \
+  _ (bmi2, 7, ebx, 8)                                                         \
   _ (rtm, 7, ebx, 11)                                                         \
   _ (pqm, 7, ebx, 12)                                                         \
   _ (pqe, 7, ebx, 15)                                                         \
@@ -137,6 +140,8 @@ _CLIB_MARCH_FN_REGISTRATION(fn)
   _ (avx512_vpopcntdq, 7, ecx, 14)                                            \
   _ (movdiri, 7, ecx, 27)                                                     \
   _ (movdir64b, 7, ecx, 28)                                                   \
+  _ (enqcmd, 7, ecx, 29)                                                      \
+  _ (avx512_fp16, 7, edx, 23)                                                 \
   _ (invariant_tsc, 0x80000007, edx, 8)
 
 #define foreach_aarch64_flags \
@@ -164,21 +169,10 @@ _ (asimddp,    20) \
 _ (sha512,     21) \
 _ (sve,        22)
 
-static inline u32
-clib_get_current_cpu_id ()
-{
-  unsigned cpu, node;
-  syscall (__NR_getcpu, &cpu, &node, 0);
-  return cpu;
-}
+u32 clib_get_current_cpu_id (void);
+u32 clib_get_current_numa_node (void);
 
-static inline u32
-clib_get_current_numa_node ()
-{
-  unsigned cpu, node;
-  syscall (__NR_getcpu, &cpu, &node, 0);
-  return node;
-}
+typedef int (*clib_cpu_supports_func_t) (void);
 
 #if defined(__x86_64__)
 #include "cpuid.h"
@@ -194,7 +188,6 @@ clib_get_cpuid (const u32 lev, u32 * eax, u32 * ebx, u32 * ecx, u32 * edx)
     __cpuid (lev, *eax, *ebx, *ecx, *edx);
   return 1;
 }
-
 
 #define _(flag, func, reg, bit) \
 static inline int							\
@@ -249,10 +242,26 @@ clib_cpu_supports_aes ()
 }
 
 static inline int
+clib_cpu_march_priority_spr ()
+{
+  if (clib_cpu_supports_enqcmd ())
+    return 300;
+  return -1;
+}
+
+static inline int
 clib_cpu_march_priority_icl ()
 {
   if (clib_cpu_supports_avx512_bitalg ())
     return 200;
+  return -1;
+}
+
+static inline int
+clib_cpu_march_priority_adl ()
+{
+  if (clib_cpu_supports_movdiri () && clib_cpu_supports_avx2 ())
+    return 150;
   return -1;
 }
 
@@ -268,7 +277,7 @@ static inline int
 clib_cpu_march_priority_trm ()
 {
   if (clib_cpu_supports_movdiri ())
-    return 60;
+    return 40;
   return -1;
 }
 
@@ -278,6 +287,24 @@ clib_cpu_march_priority_hsw ()
   if (clib_cpu_supports_avx2 ())
     return 50;
   return -1;
+}
+
+#define X86_CPU_ARCH_PERF_FUNC 0xA
+
+static inline int
+clib_get_pmu_counter_count (u8 *fixed, u8 *general)
+{
+#if defined(__x86_64__)
+  u32 __clib_unused eax = 0, ebx = 0, ecx = 0, edx = 0;
+  clib_get_cpuid (X86_CPU_ARCH_PERF_FUNC, &eax, &ebx, &ecx, &edx);
+
+  *general = (eax & 0xFF00) >> 8;
+  *fixed = (edx & 0xF);
+
+  return 1;
+#else
+  return 0;
+#endif
 }
 
 static inline u32
@@ -412,19 +439,18 @@ CLIB_MARCH_SFX(fn ## _march_constructor) (void)				\
 }									\
 
 #ifndef CLIB_MARCH_VARIANT
-#define CLIB_MARCH_FN(fn, rtype, _args...)				\
-  static rtype CLIB_CPU_OPTIMIZED CLIB_MARCH_SFX (fn ## _ma)(_args);	\
-  rtype (*fn ## _selected) (_args) = & CLIB_MARCH_SFX (fn ## _ma);	\
-  int fn ## _selected_priority = 0;					\
-  static inline rtype CLIB_CPU_OPTIMIZED 				\
-  CLIB_MARCH_SFX (fn ## _ma)(_args)
+#define CLIB_MARCH_FN(fn, rtype, _args...)                                    \
+  static rtype CLIB_MARCH_SFX (fn##_ma) (_args);                              \
+  rtype (*fn##_selected) (_args) = &CLIB_MARCH_SFX (fn##_ma);                 \
+  int fn##_selected_priority = 0;                                             \
+  static inline rtype CLIB_MARCH_SFX (fn##_ma) (_args)
 #else
-#define CLIB_MARCH_FN(fn, rtype, _args...)				\
-  static rtype CLIB_CPU_OPTIMIZED CLIB_MARCH_SFX (fn ## _ma)(_args);	\
-  extern rtype (*fn ## _selected) (_args);				\
-  extern int fn ## _selected_priority;					\
-  CLIB_MARCH_FN_CONSTRUCTOR (fn)					\
-  static rtype CLIB_CPU_OPTIMIZED CLIB_MARCH_SFX (fn ## _ma)(_args)
+#define CLIB_MARCH_FN(fn, rtype, _args...)                                    \
+  static rtype CLIB_MARCH_SFX (fn##_ma) (_args);                              \
+  extern rtype (*fn##_selected) (_args);                                      \
+  extern int fn##_selected_priority;                                          \
+  CLIB_MARCH_FN_CONSTRUCTOR (fn)                                              \
+  static rtype CLIB_MARCH_SFX (fn##_ma) (_args)
 #endif
 
 #define CLIB_MARCH_FN_SELECT(fn) (* fn ## _selected)
@@ -432,6 +458,7 @@ CLIB_MARCH_SFX(fn ## _march_constructor) (void)				\
 format_function_t format_cpu_uarch;
 format_function_t format_cpu_model_name;
 format_function_t format_cpu_flags;
+format_function_t format_march_variant;
 
 /*
  * fd.io coding-style-patch-verification: ON

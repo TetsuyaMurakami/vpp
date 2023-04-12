@@ -22,17 +22,24 @@ format_vnet_buffer_offload (u8 *s, va_list *args)
   vlib_buffer_t *b = va_arg (*args, vlib_buffer_t *);
 
 #define _(bit, name, ss, v)                                                   \
-  if (v && (vnet_buffer2 (b)->oflags & VNET_BUFFER_OFFLOAD_F_##name))         \
+  if (v && (vnet_buffer (b)->oflags & VNET_BUFFER_OFFLOAD_F_##name))          \
     s = format (s, "%s ", ss);
   foreach_vnet_buffer_offload_flag
 #undef _
+
+    if (vnet_buffer (b)->oflags & VNET_BUFFER_OFFLOAD_F_TNL_MASK)
+  {
+    s = format (s, "outer-l3-hdr-offset %d ",
+		vnet_buffer2 (b)->outer_l3_hdr_offset);
+    s = format (s, "outer-l4-hdr-offset %d ",
+		vnet_buffer2 (b)->outer_l4_hdr_offset);
+  }
     return s;
 }
 
-u8 *
-format_vnet_buffer (u8 * s, va_list * args)
+static u8 *
+format_vnet_buffer_internal (u8 *s, vlib_buffer_t *b, int no_chain)
 {
-  vlib_buffer_t *b = va_arg (*args, vlib_buffer_t *);
   u32 indent = format_get_indent (s);
   u8 *a = 0;
 
@@ -54,7 +61,8 @@ format_vnet_buffer (u8 * s, va_list * args)
     a = format (a, "l4-hdr-offset %d ", vnet_buffer (b)->l4_hdr_offset);
 
   if (b->flags & VNET_BUFFER_F_GSO)
-    a = format (a, "gso gso-size %d", vnet_buffer2 (b)->gso_size);
+    a = format (a, "gso l4-hdr-len %d gso-size %d",
+		vnet_buffer2 (b)->gso_l4_hdr_sz, vnet_buffer2 (b)->gso_size);
 
   if (b->flags & VNET_BUFFER_F_QOS_DATA_VALID)
     a = format (a, "qos %d.%d ",
@@ -63,7 +71,8 @@ format_vnet_buffer (u8 * s, va_list * args)
   if (b->flags & VNET_BUFFER_F_LOOP_COUNTER_VALID)
     a = format (a, "loop-counter %d ", vnet_buffer2 (b)->loop_counter);
 
-  s = format (s, "%U", format_vlib_buffer_no_chain, b);
+  s = format (s, "%U",
+	      no_chain ? format_vlib_buffer_no_chain : format_vlib_buffer, b);
   if (a)
     s = format (s, "\n%U%v", format_white_space, indent, a);
   vec_free (a);
@@ -71,6 +80,19 @@ format_vnet_buffer (u8 * s, va_list * args)
   return s;
 }
 
+u8 *
+format_vnet_buffer_no_chain (u8 *s, va_list *args)
+{
+  vlib_buffer_t *b = va_arg (*args, vlib_buffer_t *);
+  return format_vnet_buffer_internal (s, b, 1 /* no_chain */);
+}
+
+u8 *
+format_vnet_buffer (u8 *s, va_list *args)
+{
+  vlib_buffer_t *b = va_arg (*args, vlib_buffer_t *);
+  return format_vnet_buffer_internal (s, b, 0 /* no_chain */);
+}
 
 /*
  * fd.io coding-style-patch-verification: ON

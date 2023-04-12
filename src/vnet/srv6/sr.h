@@ -75,6 +75,7 @@ typedef struct
 
   u8 *rewrite;					/**< Precomputed rewrite header */
   u8 *rewrite_bsid;				/**< Precomputed rewrite header for bindingSID */
+  u8 policy_type;
 
   u32 egress_fib_table; /**< Egress FIB table for encap packet */
 
@@ -89,6 +90,7 @@ typedef struct
 /* SR policy types */
 #define SR_POLICY_TYPE_DEFAULT 0
 #define SR_POLICY_TYPE_SPRAY 1
+#define SR_POLICY_TYPE_TEF     2
 /**
  * @brief SR Policy
  */
@@ -100,7 +102,7 @@ typedef struct
 
   u8 type;					/**< Type (default is 0) */
   /* SR Policy specific DPO                                       */
-  /* IF Type = DEFAULT Then Load Balancer DPO among SID lists     */
+  /* IF Type = DEFAULT Then Load-Balancer DPO among SID lists     */
   /* IF Type = SPRAY then Spray DPO with all SID lists            */
   dpo_id_t bsid_dpo;			/**< SR Policy specific DPO - BSID */
   dpo_id_t ip4_dpo;			/**< SR Policy specific DPO - IPv6 */
@@ -109,6 +111,8 @@ typedef struct
   u32 fib_table;			/**< FIB table */
 
   u8 is_encap;				/**< Mode (0 is SRH insert, 1 Encaps) */
+
+  ip6_address_t encap_src;
 
   u16 plugin;
   void *plugin_mem;
@@ -127,7 +131,7 @@ typedef struct
 
   char end_psp;					/**< Combined with End.PSP? */
 
-  u16 behavior;					/**< Behavior associated to this localsid */
+  u8 behavior; /**< Behavior associated to this localsid */
 
   union
   {
@@ -309,6 +313,7 @@ typedef struct
   /* convenience */
   vlib_main_t *vlib_main;
   vnet_main_t *vnet_main;
+  u16 msg_id_base;
 } ip6_sr_main_t;
 
 extern ip6_sr_main_t sr_main;
@@ -341,13 +346,13 @@ sr_policy_register_function (vlib_main_t * vm, u8 * fn_name,
 			     sr_p_plugin_callback_t * creation_fn,
 			     sr_p_plugin_callback_t * removal_fn);
 
-extern int
-sr_policy_add (ip6_address_t * bsid, ip6_address_t * segments,
-	       u32 weight, u8 behavior, u32 fib_table, u8 is_encap,
-	       u16 plugin, void *plugin_mem);
-extern int sr_policy_mod (ip6_address_t * bsid, u32 index, u32 fib_table,
-			  u8 operation, ip6_address_t * segments,
-			  u32 sl_index, u32 weight);
+extern int sr_policy_add (ip6_address_t *bsid, ip6_address_t *segments,
+			  ip6_address_t *encap_src, u32 weight, u8 type,
+			  u32 fib_table, u8 is_encap, u16 plugin,
+			  void *plugin_mem);
+extern int sr_policy_mod (ip6_address_t *bsid, u32 index, u32 fib_table,
+			  u8 operation, ip6_address_t *segments,
+			  ip6_address_t *encap_src, u32 sl_index, u32 weight);
 extern int sr_policy_del (ip6_address_t * bsid, u32 index);
 
 extern int

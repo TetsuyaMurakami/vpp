@@ -71,6 +71,10 @@ tcp_add_del_adjacency (tcp_connection_t * tc, u8 is_add)
 static void
 tcp_cc_init (tcp_connection_t * tc)
 {
+  /* As per RFC 6582 initialize "recover" to iss */
+  if (tcp_opts_sack_permitted (&tc->rcv_opts))
+    tc->snd_congestion = tc->iss;
+
   tc->cc_algo->init (tc);
 }
 
@@ -108,7 +112,7 @@ tcp_cc_algo_new_type (const tcp_cc_algorithm_t * vft)
 }
 
 static u32
-tcp_connection_bind (u32 session_index, transport_endpoint_t * lcl)
+tcp_connection_bind (u32 session_index, transport_endpoint_cfg_t *lcl)
 {
   tcp_main_t *tm = &tcp_main;
   tcp_connection_t *listener;
@@ -143,7 +147,7 @@ tcp_connection_bind (u32 session_index, transport_endpoint_t * lcl)
 }
 
 static u32
-tcp_session_bind (u32 session_index, transport_endpoint_t * tep)
+tcp_session_bind (u32 session_index, transport_endpoint_cfg_t *tep)
 {
   return tcp_connection_bind (session_index, tep);
 }
@@ -181,6 +185,12 @@ tcp_session_get_listener (u32 listener_index)
   return &tc->connection;
 }
 
+static tcp_connection_t *
+tcp_half_open_connection_alloc (void)
+{
+  return tcp_connection_alloc (transport_cl_thread ());
+}
+
 /**
  * Cleanup half-open connection
  *
@@ -188,12 +198,9 @@ tcp_session_get_listener (u32 listener_index)
 static void
 tcp_half_open_connection_free (tcp_connection_t * tc)
 {
-  tcp_main_t *tm = vnet_get_tcp_main ();
-  clib_spinlock_lock_if_init (&tm->half_open_lock);
-  if (CLIB_DEBUG)
-    clib_memset (tc, 0xFA, sizeof (*tc));
-  pool_put (tm->half_open_connections, tc);
-  clib_spinlock_unlock_if_init (&tm->half_open_lock);
+  ASSERT (vlib_get_thread_index () == tc->c_thread_index ||
+	  vlib_thread_is_main_w_barrier ());
+  return tcp_connection_free (tc);
 }
 
 /**
@@ -214,23 +221,11 @@ tcp_half_open_connection_cleanup (tcp_connection_t * tc)
   if (tc->c_thread_index != vlib_get_thread_index ())
     return 1;
 
-  session_half_open_delete_notify (TRANSPORT_PROTO_TCP, tc->c_s_ho_handle);
+  session_half_open_delete_notify (&tc->connection);
   wrk = tcp_get_worker (tc->c_thread_index);
   tcp_timer_reset (&wrk->timer_wheel, tc, TCP_TIMER_RETRANSMIT_SYN);
   tcp_half_open_connection_free (tc);
   return 0;
-}
-
-static tcp_connection_t *
-tcp_half_open_connection_new (void)
-{
-  tcp_main_t *tm = vnet_get_tcp_main ();
-  tcp_connection_t *tc = 0;
-  ASSERT (vlib_get_thread_index () == 0);
-  pool_get (tm->half_open_connections, tc);
-  clib_memset (tc, 0, sizeof (*tc));
-  tc->c_c_index = tc - tm->half_open_connections;
-  return tc;
 }
 
 /**
@@ -245,8 +240,8 @@ tcp_connection_cleanup (tcp_connection_t * tc)
 
   /* Cleanup local endpoint if this was an active connect */
   if (!(tc->cfg_flags & TCP_CFG_F_NO_ENDPOINT))
-    transport_endpoint_cleanup (TRANSPORT_PROTO_TCP, &tc->c_lcl_ip,
-				tc->c_lcl_port);
+    transport_release_local_endpoint (TRANSPORT_PROTO_TCP, &tc->c_lcl_ip,
+				      tc->c_lcl_port);
 
   /* Check if connection is not yet fully established */
   if (tc->state == TCP_STATE_SYN_SENT)
@@ -298,7 +293,7 @@ tcp_connection_alloc (u8 thread_index)
   tcp_worker_ctx_t *wrk = tcp_get_worker (thread_index);
   tcp_connection_t *tc;
 
-  pool_get (wrk->connections, tc);
+  pool_get_aligned_safe (wrk->connections, tc, CLIB_CACHE_LINE_BYTES);
   clib_memset (tc, 0, sizeof (*tc));
   tc->c_c_index = tc - wrk->connections;
   tc->c_thread_index = thread_index;
@@ -306,13 +301,23 @@ tcp_connection_alloc (u8 thread_index)
 }
 
 tcp_connection_t *
-tcp_connection_alloc_w_base (u8 thread_index, tcp_connection_t * base)
+tcp_connection_alloc_w_base (u8 thread_index, tcp_connection_t **base)
 {
   tcp_worker_ctx_t *wrk = tcp_get_worker (thread_index);
   tcp_connection_t *tc;
 
-  pool_get (wrk->connections, tc);
-  clib_memcpy_fast (tc, base, sizeof (*tc));
+  /* Make sure connection is still valid if pool moves */
+  if ((*base)->c_thread_index == thread_index)
+    {
+      u32 base_index = (*base)->c_c_index;
+      pool_get_aligned_safe (wrk->connections, tc, CLIB_CACHE_LINE_BYTES);
+      *base = tcp_connection_get (base_index, thread_index);
+    }
+  else
+    {
+      pool_get_aligned_safe (wrk->connections, tc, CLIB_CACHE_LINE_BYTES);
+    }
+  clib_memcpy_fast (tc, *base, sizeof (*tc));
   tc->c_c_index = tc - wrk->connections;
   tc->c_thread_index = thread_index;
   return tc;
@@ -337,7 +342,7 @@ tcp_program_cleanup (tcp_worker_ctx_t * wrk, tcp_connection_t * tc)
   tcp_cleanup_req_t *req;
   clib_time_type_t now;
 
-  now = transport_time_now (tc->c_thread_index);
+  now = tcp_time_now_us (tc->c_thread_index);
   clib_fifo_add2 (wrk->pending_cleanups, req);
   req->connection_index = tc->c_c_index;
   req->free_time = now + tcp_cfg.cleanup_time;
@@ -354,7 +359,6 @@ tcp_program_cleanup (tcp_worker_ctx_t * wrk, tcp_connection_t * tc)
  * 2) TIME_WAIT (active close) whereby after 2MSL the 2MSL timer triggers
  * and cleanup is called.
  *
- * N.B. Half-close connections are not supported
  */
 void
 tcp_connection_close (tcp_connection_t * tc)
@@ -423,6 +427,30 @@ tcp_connection_close (tcp_connection_t * tc)
     default:
       TCP_DBG ("state: %u", tc->state);
     }
+}
+
+static void
+tcp_session_half_close (u32 conn_index, u32 thread_index)
+{
+  tcp_worker_ctx_t *wrk;
+  tcp_connection_t *tc;
+
+  tc = tcp_connection_get (conn_index, thread_index);
+  wrk = tcp_get_worker (tc->c_thread_index);
+
+  /* If the connection is not in ESTABLISHED state, ignore it */
+  if (tc->state != TCP_STATE_ESTABLISHED)
+    return;
+  if (!transport_max_tx_dequeue (&tc->connection))
+    tcp_send_fin (tc);
+  else
+    tc->flags |= TCP_CONN_FINPNDG;
+  tcp_connection_set_state (tc, TCP_STATE_FIN_WAIT_1);
+  /* Set a timer in case the peer stops responding. Otherwise the
+   * connection will be stuck here forever. */
+  ASSERT (tc->timers[TCP_TIMER_WAITCLOSE] == TCP_TIMER_HANDLE_INVALID);
+  tcp_timer_set (&wrk->timer_wheel, tc, TCP_TIMER_WAITCLOSE,
+		 tcp_cfg.finwait1_time);
 }
 
 static void
@@ -657,9 +685,10 @@ tcp_init_mss (tcp_connection_t * tc)
   /* We should have enough space for 40 bytes of options */
   ASSERT (tc->snd_mss > 45);
 
-  /* If we use timestamp option, account for it */
+  /* If we use timestamp option, account for it and make sure
+   * the options are 4-byte aligned */
   if (tcp_opts_tstamp (&tc->rcv_opts))
-    tc->snd_mss -= TCP_OPTION_LEN_TIMESTAMP;
+    tc->snd_mss -= TCP_OPTION_LEN_TIMESTAMP + 2 /* alignment */;
 }
 
 /**
@@ -674,10 +703,16 @@ tcp_init_snd_vars (tcp_connection_t * tc)
    * handshake may make it look as if time has flown in the opposite
    * direction for us.
    */
-  tcp_set_time_now (tcp_get_worker (vlib_get_thread_index ()));
+  tcp_update_time_now (tcp_get_worker (vlib_get_thread_index ()));
 
   tcp_init_rcv_mss (tc);
-  tc->iss = tcp_generate_random_iss (tc);
+  /*
+   * In special case of early-kill of timewait socket, the iss will already
+   * be initialized to ensure it is greater than the last incarnation of the
+   * connection. see syn_during_timewait() for more details.
+   */
+  if (!tc->iss)
+    tc->iss = tcp_generate_random_iss (tc);
   tc->snd_una = tc->iss;
   tc->snd_nxt = tc->iss + 1;
   tc->srtt = 0.1 * THZ;		/* 100 ms */
@@ -729,15 +764,18 @@ tcp_connection_init_vars (tcp_connection_t * tc)
 }
 
 static int
-tcp_alloc_custom_local_endpoint (tcp_main_t * tm, ip46_address_t * lcl_addr,
-				 u16 * lcl_port, u8 is_ip4)
+tcp_alloc_custom_local_endpoint (ip46_address_t *lcl_addr, u16 *lcl_port,
+				 transport_endpoint_cfg_t *rmt)
 {
+  tcp_main_t *tm = vnet_get_tcp_main ();
   int index, port;
-  if (is_ip4)
+
+  if (rmt->is_ip4)
     {
       index = tm->last_v4_addr_rotor++;
       if (tm->last_v4_addr_rotor >= vec_len (tcp_cfg.ip4_src_addrs))
 	tm->last_v4_addr_rotor = 0;
+      clib_memset (lcl_addr, 0, sizeof (*lcl_addr));
       lcl_addr->ip4.as_u32 = tcp_cfg.ip4_src_addrs[index].as_u32;
     }
   else
@@ -748,7 +786,7 @@ tcp_alloc_custom_local_endpoint (tcp_main_t * tm, ip46_address_t * lcl_addr,
       clib_memcpy_fast (&lcl_addr->ip6, &tcp_cfg.ip6_src_addrs[index],
 			sizeof (ip6_address_t));
     }
-  port = transport_alloc_local_port (TRANSPORT_PROTO_TCP, lcl_addr);
+  port = transport_alloc_local_port (TRANSPORT_PROTO_TCP, lcl_addr, rmt);
   if (port < 1)
     return SESSION_E_NOPORT;
   *lcl_port = port;
@@ -758,7 +796,6 @@ tcp_alloc_custom_local_endpoint (tcp_main_t * tm, ip46_address_t * lcl_addr,
 static int
 tcp_session_open (transport_endpoint_cfg_t * rmt)
 {
-  tcp_main_t *tm = vnet_get_tcp_main ();
   tcp_connection_t *tc;
   ip46_address_t lcl_addr;
   u16 lcl_port;
@@ -769,33 +806,18 @@ tcp_session_open (transport_endpoint_cfg_t * rmt)
    */
   if ((rmt->is_ip4 && vec_len (tcp_cfg.ip4_src_addrs))
       || (!rmt->is_ip4 && vec_len (tcp_cfg.ip6_src_addrs)))
-    rv = tcp_alloc_custom_local_endpoint (tm, &lcl_addr, &lcl_port,
-					  rmt->is_ip4);
+    rv = tcp_alloc_custom_local_endpoint (&lcl_addr, &lcl_port, rmt);
   else
-    rv = transport_alloc_local_endpoint (TRANSPORT_PROTO_TCP,
-					 rmt, &lcl_addr, &lcl_port);
+    rv = transport_alloc_local_endpoint (TRANSPORT_PROTO_TCP, rmt, &lcl_addr,
+					 &lcl_port);
 
   if (rv)
-    {
-      if (rv != SESSION_E_PORTINUSE)
-	return rv;
-
-      if (session_lookup_connection (rmt->fib_index, &lcl_addr, &rmt->ip,
-				     lcl_port, rmt->port, TRANSPORT_PROTO_UDP,
-				     rmt->is_ip4))
-	return SESSION_E_PORTINUSE;
-
-      /* 5-tuple is available so increase lcl endpoint refcount and proceed
-       * with connection allocation */
-      transport_share_local_endpoint (TRANSPORT_PROTO_UDP, &lcl_addr,
-				      lcl_port);
-    }
+    return rv;
 
   /*
    * Create connection and send SYN
    */
-  clib_spinlock_lock_if_init (&tm->half_open_lock);
-  tc = tcp_half_open_connection_new ();
+  tc = tcp_half_open_connection_alloc ();
   ip_copy (&tc->c_rmt_ip, &rmt->ip, rmt->is_ip4);
   ip_copy (&tc->c_lcl_ip, &lcl_addr, rmt->is_ip4);
   tc->c_rmt_port = rmt->port;
@@ -807,12 +829,15 @@ tcp_session_open (transport_endpoint_cfg_t * rmt)
   /* The other connection vars will be initialized after SYN ACK */
   tcp_connection_timers_init (tc);
   tc->mss = rmt->mss;
+  if (rmt->peer.sw_if_index != ENDPOINT_INVALID_INDEX)
+    tc->sw_if_index = rmt->peer.sw_if_index;
+  tc->next_node_index = rmt->next_node_index;
+  tc->next_node_opaque = rmt->next_node_opaque;
 
   TCP_EVT (TCP_EVT_OPEN, tc);
   tc->state = TCP_STATE_SYN_SENT;
   tcp_init_snd_vars (tc);
   tcp_send_syn (tc);
-  clib_spinlock_unlock_if_init (&tm->half_open_lock);
 
   return tc->c_c_index;
 }
@@ -852,8 +877,20 @@ format_tcp_half_open_session (u8 * s, va_list * args)
 {
   u32 tci = va_arg (*args, u32);
   u32 __clib_unused thread_index = va_arg (*args, u32);
-  tcp_connection_t *tc = tcp_half_open_connection_get (tci);
-  return format (s, "%U", format_tcp_connection_id, tc);
+  u32 verbose = va_arg (*args, u32);
+  tcp_connection_t *tc;
+  u8 *state = 0;
+
+  tc = tcp_half_open_connection_get (tci);
+  if (tc->flags & TCP_CONN_HALF_OPEN_DONE)
+    state = format (state, "%s", "CLOSED");
+  else
+    state = format (state, "%U", format_tcp_state, tc->state);
+  s = format (s, "%-" SESSION_CLI_ID_LEN "U", format_tcp_connection_id, tc);
+  if (verbose)
+    s = format (s, "%-" SESSION_CLI_STATE_LEN "v", state);
+  vec_free (state);
+  return s;
 }
 
 static transport_connection_t *
@@ -870,6 +907,115 @@ tcp_half_open_session_get_transport (u32 conn_index)
 {
   tcp_connection_t *tc = tcp_half_open_connection_get (conn_index);
   return &tc->connection;
+}
+
+static int
+tcp_set_attribute (tcp_connection_t *tc, transport_endpt_attr_t *attr)
+{
+  int rv = 0;
+
+  switch (attr->type)
+    {
+    case TRANSPORT_ENDPT_ATTR_NEXT_OUTPUT_NODE:
+      tc->next_node_index = attr->next_output_node & 0xffffffff;
+      tc->next_node_opaque = attr->next_output_node >> 32;
+      break;
+    case TRANSPORT_ENDPT_ATTR_MSS:
+      tc->mss = attr->mss;
+      tc->snd_mss = clib_min (tc->snd_mss, tc->mss);
+      break;
+    case TRANSPORT_ENDPT_ATTR_FLAGS:
+      if (attr->flags & TRANSPORT_ENDPT_ATTR_F_CSUM_OFFLOAD)
+	tc->cfg_flags |= TCP_CFG_F_NO_CSUM_OFFLOAD;
+      else
+	tc->cfg_flags &= ~TCP_CFG_F_NO_CSUM_OFFLOAD;
+      if (attr->flags & TRANSPORT_ENDPT_ATTR_F_GSO)
+	{
+	  if (!(tc->cfg_flags & TCP_CFG_F_TSO))
+	    tcp_check_gso (tc);
+	  tc->cfg_flags &= ~TCP_CFG_F_NO_TSO;
+	}
+      else
+	{
+	  tc->cfg_flags |= TCP_CFG_F_NO_TSO;
+	  tc->cfg_flags &= ~TCP_CFG_F_TSO;
+	}
+      if (attr->flags & TRANSPORT_ENDPT_ATTR_F_RATE_SAMPLING)
+	{
+	  if (!(tc->cfg_flags & TCP_CFG_F_RATE_SAMPLE))
+	    tcp_bt_init (tc);
+	  tc->cfg_flags |= TCP_CFG_F_RATE_SAMPLE;
+	}
+      else
+	{
+	  if (tc->cfg_flags & TCP_CFG_F_RATE_SAMPLE)
+	    tcp_bt_cleanup (tc);
+	  tc->cfg_flags &= ~TCP_CFG_F_RATE_SAMPLE;
+	}
+      break;
+    case TRANSPORT_ENDPT_ATTR_CC_ALGO:
+      if (tc->cc_algo == tcp_cc_algo_get (attr->cc_algo))
+	break;
+      tcp_cc_cleanup (tc);
+      tc->cc_algo = tcp_cc_algo_get (attr->cc_algo);
+      tcp_cc_init (tc);
+      break;
+    default:
+      rv = -1;
+      break;
+    }
+
+  return rv;
+}
+
+static int
+tcp_get_attribute (tcp_connection_t *tc, transport_endpt_attr_t *attr)
+{
+  int rv = 0;
+  u64 non;
+
+  switch (attr->type)
+    {
+    case TRANSPORT_ENDPT_ATTR_NEXT_OUTPUT_NODE:
+      non = (u64) tc->next_node_opaque << 32 | tc->next_node_index;
+      attr->next_output_node = non;
+      break;
+    case TRANSPORT_ENDPT_ATTR_MSS:
+      attr->mss = tc->snd_mss;
+      break;
+    case TRANSPORT_ENDPT_ATTR_FLAGS:
+      attr->flags = 0;
+      if (!(tc->cfg_flags & TCP_CFG_F_NO_CSUM_OFFLOAD))
+	attr->flags |= TRANSPORT_ENDPT_ATTR_F_CSUM_OFFLOAD;
+      if (tc->cfg_flags & TCP_CFG_F_TSO)
+	attr->flags |= TRANSPORT_ENDPT_ATTR_F_GSO;
+      if (tc->cfg_flags & TCP_CFG_F_RATE_SAMPLE)
+	attr->flags |= TRANSPORT_ENDPT_ATTR_F_RATE_SAMPLING;
+      break;
+    case TRANSPORT_ENDPT_ATTR_CC_ALGO:
+      attr->cc_algo = tc->cc_algo - tcp_main.cc_algos;
+      break;
+    default:
+      rv = -1;
+      break;
+    }
+
+  return rv;
+}
+
+static int
+tcp_session_attribute (u32 conn_index, u32 thread_index, u8 is_get,
+		       transport_endpt_attr_t *attr)
+{
+  tcp_connection_t *tc = tcp_connection_get (conn_index, thread_index);
+
+  if (PREDICT_FALSE (!tc))
+    return -1;
+
+  if (is_get)
+    return tcp_get_attribute (tc, attr);
+  else
+    return tcp_set_attribute (tc, attr);
 }
 
 static u16
@@ -1146,7 +1292,7 @@ tcp_update_time (f64 now, u8 thread_index)
 {
   tcp_worker_ctx_t *wrk = tcp_get_worker (thread_index);
 
-  tcp_set_time_now (wrk);
+  tcp_set_time_now (wrk, now);
   tcp_handle_cleanups (wrk, now);
   tcp_timer_expire_timers (&wrk->timer_wheel, now);
   tcp_dispatch_pending_timers (wrk);
@@ -1162,6 +1308,27 @@ tcp_session_flush_data (transport_connection_t * tconn)
   tc->psh_seq = tc->snd_una + transport_max_tx_dequeue (tconn) - 1;
 }
 
+static int
+tcp_session_app_rx_evt (transport_connection_t *conn)
+{
+  tcp_connection_t *tc = (tcp_connection_t *) conn;
+  u32 min_free, lo = 4 << 10, hi = 128 << 10;
+
+  if (!(tc->flags & TCP_CONN_ZERO_RWND_SENT))
+    return 0;
+
+  min_free = clib_clamp (transport_rx_fifo_size (conn) >> 3, lo, hi);
+  if (transport_max_rx_enqueue (conn) < min_free)
+    {
+      transport_rx_fifo_req_deq_ntf (conn);
+      return 0;
+    }
+
+  tcp_send_ack (tc);
+
+  return 0;
+}
+
 /* *INDENT-OFF* */
 const static transport_proto_vft_t tcp_proto = {
   .enable = vnet_tcp_enable_disable,
@@ -1171,7 +1338,9 @@ const static transport_proto_vft_t tcp_proto = {
   .get_connection = tcp_session_get_transport,
   .get_listener = tcp_session_get_listener,
   .get_half_open = tcp_half_open_session_get_transport,
+  .attribute = tcp_session_attribute,
   .connect = tcp_session_open,
+  .half_close = tcp_session_half_close,
   .close = tcp_session_close,
   .cleanup = tcp_session_cleanup,
   .cleanup_ho = tcp_session_cleanup_ho,
@@ -1180,6 +1349,7 @@ const static transport_proto_vft_t tcp_proto = {
   .update_time = tcp_update_time,
   .flush_data = tcp_session_flush_data,
   .custom_tx = tcp_session_custom_tx,
+  .app_rx_evt = tcp_session_app_rx_evt,
   .format_connection = format_tcp_session,
   .format_listener = format_tcp_listener_session,
   .format_half_open = format_tcp_half_open_session,
@@ -1259,7 +1429,8 @@ tcp_expired_timers_dispatch (u32 * expired_timers)
 
   clib_fifo_add (wrk->pending_timers, expired_timers, n_expired);
 
-  max_loops = clib_max (1, 0.5 * TCP_TIMER_TICK * wrk->vm->loops_per_second);
+  max_loops =
+    clib_max ((u32) 0.5 * TCP_TIMER_TICK * wrk->vm->loops_per_second, 1);
   max_per_loop = clib_max ((n_left + n_expired) / max_loops, 10);
   max_per_loop = clib_min (max_per_loop, VLIB_FRAME_SIZE);
   wrk->max_timers_per_loop = clib_max (n_left ? wrk->max_timers_per_loop : 0,
@@ -1329,7 +1500,7 @@ tcp_main_enable (vlib_main_t * vm)
       vec_reset_length (wrk->pending_deq_acked);
       vec_reset_length (wrk->pending_disconnects);
       vec_reset_length (wrk->pending_resets);
-      wrk->vm = vlib_mains[thread];
+      wrk->vm = vlib_get_main_by_index (thread);
       wrk->max_timers_per_loop = 10;
 
       if (thread > 0)
@@ -1348,18 +1519,6 @@ tcp_main_enable (vlib_main_t * vm)
       tcp_timer_initialize_wheel (&wrk->timer_wheel,
 				  tcp_expired_timers_dispatch,
 				  vlib_time_now (vm));
-    }
-
-  /*
-   * Use a preallocated half-open connection pool?
-   */
-  if (tcp_cfg.preallocated_half_open_connections)
-    pool_init_fixed (tm->half_open_connections,
-		     tcp_cfg.preallocated_half_open_connections);
-
-  if (num_threads > 1)
-    {
-      clib_spinlock_init (&tm->half_open_lock);
     }
 
   tcp_initialize_iss_seed (tm);
@@ -1430,6 +1589,7 @@ tcp_configuration_init (void)
   tcp_cfg.lastack_time = 300000;	/* 30s */
   tcp_cfg.finwait2_time = 300000;	/* 30s */
   tcp_cfg.closing_time = 300000;	/* 30s */
+  tcp_cfg.alloc_err_timeout = 1000;	/* 100ms */
 
   /* This value is seconds */
   tcp_cfg.cleanup_time = 0.1;	/* 100ms */

@@ -18,43 +18,58 @@ add_vpp_library(nat
   lib/ipfix_logging.c
   lib/nat_syslog.c
   lib/alloc.c
+  lib/lib.c
 
   INSTALL_HEADERS
   lib/ipfix_logging.h
   lib/nat_syslog.h
   lib/alloc.h
+  lib/lib.h
 )
 
 add_vpp_plugin(nat
   SOURCES
-  nat.c
-  nat44_api.c
-  in2out_ed.c
-  out2in_ed.c
-  nat_dpo.c
-  nat44_cli.c
-  nat44_handoff.c
-  nat44_hairpinning.c
-  nat44_classify.c
-  nat_affinity.c
-  nat_format.c
-  nat44-ei/nat44_ei.c
-  nat44-ei/nat44_ei_ha.c
-  nat44-ei/nat44_ei_in2out.c
-  nat44-ei/nat44_ei_out2in.c
+  nat44-ed/nat44_ed.c
+  nat44-ed/nat44_ed_api.c
+  nat44-ed/nat44_ed_in2out.c
+  nat44-ed/nat44_ed_out2in.c
+  nat44-ed/nat44_ed_cli.c
+  nat44-ed/nat44_ed_format.c
+  nat44-ed/nat44_ed_affinity.c
+  nat44-ed/nat44_ed_handoff.c
+  nat44-ed/nat44_ed_classify.c
 
   MULTIARCH_SOURCES
-  in2out_ed.c
-  out2in_ed.c
-  nat44_classify.c
-  nat44_hairpinning.c
-  nat44_handoff.c
+  nat44-ed/nat44_ed_in2out.c
+  nat44-ed/nat44_ed_out2in.c
+  nat44-ed/nat44_ed_handoff.c
+  nat44-ed/nat44_ed_classify.c
+
+  API_FILES
+  nat44-ed/nat44_ed.api
+  lib/nat_types.api
+
+  LINK_LIBRARIES nat
+)
+
+add_vpp_plugin(nat44_ei
+  SOURCES
+  nat44-ei/nat44_ei.c
+  nat44-ei/nat44_ei_ha.c
+  nat44-ei/nat44_ei_cli.c
+  nat44-ei/nat44_ei_api.c
+  nat44-ei/nat44_ei_dpo.c
+  nat44-ei/nat44_ei_in2out.c
+  nat44-ei/nat44_ei_out2in.c
+  nat44-ei/nat44_ei_handoff.c
+
+  MULTIARCH_SOURCES
   nat44-ei/nat44_ei_in2out.c
   nat44-ei/nat44_ei_out2in.c
 
   API_FILES
-  nat44.api
-  nat_types.api
+  nat44-ei/nat44_ei.api
+  lib/nat_types.api
 
   LINK_LIBRARIES nat
 )
@@ -96,7 +111,7 @@ add_vpp_plugin(nat66
 
   API_FILES
   nat66/nat66.api
-  nat_types.api
+  lib/nat_types.api
 
   LINK_LIBRARIES nat
 )
@@ -115,7 +130,7 @@ add_vpp_plugin(det44
 
   API_FILES
   det44/det44.api
-  nat_types.api
+  lib/nat_types.api
 
   LINK_LIBRARIES nat
 )
@@ -135,7 +150,7 @@ add_vpp_plugin(nat64
 
   API_FILES
   nat64/nat64.api
-  nat_types.api
+  lib/nat_types.api
 
   LINK_LIBRARIES nat
 )
@@ -155,17 +170,34 @@ add_vpp_plugin(pnat
 )
 
 # Unit tests
+set (PACKET_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/pnat/tests/test_packets.h)
+set (PACKET_DEFS
+  ${CMAKE_CURRENT_SOURCE_DIR}/pnat/tests/packets.def
+  ${CMAKE_CURRENT_SOURCE_DIR}/pnat/tests/missing_rule.def)
+set (PACKET_TESTGET ${CMAKE_CURRENT_SOURCE_DIR}/pnat/tests/test_genpackets.py)
+
 add_vpp_executable(test_pnat
   SOURCES
-  pnat/pnat_test.c
+  pnat/tests/pnat_test.c
   pnat/pnat_node.c
   pnat/pnat.c
   ../../vnet/ip/ip_checksum.c
+
   LINK_LIBRARIES vppinfra vlib
   NO_INSTALL
 )
 
-if("${CMAKE_VERSION}" VERSION_GREATER_EQUAL "3.13" AND "${CMAKE_C_COMPILER_ID}" MATCHES "(Apple)?[Cc]lang")
+add_custom_target(test_pnat-generate
+  COMMAND ${PACKET_TESTGET} ${PACKET_DEFS} > ${PACKET_HEADER}
+  COMMENT "Generating packet test definitions ${PACKET_DEFS}"
+)
+
+add_custom_target(test_pnat-run
+  COMMAND test_pnat
+  DEPENDS test_pnat
+)
+
+if(VPP_BUILD_TESTS_WITH_COVERAGE)
   set(TARGET_NAME test_pnat)
   set(COV_SOURCES ${CMAKE_SOURCE_DIR}/plugins/nat/pnat/pnat.c ${CMAKE_SOURCE_DIR}/plugins/nat/pnat/pnat_node.h ${CMAKE_SOURCE_DIR}/plugins/nat/pnat/pnat_node.c)
 

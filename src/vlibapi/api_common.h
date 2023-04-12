@@ -27,6 +27,7 @@
 
 #include <vppinfra/clib_error.h>
 #include <vppinfra/elog.h>
+#include <vppinfra/cJSON.h>
 #include <vlibapi/api_types.h>
 #include <svm/svm_common.h>
 #include <svm/queue.h>
@@ -57,6 +58,7 @@ typedef struct vl_api_registration_
   f64 last_heard;
   int last_queue_head;
   int unanswered_pings;
+  int is_being_removed;
 
   /** shared memory only: pointer to client input queue */
   svm_queue_t *vl_input_queue;
@@ -73,17 +75,11 @@ typedef struct vl_api_registration_
   /* socket client only */
   u32 server_handle;		/**< Socket client only: server handle */
   u32 server_index;		/**< Socket client only: server index */
+
+  bool keepalive; /**< Dead client scan */
 } vl_api_registration_t;
 
 #define VL_API_INVALID_FI ((u32)~0)
-
-/** Trace configuration for a single message */
-typedef struct
-{
-  int size;			/**< for sanity checking */
-  int trace_enable;		/**< trace this message  */
-  int replay_enable;		/**< This message can be replayed  */
-} trace_cfg_t;
 
 /**
  * API trace state
@@ -126,13 +122,16 @@ typedef struct
   void *handler;		/**< the message handler  */
   void *cleanup;		/**< non-default message cleanup handler */
   void *endian;			/**< message endian function  */
-  void *print;			/**< message print function  */
+  void *format_fn;		/**< message format function  */
+  void *tojson;			/**< binary to JSON convert function */
+  void *fromjson;		/**< JSON to binary convert function */
+  void *calc_size;		/**< message size calculation */
   int size;			/**< message size  */
-  int traced;			/**< is this message to be traced?  */
-  int replay;			/**< is this message to be replayed?  */
-  int message_bounce;		/**< do not free message after processing */
-  int is_mp_safe;		/**< worker thread barrier required?  */
-  int is_autoendian;		/**< endian conversion required?  */
+  int traced : 1;		/**< is this message to be traced?  */
+  int replay : 1;		/**< is this message to be replayed?  */
+  int message_bounce : 1;	/**< do not free message after processing */
+  int is_mp_safe : 1;		/**< worker thread barrier required?  */
+  int is_autoendian : 1;	/**< endian conversion required?  */
 } vl_msg_api_msg_config_t;
 
 /** Message header structure */
@@ -144,39 +143,34 @@ typedef struct msgbuf_
   u8 data[0];			 /**< actual message begins here  */
 } msgbuf_t;
 
-CLIB_NOSANITIZE_ADDR static inline void
+__clib_nosanitize_addr static inline void
 VL_MSG_API_UNPOISON (const void *a)
 {
   const msgbuf_t *m = &((const msgbuf_t *) a)[-1];
-  CLIB_MEM_UNPOISON (m, sizeof (*m) + ntohl (m->data_len));
+  clib_mem_unpoison (m, sizeof (*m) + ntohl (m->data_len));
 }
 
-CLIB_NOSANITIZE_ADDR static inline void
-VL_MSG_API_SVM_QUEUE_UNPOISON (const svm_queue_t * q)
+__clib_nosanitize_addr static inline void
+VL_MSG_API_SVM_QUEUE_UNPOISON (const svm_queue_t *q)
 {
-  CLIB_MEM_UNPOISON (q, sizeof (*q) + q->elsize * q->maxsize);
+  clib_mem_unpoison (q, sizeof (*q) + q->elsize * q->maxsize);
 }
 
 static inline void
 VL_MSG_API_POISON (const void *a)
 {
   const msgbuf_t *m = &((const msgbuf_t *) a)[-1];
-  CLIB_MEM_POISON (m, sizeof (*m) + ntohl (m->data_len));
+  clib_mem_poison (m, sizeof (*m) + ntohl (m->data_len));
 }
 
 /* api_shared.c prototypes */
-void vl_msg_api_handler (void *the_msg);
-void vl_msg_api_handler_no_free (void *the_msg);
-void vl_msg_api_handler_no_trace_no_free (void *the_msg);
-void vl_msg_api_trace_only (void *the_msg);
+void vl_msg_api_handler (void *the_msg, uword msg_len);
+void vl_msg_api_handler_no_free (void *the_msg, uword msg_len);
+void vl_msg_api_handler_no_trace_no_free (void *the_msg, uword msg_len);
+void vl_msg_api_trace_only (void *the_msg, uword msg_len);
 void vl_msg_api_cleanup_handler (void *the_msg);
 void vl_msg_api_replay_handler (void *the_msg);
-void vl_msg_api_socket_handler (void *the_msg);
-void vl_msg_api_set_handlers (int msg_id, char *msg_name,
-			      void *handler,
-			      void *cleanup,
-			      void *endian,
-			      void *print, int msg_size, int traced);
+void vl_msg_api_socket_handler (void *the_msg, uword msg_len);
 void vl_msg_api_clean_handlers (int msg_id);
 void vl_msg_api_config (vl_msg_api_msg_config_t *);
 void vl_msg_api_set_cleanup_handler (int msg_id, void *fp);
@@ -191,7 +185,6 @@ void vl_msg_api_barrier_trace_context (const char *context)
 #define vl_msg_api_barrier_trace_context(X)
 #endif
 void vl_msg_api_free (void *);
-void vl_noop_handler (void *mp);
 void vl_msg_api_increment_missing_client_counter (void);
 void vl_msg_api_post_mortem_dump (void);
 void vl_msg_api_post_mortem_dump_enable_disable (int enable);
@@ -223,34 +216,51 @@ typedef struct
   char name[64];
 } api_version_t;
 
+typedef struct
+{
+  /** Message handler vector  */
+  void (*handler) (void *);
+
+  /** non-default message cleanup handler vector */
+  void (*cleanup_handler) (void *);
+
+  /** Message name vector */
+  const char *name;
+
+  /** Message format function */
+  format_function_t *format_fn;
+
+  /** Message convert function vector */
+  cJSON *(*tojson_handler) (void *);
+
+  /** Message convert function vector */
+  void *(*fromjson_handler) (cJSON *, int *);
+
+  /** Message endian handler vector */
+  void (*endian_handler) (void *);
+
+  /** Message calc size function vector */
+  uword (*calc_size_func) (void *);
+
+  /** trace size for sanity checking */
+  int trace_size;
+
+  /** Flags */
+  u8 bounce : 1;	 /**> Don't automatically free message buffer vetor */
+  u8 is_mp_safe : 1;	 /**< Message is mp safe vector */
+  u8 is_autoendian : 1;	 /**< Message requires us to do endian conversion */
+  u8 trace_enable : 1;	 /**< trace this message  */
+  u8 replay_allowed : 1; /**< This message can be replayed  */
+
+} vl_api_msg_data_t;
+
 /** API main structure, used by both vpp and binary API clients */
 typedef struct api_main_t
 {
-  /** Message handler vector  */
-  void (**msg_handlers) (void *);
-  /** Plaform-dependent (aka hardware) message handler vector */
-  int (**pd_msg_handlers) (void *, int);
+  vl_api_msg_data_t *msg_data;
 
-  /** non-default message cleanup handler vector */
-  void (**msg_cleanup_handlers) (void *);
-
-  /** Message endian handler vector */
-  void (**msg_endian_handlers) (void *);
-
-  /** Message print function vector */
-  void (**msg_print_handlers) (void *, void *);
-
-  /** Message name vector */
-  const char **msg_names;
-
-  /** Don't automatically free message buffer vetor */
-  u8 *message_bounce;
-
-  /** Message is mp safe vector */
-  u8 *is_mp_safe;
-
-  /** Message requires us to do endian conversion */
-  u8 *is_autoendian;
+  /** API message ID by name hash table */
+  uword *msg_id_by_name;
 
   /** Allocator ring vectors (in shared memory) */
   struct ring_alloc_ *arings;
@@ -272,9 +282,6 @@ typedef struct api_main_t
 
   /** Print every received message */
   int msg_print_flag;
-
-  /** Current trace configuration */
-  trace_cfg_t *api_trace_cfg;
 
   /** Current process PID */
   int our_pid;
@@ -383,12 +390,19 @@ typedef struct api_main_t
 } api_main_t;
 
 extern __thread api_main_t *my_api_main;
-extern api_main_t api_global_main;
 
 always_inline api_main_t *
 vlibapi_get_main (void)
 {
   return my_api_main;
+}
+
+always_inline vl_api_msg_data_t *
+vl_api_get_msg_data (api_main_t *am, u32 msg_id)
+{
+  if (msg_id >= vec_len (am->msg_data))
+    return 0;
+  return am->msg_data + msg_id;
 }
 
 always_inline void

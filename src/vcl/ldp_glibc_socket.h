@@ -163,6 +163,14 @@ extern ssize_t sendfile (int __out_fd, int __in_fd, off_t * __offset,
    __THROW.  */
 extern ssize_t recv (int __fd, void *__buf, size_t __n, int __flags);
 
+/* Read N bytes into BUF from socket FD with buffer overflow checking.
+   Returns the number read or -1 for errors.
+
+   This function is a cancellation point and therefore not marked with
+   __THROW.  */
+extern ssize_t __recv_chk (int fd, void *buf, size_t n, size_t buflen,
+			   int flags);
+
 /* Send N bytes of BUF on socket FD to peer at address ADDR (which is
    ADDR_LEN bytes long).  Returns the number sent, or -1 for errors.
 
@@ -192,15 +200,14 @@ recvfrom (int __fd, void *__restrict __buf,
 extern ssize_t
 sendmsg (int __fd, const struct msghdr *__message, int __flags);
 
-#ifdef __USE_GNU
+#ifdef _GNU_SOURCE
 /* Send a VLEN messages as described by VMESSAGES to socket FD.
    Returns the number of datagrams successfully written or -1 for errors.
 
    This function is a cancellation point and therefore not marked with
    __THROW.  */
-extern int
-sendmmsg (int __fd, struct mmsghdr *__vmessages,
-	  unsigned int __vlen, int __flags);
+extern int sendmmsg (int __fd, struct mmsghdr *__vmessages,
+		     unsigned int __vlen, int __flags);
 #endif
 
 /* Receive a message as described by MESSAGE from socket FD.
@@ -210,7 +217,7 @@ sendmmsg (int __fd, struct mmsghdr *__vmessages,
    __THROW.  */
 extern ssize_t recvmsg (int __fd, struct msghdr *__message, int __flags);
 
-#ifdef __USE_GNU
+#ifdef _GNU_SOURCE
 /* Receive up to VLEN messages as described by VMESSAGES from socket FD.
    Returns the number of messages received or -1 for errors.
 
@@ -329,7 +336,7 @@ epoll_pwait (int __epfd, struct epoll_event *__events,
    __THROW.  */
 extern int poll (struct pollfd *__fds, nfds_t __nfds, int __timeout);
 
-#ifdef __USE_GNU
+#ifdef _GNU_SOURCE
 /* Like poll, but before waiting the threads signal mask is replaced
    with that specified in the fourth parameter.  For better usability,
    the timeout value is specified using a TIMESPEC object.

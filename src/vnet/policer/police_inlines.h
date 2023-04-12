@@ -56,11 +56,9 @@ vnet_policer_mark (vlib_buffer_t *b, ip_dscp_t dscp)
 }
 
 static_always_inline u8
-vnet_policer_police (vlib_main_t * vm,
-		     vlib_buffer_t * b,
-		     u32 policer_index,
+vnet_policer_police (vlib_main_t *vm, vlib_buffer_t *b, u32 policer_index,
 		     u64 time_in_policer_periods,
-		     policer_result_e packet_color)
+		     policer_result_e packet_color, bool handoff)
 {
   qos_action_type_en act;
   u32 len;
@@ -72,8 +70,25 @@ vnet_policer_police (vlib_main_t * vm,
   vlib_prefetch_combined_counter (&policer_counters[POLICE_CONFORM],
 				  vm->thread_index, policer_index);
 
-  len = vlib_buffer_length_in_chain (vm, b);
   pol = &pm->policers[policer_index];
+
+  if (handoff)
+    {
+      if (PREDICT_FALSE (pol->thread_index == ~0))
+	/*
+	 * This is the first packet to use this policer. Set the
+	 * thread index in the policer to this thread and any
+	 * packets seen by this node on other threads will
+	 * be handed off to this one.
+	 *
+	 * This could happen simultaneously on another thread.
+	 */
+	clib_atomic_cmp_and_swap (&pol->thread_index, ~0, vm->thread_index);
+      else if (PREDICT_FALSE (pol->thread_index != vm->thread_index))
+	return QOS_ACTION_HANDOFF;
+    }
+
+  len = vlib_buffer_length_in_chain (vm, b);
   col = vnet_police_packet (pol, len, packet_color, time_in_policer_periods);
   act = pol->action[col];
   vlib_increment_combined_counter (&policer_counters[col], vm->thread_index,
@@ -109,10 +124,14 @@ policer_handoff (vlib_main_t *vm, vlib_node_runtime_t *node,
   vnet_policer_main_t *pm;
   policer_t *policer;
   u32 this_thread, policer_thread;
+  bool single_policer_node = (policer_index != ~0);
 
   pm = &vnet_policer_main;
-  policer = &pm->policers[policer_index];
-  policer_thread = policer->thread_index;
+  if (single_policer_node)
+    {
+      policer = &pm->policers[policer_index];
+      policer_thread = policer->thread_index;
+    }
 
   this_thread = vm->thread_index;
   from = vlib_frame_vector_args (frame);
@@ -124,7 +143,16 @@ policer_handoff (vlib_main_t *vm, vlib_node_runtime_t *node,
 
   while (n_left_from > 0)
     {
-      ti[0] = policer_thread;
+      if (!single_policer_node)
+	{
+	  policer_index = vnet_buffer (b[0])->policer.index;
+	  policer = &pm->policers[policer_index];
+	  ti[0] = policer->thread_index;
+	}
+      else
+	{
+	  ti[0] = policer_thread;
+	}
 
       if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE) &&
 			 b[0]->flags & VLIB_BUFFER_IS_TRACED))
@@ -132,7 +160,7 @@ policer_handoff (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  policer_handoff_trace_t *t =
 	    vlib_add_trace (vm, node, b[0], sizeof (*t));
 	  t->current_worker_index = this_thread;
-	  t->next_worker_index = policer_thread;
+	  t->next_worker_index = ti[0];
 	  t->policer_index = policer_index;
 	}
 
@@ -141,8 +169,8 @@ policer_handoff (vlib_main_t *vm, vlib_node_runtime_t *node,
       b++;
     }
 
-  n_enq = vlib_buffer_enqueue_to_thread (vm, fq_index, from, thread_indices,
-					 frame->n_vectors, 1);
+  n_enq = vlib_buffer_enqueue_to_thread (vm, node, fq_index, from,
+					 thread_indices, frame->n_vectors, 1);
 
   if (n_enq < frame->n_vectors)
     vlib_node_increment_counter (vm, node->node_index,

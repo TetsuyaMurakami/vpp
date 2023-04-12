@@ -20,11 +20,9 @@
 #include <ioam/analyse/ip6/ip6_ioam_analyse.h>
 
 u8 *
-ioam_template_rewrite (flow_report_main_t * frm, flow_report_t * fr,
-		       ip4_address_t * collector_address,
-		       ip4_address_t * src_address, u16 collector_port,
-		       ipfix_report_element_t * elts,
-		       u32 n_elts, u32 * stream_index)
+ioam_template_rewrite (ipfix_exporter_t *exp, flow_report_t *fr,
+		       u16 collector_port, ipfix_report_element_t *elts,
+		       u32 n_elts, u32 *stream_index)
 {
   ip4_header_t *ip;
   udp_header_t *udp;
@@ -39,7 +37,7 @@ ioam_template_rewrite (flow_report_main_t * frm, flow_report_t * fr,
   u32 field_index = 0;
   flow_report_stream_t *stream;
 
-  stream = &frm->streams[fr->stream_index];
+  stream = &exp->streams[fr->stream_index];
 
   /* Determine field count */
 #define _(field,mask,item,length)                                   \
@@ -74,8 +72,8 @@ ioam_template_rewrite (flow_report_main_t * frm, flow_report_t * fr,
   ip->ip_version_and_header_length = 0x45;
   ip->ttl = 254;
   ip->protocol = IP_PROTOCOL_UDP;
-  ip->src_address.as_u32 = src_address->as_u32;
-  ip->dst_address.as_u32 = collector_address->as_u32;
+  ip->src_address.as_u32 = exp->src_address.ip.ip4.as_u32;
+  ip->dst_address.as_u32 = exp->ipfix_collector.ip.ip4.as_u32;
   udp->src_port = clib_host_to_net_u16 (collector_port);
   udp->dst_port = clib_host_to_net_u16 (UDP_DST_PORT_ipfix);
   udp->length = clib_host_to_net_u16 (vec_len (rewrite) - sizeof (*ip));
@@ -264,8 +262,9 @@ ioam_analyse_add_ipfix_record (flow_report_t * fr,
 }
 
 vlib_frame_t *
-ioam_send_flows (flow_report_main_t * frm, flow_report_t * fr,
-		 vlib_frame_t * f, u32 * to_next, u32 node_index)
+ioam_send_flows (flow_report_main_t *frm, ipfix_exporter_t *exp,
+		 flow_report_t *fr, vlib_frame_t *f, u32 *to_next,
+		 u32 node_index)
 {
   vlib_buffer_t *b0 = NULL;
   u32 next_offset = 0;
@@ -276,17 +275,16 @@ ioam_send_flows (flow_report_main_t * frm, flow_report_t * fr,
   ipfix_set_header_t *s = NULL;
   ip4_header_t *ip;
   udp_header_t *udp;
-  u32 records_this_buffer;
   u16 new_l0, old_l0;
   ip_csum_t sum0;
-  vlib_main_t *vm = frm->vlib_main;
+  vlib_main_t *vm = vlib_get_main ();
   ip6_address_t temp;
   ioam_analyser_data_t *record = NULL;
   flow_report_stream_t *stream;
   ioam_analyser_data_t *aggregated_data;
   u16 data_len;
 
-  stream = &frm->streams[fr->stream_index];
+  stream = &exp->streams[fr->stream_index];
 
   clib_memset (&temp, 0, sizeof (ip6_address_t));
 
@@ -330,16 +328,14 @@ ioam_send_flows (flow_report_main_t * frm, flow_report_t * fr,
 	    h->sequence_number = stream->sequence_number++;
 	    h->sequence_number = clib_host_to_net_u32 (h->sequence_number);
 	    next_offset = (u32) (((u8 *) (s + 1)) - (u8 *) tp);
-	    records_this_buffer = 0;
 	  }
 
 	next_offset = ioam_analyse_add_ipfix_record (fr, record,
 						     b0, next_offset,
 						     &temp, &temp, 0, 0);
-	records_this_buffer++;
 
 	/* Flush data if packet len is about to reach path mtu */
-	if (next_offset > (frm->path_mtu - 250))
+	if (next_offset > (exp->path_mtu - 250))
 	  flush = 1;
       }
 
@@ -366,7 +362,7 @@ ioam_send_flows (flow_report_main_t * frm, flow_report_t * fr,
 	udp->length =
 	  clib_host_to_net_u16 (b0->current_length - sizeof (*ip));
 
-	if (frm->udp_checksum)
+	if (exp->udp_checksum)
 	  {
 	    /* RFC 7011 section 10.3.2. */
 	    udp->checksum = ip4_tcp_udp_compute_checksum (vm, b0, ip);
@@ -399,7 +395,7 @@ ioam_flow_create (u8 del)
   vnet_flow_report_add_del_args_t args;
   int rv;
   u32 domain_id = 0;
-  flow_report_main_t *frm = &flow_report_main;
+  ipfix_exporter_t *exp = &flow_report_main.exporters[0];
   u16 template_id;
 
   clib_memset (&args, 0, sizeof (args));
@@ -408,7 +404,7 @@ ioam_flow_create (u8 del)
   del ? (args.is_add = 0) : (args.is_add = 1);
   args.domain_id = domain_id;
 
-  rv = vnet_flow_report_add_del (frm, &args, &template_id);
+  rv = vnet_flow_report_add_del (exp, &args, &template_id);
 
   switch (rv)
     {

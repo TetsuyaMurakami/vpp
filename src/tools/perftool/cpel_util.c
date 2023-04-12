@@ -20,7 +20,6 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <sys/fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <ctype.h>
@@ -424,7 +423,7 @@ void alpha_sort_tracks(void)
           alpha_compare_tracks);
 
     vec_validate(track_alpha_map, vec_len(the_tracks));
-    _vec_len(track_alpha_map) = vec_len(the_tracks);
+    vec_set_len (track_alpha_map, vec_len (the_tracks));
 
     for (i = 0; i < vec_len(the_tracks); i++) {
         this_track = &the_tracks[i];

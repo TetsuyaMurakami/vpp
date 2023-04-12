@@ -135,6 +135,52 @@ format_white_space (u8 * s, va_list * va)
 }
 
 u8 *
+format_duration (u8 *s, va_list *args)
+{
+  f64 t = va_arg (*args, f64);
+  s = format (s, "");
+
+  const f64 seconds_per_minute = 60;
+  const f64 seconds_per_hour = 60 * seconds_per_minute;
+  const f64 seconds_per_day = 24 * seconds_per_hour;
+  uword days, hours, minutes, secs, msecs, usecs;
+
+  days = t / seconds_per_day;
+  t -= days * seconds_per_day;
+
+  hours = t / seconds_per_hour;
+  t -= hours * seconds_per_hour;
+
+  minutes = t / seconds_per_minute;
+  t -= minutes * seconds_per_minute;
+
+  secs = t;
+  t -= secs;
+
+  msecs = 1e3 * t;
+
+  usecs = 1e6 * t;
+  usecs = usecs % 1000;
+
+  if (t == 0.)
+    s = format (s, "0");
+  if (days)
+    s = format (s, "%ddays ", days);
+  if (hours)
+    s = format (s, "%dh ", hours);
+  if (minutes)
+    s = format (s, "%dmin ", minutes);
+  if (secs)
+    s = format (s, "%ds ", secs);
+  if (msecs)
+    s = format (s, "%dms ", msecs);
+  if (usecs)
+    s = format (s, "%dus", usecs);
+
+  return (s);
+}
+
+u8 *
 format_time_interval (u8 * s, va_list * args)
 {
   u8 *fmt = va_arg (*args, u8 *);
@@ -200,6 +246,24 @@ format_time_interval (u8 * s, va_list * args)
 
       s = format (s, what_fmt, what);
     }
+
+  return s;
+}
+
+/* Format base 10 e.g. 100, 100K, 100M, 100G */
+__clib_export u8 *
+format_base10 (u8 *s, va_list *va)
+{
+  u64 size = va_arg (*va, u64);
+
+  if (size < 1000)
+    s = format (s, "%d", size);
+  else if (size < 1000000)
+    s = format (s, "%.2fK", (f64) size / 1000.);
+  else if (size < 1000000000)
+    s = format (s, "%.2fM", (f64) size / 1000000.);
+  else
+    s = format (s, "%.2fG", (f64) size / 1000000000.);
 
   return s;
 }
@@ -332,8 +396,6 @@ format_c_identifier (u8 * s, va_list * va)
   uword i, l;
 
   l = ~0;
-  if (clib_mem_is_vec (id))
-    l = vec_len (id);
 
   if (id)
     for (i = 0; i < l && id[i] != 0; i++)
@@ -389,6 +451,38 @@ format_hexdump (u8 * s, va_list * args)
 
   vec_free (line_hex);
   vec_free (line_str);
+
+  return s;
+}
+
+__clib_export u8 *
+format_uword_bitmap (u8 *s, va_list *args)
+{
+  uword *bitmap = va_arg (*args, uword *);
+  int n_uword = va_arg (*args, int);
+  uword indent = format_get_indent (s);
+
+  s = format (s, "%6s", "");
+
+  for (int i = uword_bits - 4; i >= 0; i -= 4)
+    s = format (s, "%5d", i);
+
+  vec_add1 (s, '\n');
+
+  for (int j = n_uword - 1; j >= 0; j--)
+    {
+      s = format (s, "%U0x%04x ", format_white_space, indent,
+		  j * uword_bits / 8);
+      for (int i = uword_bits - 1; i >= 0; i--)
+	{
+	  vec_add1 (s, (1ULL << i) & bitmap[j] ? '1' : '.');
+	  if (i % 4 == 0)
+	    vec_add1 (s, ' ');
+	}
+      s = format (s, uword_bits == 64 ? "0x%016lx" : "0x%08lx", bitmap[j]);
+      if (j)
+	vec_add1 (s, '\n');
+    }
 
   return s;
 }

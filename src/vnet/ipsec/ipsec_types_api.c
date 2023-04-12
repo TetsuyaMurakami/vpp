@@ -17,10 +17,6 @@
 #include <vnet/ipsec/ipsec_types_api.h>
 #include <vlibapi/api_types.h>
 
-#define vl_typedefs		/* define message structures */
-#include <vnet/vnet_all_api_h.h>
-#undef vl_typedefs
-
 int
 ipsec_proto_decode (vl_api_ipsec_proto_t in, ipsec_protocol_t * out)
 {
@@ -147,6 +143,8 @@ ipsec_sa_flags_decode (vl_api_ipsec_sad_flags_t in)
     flags |= IPSEC_SA_FLAG_UDP_ENCAP;
   if (in & IPSEC_API_SAD_FLAG_IS_INBOUND)
     flags |= IPSEC_SA_FLAG_IS_INBOUND;
+  if (in & IPSEC_API_SAD_FLAG_ASYNC)
+    flags |= IPSEC_SA_FLAG_IS_ASYNC;
 
   return (flags);
 }
@@ -168,6 +166,8 @@ ipsec_sad_flags_encode (const ipsec_sa_t * sa)
     flags |= IPSEC_API_SAD_FLAG_UDP_ENCAP;
   if (ipsec_sa_is_set_IS_INBOUND (sa))
     flags |= IPSEC_API_SAD_FLAG_IS_INBOUND;
+  if (ipsec_sa_is_set_IS_ASYNC (sa))
+    flags |= IPSEC_API_SAD_FLAG_ASYNC;
 
   return clib_host_to_net_u32 (flags);
 }

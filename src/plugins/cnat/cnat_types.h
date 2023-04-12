@@ -37,10 +37,14 @@
 #define CNAT_DEFAULT_SESSION_BUCKETS     1024
 #define CNAT_DEFAULT_TRANSLATION_BUCKETS 1024
 #define CNAT_DEFAULT_SNAT_BUCKETS        1024
+#define CNAT_DEFAULT_SNAT_IF_MAP_LEN	 4096
 
 #define CNAT_DEFAULT_SESSION_MEMORY      (1 << 20)
 #define CNAT_DEFAULT_TRANSLATION_MEMORY  (256 << 10)
 #define CNAT_DEFAULT_SNAT_MEMORY         (64 << 20)
+
+/* Should be prime >~ 100 * numBackends */
+#define CNAT_DEFAULT_MAGLEV_LEN 1009
 
 /* This should be strictly lower than FIB_SOURCE_INTERFACE
  * from fib_source.h */
@@ -51,10 +55,32 @@
 
 #define MIN_SRC_PORT ((u16) 0xC000)
 
+typedef struct
+{
+  /* Source and destination port. */
+  u16 src_port, dst_port;
+
+  /* Random value to distinguish connections. */
+  u32 verification_tag;
+
+  u32 checksum;
+} sctp_header_t;
+
+typedef enum cnat_trk_flag_t_
+{
+  /* Endpoint is active (static or dhcp resolved) */
+  CNAT_TRK_ACTIVE = (1 << 0),
+  /* Don't translate this endpoint, but still
+   * forward. Used by maglev for DSR */
+  CNAT_TRK_FLAG_NO_NAT = (1 << 1),
+  /* */
+  CNAT_TRK_FLAG_TEST_DISABLED = (1 << 7),
+} cnat_trk_flag_t;
+
 typedef enum
 {
   /* Endpoint addr has been resolved */
-  CNAT_EP_FLAG_RESOLVED = 1,
+  CNAT_EP_FLAG_RESOLVED = (1 << 0),
 } cnat_ep_flag_t;
 
 typedef struct cnat_endpoint_t_
@@ -69,6 +95,7 @@ typedef struct cnat_endpoint_tuple_t_
 {
   cnat_endpoint_t dst_ep;
   cnat_endpoint_t src_ep;
+  u8 ep_flags; /* cnat_trk_flag_t */
 } cnat_endpoint_tuple_t;
 
 typedef struct
@@ -76,23 +103,6 @@ typedef struct
   u16 identifier;
   u16 sequence;
 } cnat_echo_header_t;
-
-typedef struct
-{
-  u32 dst_address_length_refcounts[129];
-  u16 *prefix_lengths_in_search_order;
-  uword *non_empty_dst_address_length_bitmap;
-} cnat_snat_pfx_table_meta_t;
-
-typedef struct
-{
-  /* Stores (ip family, prefix & mask) */
-  clib_bihash_24_8_t ip_hash;
-  /* family dependant cache */
-  cnat_snat_pfx_table_meta_t meta[2];
-  /* Precomputed ip masks (ip4 & ip6) */
-  ip6_address_t ip_masks[129];
-} cnat_snat_pfx_table_t;
 
 typedef struct cnat_main_
 {
@@ -114,6 +124,10 @@ typedef struct cnat_main_
   /* Number of buckets of the  source NAT prefix bihash */
   u32 snat_hash_buckets;
 
+  /* Bit map for include / exclude sw_if_index
+   * so max number of expected interfaces */
+  u32 snat_if_map_length;
+
   /* Timeout after which to clear sessions (in seconds) */
   u32 session_max_age;
 
@@ -127,15 +141,6 @@ typedef struct cnat_main_
   /* Lock for the timestamp pool */
   clib_rwlock_t ts_lock;
 
-  /* Ip4 Address to use for source NATing */
-  cnat_endpoint_t snat_ip4;
-
-  /* Ip6 Address to use for source NATing */
-  cnat_endpoint_t snat_ip6;
-
-  /* Longest prefix Match table for source NATing */
-  cnat_snat_pfx_table_t snat_pfx_table;
-
   /* Index of the scanner process node */
   uword scanner_node_index;
 
@@ -144,6 +149,10 @@ typedef struct cnat_main_
 
   /* Enable or Disable the scanner on startup */
   u8 default_scanner_state;
+
+  /* Number of buckets for maglev, should be a
+   * prime >= 100 * max num bakends */
+  u32 maglev_len;
 } cnat_main_t;
 
 typedef struct cnat_timestamp_t_

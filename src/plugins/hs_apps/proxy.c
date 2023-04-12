@@ -26,7 +26,7 @@ proxy_main_t proxy_main;
 
 typedef struct
 {
-  char uri[128];
+  session_endpoint_cfg_t sep;
   u32 app_index;
   u32 api_context;
 } proxy_connect_args_t;
@@ -37,11 +37,13 @@ proxy_cb_fn (void *data, u32 data_len)
   proxy_connect_args_t *pa = (proxy_connect_args_t *) data;
   vnet_connect_args_t a;
 
-  memset (&a, 0, sizeof (a));
+  clib_memset (&a, 0, sizeof (a));
   a.api_context = pa->api_context;
   a.app_index = pa->app_index;
-  a.uri = pa->uri;
-  vnet_connect_uri (&a);
+  clib_memcpy (&a.sep_ext, &pa->sep, sizeof (pa->sep));
+  vnet_connect (&a);
+  if (a.sep_ext.ext_cfg)
+    clib_mem_free (a.sep_ext.ext_cfg);
 }
 
 static void
@@ -49,40 +51,84 @@ proxy_call_main_thread (vnet_connect_args_t * a)
 {
   if (vlib_get_thread_index () == 0)
     {
-      vnet_connect_uri (a);
+      vnet_connect (a);
+      if (a->sep_ext.ext_cfg)
+	clib_mem_free (a->sep_ext.ext_cfg);
     }
   else
     {
       proxy_connect_args_t args;
       args.api_context = a->api_context;
       args.app_index = a->app_index;
-      clib_memcpy (args.uri, a->uri, vec_len (a->uri));
+      clib_memcpy (&args.sep, &a->sep_ext, sizeof (a->sep_ext));
       vl_api_rpc_call_main_thread (proxy_cb_fn, (u8 *) & args, sizeof (args));
     }
 }
 
 static proxy_session_t *
-proxy_get_active_open (proxy_main_t * pm, session_handle_t handle)
+proxy_session_alloc (void)
 {
-  proxy_session_t *ps = 0;
-  uword *p;
+  proxy_main_t *pm = &proxy_main;
+  proxy_session_t *ps;
 
-  p = hash_get (pm->proxy_session_by_active_open_handle, handle);
-  if (p)
-    ps = pool_elt_at_index (pm->sessions, p[0]);
+  pool_get_zero (pm->sessions, ps);
+  ps->ps_index = ps - pm->sessions;
+
   return ps;
 }
 
-static proxy_session_t *
-proxy_get_passive_open (proxy_main_t * pm, session_handle_t handle)
+static inline proxy_session_t *
+proxy_session_get (u32 ps_index)
 {
-  proxy_session_t *ps = 0;
-  uword *p;
+  proxy_main_t *pm = &proxy_main;
 
-  p = hash_get (pm->proxy_session_by_server_handle, handle);
-  if (p)
-    ps = pool_elt_at_index (pm->sessions, p[0]);
-  return ps;
+  return pool_elt_at_index (pm->sessions, ps_index);
+}
+
+static inline proxy_session_t *
+proxy_session_get_if_valid (u32 ps_index)
+{
+  proxy_main_t *pm = &proxy_main;
+
+  if (pool_is_free_index (pm->sessions, ps_index))
+    return 0;
+  return pool_elt_at_index (pm->sessions, ps_index);
+}
+
+static void
+proxy_session_free (proxy_session_t *ps)
+{
+  proxy_main_t *pm = &proxy_main;
+
+  if (CLIB_DEBUG > 0)
+    clib_memset (ps, 0xFE, sizeof (*ps));
+  pool_put (pm->sessions, ps);
+}
+
+static int
+proxy_session_postponed_free_rpc (void *arg)
+{
+  uword ps_index = pointer_to_uword (arg);
+  proxy_main_t *pm = &proxy_main;
+  proxy_session_t *ps = 0;
+
+  clib_spinlock_lock_if_init (&pm->sessions_lock);
+
+  ps = proxy_session_get (ps_index);
+  segment_manager_dealloc_fifos (ps->server_rx_fifo, ps->server_tx_fifo);
+  proxy_session_free (ps);
+
+  clib_spinlock_unlock_if_init (&pm->sessions_lock);
+
+  return 0;
+}
+
+static void
+proxy_session_postponed_free (proxy_session_t *ps)
+{
+  session_send_rpc_evt_to_thread (ps->po_thread_index,
+				  proxy_session_postponed_free_rpc,
+				  uword_to_pointer (ps->ps_index, void *));
 }
 
 static void
@@ -91,17 +137,13 @@ proxy_try_close_session (session_t * s, int is_active_open)
   proxy_main_t *pm = &proxy_main;
   proxy_session_t *ps = 0;
   vnet_disconnect_args_t _a, *a = &_a;
-  session_handle_t handle;
-
-  handle = session_handle (s);
 
   clib_spinlock_lock_if_init (&pm->sessions_lock);
 
+  ps = proxy_session_get (s->opaque);
+
   if (is_active_open)
     {
-      ps = proxy_get_active_open (pm, handle);
-      ASSERT (ps != 0);
-
       a->handle = ps->vpp_active_open_handle;
       a->app_index = pm->active_open_app_index;
       vnet_disconnect_session (a);
@@ -118,9 +160,6 @@ proxy_try_close_session (session_t * s, int is_active_open)
     }
   else
     {
-      ps = proxy_get_passive_open (pm, handle);
-      ASSERT (ps != 0);
-
       a->handle = ps->vpp_server_handle;
       a->app_index = pm->server_app_index;
       vnet_disconnect_session (a);
@@ -142,43 +181,42 @@ proxy_try_close_session (session_t * s, int is_active_open)
 }
 
 static void
-proxy_session_free (proxy_session_t * ps)
-{
-  proxy_main_t *pm = &proxy_main;
-  if (CLIB_DEBUG > 0)
-    clib_memset (ps, 0xFE, sizeof (*ps));
-  pool_put (pm->sessions, ps);
-}
-
-static void
 proxy_try_delete_session (session_t * s, u8 is_active_open)
 {
   proxy_main_t *pm = &proxy_main;
   proxy_session_t *ps = 0;
-  session_handle_t handle;
-
-  handle = session_handle (s);
 
   clib_spinlock_lock_if_init (&pm->sessions_lock);
 
+  ps = proxy_session_get (s->opaque);
+
   if (is_active_open)
     {
-      ps = proxy_get_active_open (pm, handle);
-      ASSERT (ps != 0);
-
       ps->vpp_active_open_handle = SESSION_INVALID_HANDLE;
-      hash_unset (pm->proxy_session_by_active_open_handle, handle);
 
+      /* Revert master thread index change on connect notification */
+      ps->server_rx_fifo->master_thread_index = ps->po_thread_index;
+
+      /* Passive open already cleaned up */
       if (ps->vpp_server_handle == SESSION_INVALID_HANDLE)
-	proxy_session_free (ps);
+	{
+	  ASSERT (s->rx_fifo->refcnt == 1);
+
+	  /* The two sides of the proxy on different threads */
+	  if (ps->po_thread_index != s->thread_index)
+	    {
+	      /* This is not the right thread to delete the fifos */
+	      s->rx_fifo = 0;
+	      s->tx_fifo = 0;
+	      proxy_session_postponed_free (ps);
+	    }
+	  else
+	    proxy_session_free (ps);
+	}
     }
   else
     {
-      ps = proxy_get_passive_open (pm, handle);
-      ASSERT (ps != 0);
-
       ps->vpp_server_handle = SESSION_INVALID_HANDLE;
-      hash_unset (pm->proxy_session_by_server_handle, handle);
 
       if (ps->vpp_active_open_handle == SESSION_INVALID_HANDLE)
 	{
@@ -241,12 +279,12 @@ proxy_accept_callback (session_t * s)
 
   clib_spinlock_lock_if_init (&pm->sessions_lock);
 
-  pool_get_zero (pm->sessions, ps);
+  ps = proxy_session_alloc ();
   ps->vpp_server_handle = session_handle (s);
   ps->vpp_active_open_handle = SESSION_INVALID_HANDLE;
+  ps->po_thread_index = s->thread_index;
 
-  hash_set (pm->proxy_session_by_server_handle, ps->vpp_server_handle,
-	    ps - pm->sessions);
+  s->opaque = ps->ps_index;
 
   clib_spinlock_unlock_if_init (&pm->sessions_lock);
 
@@ -278,8 +316,13 @@ proxy_connected_callback (u32 app_index, u32 api_context,
 static int
 proxy_add_segment_callback (u32 client_index, u64 segment_handle)
 {
-  clib_warning ("called...");
-  return -1;
+  return 0;
+}
+
+static int
+proxy_transport_needs_crypto (transport_proto_t proto)
+{
+  return proto == TRANSPORT_PROTO_TLS;
 }
 
 static int
@@ -294,8 +337,7 @@ proxy_rx_callback (session_t * s)
 
   clib_spinlock_lock_if_init (&pm->sessions_lock);
 
-  ps = proxy_get_passive_open (pm, session_handle (s));
-  ASSERT (ps != 0);
+  ps = proxy_session_get (s->opaque);
 
   if (PREDICT_TRUE (ps->vpp_active_open_handle != SESSION_INVALID_HANDLE))
     {
@@ -323,7 +365,7 @@ proxy_rx_callback (session_t * s)
     {
       vnet_connect_args_t _a, *a = &_a;
       svm_fifo_t *tx_fifo, *rx_fifo;
-      u32 max_dequeue, proxy_index;
+      u32 max_dequeue, ps_index;
       int actual_transfer __attribute__ ((unused));
 
       rx_fifo = s->rx_fifo;
@@ -335,7 +377,10 @@ proxy_rx_callback (session_t * s)
       max_dequeue = svm_fifo_max_dequeue_cons (s->rx_fifo);
 
       if (PREDICT_FALSE (max_dequeue == 0))
-	return 0;
+	{
+	  clib_spinlock_unlock_if_init (&pm->sessions_lock);
+	  return 0;
+	}
 
       max_dequeue = clib_min (pm->rcv_buffer_size, max_dequeue);
       actual_transfer = svm_fifo_peek (rx_fifo, 0 /* relative_offset */ ,
@@ -348,13 +393,21 @@ proxy_rx_callback (session_t * s)
       ps->server_rx_fifo = rx_fifo;
       ps->server_tx_fifo = tx_fifo;
       ps->active_open_establishing = 1;
-      proxy_index = ps - pm->sessions;
+      ps_index = ps->ps_index;
 
       clib_spinlock_unlock_if_init (&pm->sessions_lock);
 
-      a->uri = (char *) pm->client_uri;
-      a->api_context = proxy_index;
+      clib_memcpy (&a->sep_ext, &pm->client_sep, sizeof (pm->client_sep));
+      a->api_context = ps_index;
       a->app_index = pm->active_open_app_index;
+
+      if (proxy_transport_needs_crypto (a->sep.transport_proto))
+	{
+	  session_endpoint_alloc_ext_cfg (&a->sep_ext,
+					  TRANSPORT_ENDPT_EXT_CFG_CRYPTO);
+	  a->sep_ext.ext_cfg->crypto.ckpair_index = pm->ckpair_index;
+	}
+
       proxy_call_main_thread (a);
     }
 
@@ -368,6 +421,8 @@ proxy_force_ack (void *handlep)
   session_t *ao_s;
 
   ao_s = session_get_from_handle (pointer_to_uword (handlep));
+  if (session_get_transport_proto (ao_s) != TRANSPORT_PROTO_TCP)
+    return;
   tc = session_get_transport (ao_s);
   tcp_send_ack ((tcp_connection_t *) tc);
 }
@@ -388,11 +443,10 @@ proxy_tx_callback (session_t * proxy_s)
 
   clib_spinlock_lock_if_init (&pm->sessions_lock);
 
-  ps = proxy_get_passive_open (pm, session_handle (proxy_s));
-  ASSERT (ps != 0);
+  ps = proxy_session_get (proxy_s->opaque);
 
   if (ps->vpp_active_open_handle == SESSION_INVALID_HANDLE)
-    return 0;
+    goto unlock;
 
   /* Force ack on active open side to update rcv wnd. Make sure it's done on
    * the right thread */
@@ -400,6 +454,7 @@ proxy_tx_callback (session_t * proxy_s)
   session_send_rpc_evt_to_thread (ps->server_rx_fifo->master_thread_index,
 				  proxy_force_ack, arg);
 
+unlock:
   clib_spinlock_unlock_if_init (&pm->sessions_lock);
 
   return 0;
@@ -439,7 +494,7 @@ active_open_connected_callback (u32 app_index, u32 opaque,
    */
   clib_spinlock_lock_if_init (&pm->sessions_lock);
 
-  ps = pool_elt_at_index (pm->sessions, opaque);
+  ps = proxy_session_get (opaque);
 
   /* Connection failed */
   if (err)
@@ -461,8 +516,6 @@ active_open_connected_callback (u32 app_index, u32 opaque,
   if (ps->po_disconnected)
     {
       /* Setup everything for the cleanup notification */
-      hash_set (pm->proxy_session_by_active_open_handle,
-		ps->vpp_active_open_handle, opaque);
       ps->ao_disconnected = 1;
       clib_spinlock_unlock_if_init (&pm->sessions_lock);
       return -1;
@@ -486,8 +539,7 @@ active_open_connected_callback (u32 app_index, u32 opaque,
   s->tx_fifo->refcnt++;
   s->rx_fifo->refcnt++;
 
-  hash_set (pm->proxy_session_by_active_open_handle,
-	    ps->vpp_active_open_handle, opaque);
+  s->opaque = opaque;
 
   clib_spinlock_unlock_if_init (&pm->sessions_lock);
 
@@ -549,11 +601,9 @@ active_open_tx_callback (session_t * ao_s)
 {
   proxy_main_t *pm = &proxy_main;
   transport_connection_t *tc;
-  session_handle_t handle;
   proxy_session_t *ps;
   session_t *proxy_s;
   u32 min_free;
-  uword *p;
 
   min_free = clib_min (svm_fifo_size (ao_s->tx_fifo) >> 3, 128 << 10);
   if (svm_fifo_max_enqueue (ao_s->tx_fifo) < min_free)
@@ -564,17 +614,12 @@ active_open_tx_callback (session_t * ao_s)
 
   clib_spinlock_lock_if_init (&pm->sessions_lock);
 
-  handle = session_handle (ao_s);
-  p = hash_get (pm->proxy_session_by_active_open_handle, handle);
-  if (!p)
-    return 0;
+  ps = proxy_session_get_if_valid (ao_s->opaque);
+  if (!ps)
+    goto unlock;
 
-  if (pool_is_free_index (pm->sessions, p[0]))
-    return 0;
-
-  ps = pool_elt_at_index (pm->sessions, p[0]);
   if (ps->vpp_server_handle == ~0)
-    return 0;
+    goto unlock;
 
   proxy_s = session_get_from_handle (ps->vpp_server_handle);
 
@@ -582,6 +627,7 @@ active_open_tx_callback (session_t * ao_s)
   tc = session_get_transport (proxy_s);
   tcp_send_ack ((tcp_connection_t *) tc);
 
+unlock:
   clib_spinlock_unlock_if_init (&pm->sessions_lock);
 
   return 0;
@@ -615,18 +661,16 @@ proxy_server_attach ()
   proxy_main_t *pm = &proxy_main;
   u64 options[APP_OPTIONS_N_OPTIONS];
   vnet_app_attach_args_t _a, *a = &_a;
-  u32 segment_size = 512 << 20;
 
   clib_memset (a, 0, sizeof (*a));
   clib_memset (options, 0, sizeof (options));
 
-  if (pm->private_segment_size)
-    segment_size = pm->private_segment_size;
   a->name = format (0, "proxy-server");
   a->api_client_index = pm->server_client_index;
   a->session_cb_vft = &proxy_session_cb_vft;
   a->options = options;
-  a->options[APP_OPTIONS_SEGMENT_SIZE] = segment_size;
+  a->options[APP_OPTIONS_SEGMENT_SIZE] = pm->segment_size;
+  a->options[APP_OPTIONS_ADD_SEGMENT_SIZE] = pm->segment_size;
   a->options[APP_OPTIONS_RX_FIFO_SIZE] = pm->fifo_size;
   a->options[APP_OPTIONS_TX_FIFO_SIZE] = pm->fifo_size;
   a->options[APP_OPTIONS_MAX_FIFO_SIZE] = pm->max_fifo_size;
@@ -694,27 +738,57 @@ proxy_server_listen ()
 {
   proxy_main_t *pm = &proxy_main;
   vnet_listen_args_t _a, *a = &_a;
+  int rv;
+
   clib_memset (a, 0, sizeof (*a));
+
   a->app_index = pm->server_app_index;
-  a->uri = (char *) pm->server_uri;
-  return vnet_bind_uri (a);
+  clib_memcpy (&a->sep_ext, &pm->server_sep, sizeof (pm->server_sep));
+  if (proxy_transport_needs_crypto (a->sep.transport_proto))
+    {
+      session_endpoint_alloc_ext_cfg (&a->sep_ext,
+				      TRANSPORT_ENDPT_EXT_CFG_CRYPTO);
+      a->sep_ext.ext_cfg->crypto.ckpair_index = pm->ckpair_index;
+    }
+
+  rv = vnet_listen (a);
+  if (a->sep_ext.ext_cfg)
+    clib_mem_free (a->sep_ext.ext_cfg);
+
+  return rv;
+}
+
+static void
+proxy_server_add_ckpair (void)
+{
+  vnet_app_add_cert_key_pair_args_t _ck_pair, *ck_pair = &_ck_pair;
+  proxy_main_t *pm = &proxy_main;
+
+  clib_memset (ck_pair, 0, sizeof (*ck_pair));
+  ck_pair->cert = (u8 *) test_srv_crt_rsa;
+  ck_pair->key = (u8 *) test_srv_key_rsa;
+  ck_pair->cert_len = test_srv_crt_rsa_len;
+  ck_pair->key_len = test_srv_key_rsa_len;
+  vnet_app_add_cert_key_pair (ck_pair);
+
+  pm->ckpair_index = ck_pair->index;
 }
 
 static int
 proxy_server_create (vlib_main_t * vm)
 {
-  proxy_main_t *pm = &proxy_main;
   vlib_thread_main_t *vtm = vlib_get_thread_main ();
+  proxy_main_t *pm = &proxy_main;
   u32 num_threads;
   int i;
 
   num_threads = 1 /* main thread */  + vtm->n_threads;
-  vec_validate (proxy_main.server_event_queue, num_threads - 1);
-  vec_validate (proxy_main.active_open_event_queue, num_threads - 1);
   vec_validate (pm->rx_buf, num_threads - 1);
 
   for (i = 0; i < num_threads; i++)
     vec_validate (pm->rx_buf[i], pm->rcv_buffer_size);
+
+  proxy_server_add_ckpair ();
 
   if (proxy_server_attach ())
     {
@@ -732,15 +806,6 @@ proxy_server_create (vlib_main_t * vm)
       return -1;
     }
 
-  for (i = 0; i < num_threads; i++)
-    {
-      pm->active_open_event_queue[i] = session_main_get_vpp_event_queue (i);
-
-      ASSERT (pm->active_open_event_queue[i]);
-
-      pm->server_event_queue[i] = session_main_get_vpp_event_queue (i);
-    }
-
   return 0;
 }
 
@@ -748,9 +813,12 @@ static clib_error_t *
 proxy_server_create_command_fn (vlib_main_t * vm, unformat_input_t * input,
 				vlib_cli_command_t * cmd)
 {
-  proxy_main_t *pm = &proxy_main;
+  unformat_input_t _line_input, *line_input = &_line_input;
   char *default_server_uri = "tcp://0.0.0.0/23";
   char *default_client_uri = "tcp://6.0.2.2/23";
+  u8 *server_uri = 0, *client_uri = 0;
+  proxy_main_t *pm = &proxy_main;
+  clib_error_t *error = 0;
   int rv, tmp32;
   u64 tmp64;
 
@@ -761,59 +829,72 @@ proxy_server_create_command_fn (vlib_main_t * vm, unformat_input_t * input,
   pm->rcv_buffer_size = 1024;
   pm->prealloc_fifos = 0;
   pm->private_segment_count = 0;
-  pm->private_segment_size = 0;
-  pm->server_uri = 0;
-  pm->client_uri = 0;
+  pm->segment_size = 512 << 20;
+
   if (vlib_num_workers ())
     clib_spinlock_init (&pm->sessions_lock);
 
-  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
-      if (unformat (input, "fifo-size %U",
-		    unformat_memory_size, &pm->fifo_size))
+      if (unformat (line_input, "fifo-size %U", unformat_memory_size,
+		    &pm->fifo_size))
 	;
-      else if (unformat (input, "max-fifo-size %U",
-			 unformat_memory_size, &pm->max_fifo_size))
+      else if (unformat (line_input, "max-fifo-size %U", unformat_memory_size,
+			 &pm->max_fifo_size))
 	;
-      else if (unformat (input, "high-watermark %d", &tmp32))
+      else if (unformat (line_input, "high-watermark %d", &tmp32))
 	pm->high_watermark = (u8) tmp32;
-      else if (unformat (input, "low-watermark %d", &tmp32))
+      else if (unformat (line_input, "low-watermark %d", &tmp32))
 	pm->low_watermark = (u8) tmp32;
-      else if (unformat (input, "rcv-buf-size %d", &pm->rcv_buffer_size))
+      else if (unformat (line_input, "rcv-buf-size %d", &pm->rcv_buffer_size))
 	;
-      else if (unformat (input, "prealloc-fifos %d", &pm->prealloc_fifos))
+      else if (unformat (line_input, "prealloc-fifos %d", &pm->prealloc_fifos))
 	;
-      else if (unformat (input, "private-segment-count %d",
+      else if (unformat (line_input, "private-segment-count %d",
 			 &pm->private_segment_count))
 	;
-      else if (unformat (input, "private-segment-size %U",
+      else if (unformat (line_input, "private-segment-size %U",
 			 unformat_memory_size, &tmp64))
 	{
-	  if (tmp64 >= 0x100000000ULL)
-	    return clib_error_return
-	      (0, "private segment size %lld (%llu) too large", tmp64, tmp64);
-	  pm->private_segment_size = tmp64;
+	  pm->segment_size = tmp64;
 	}
-      else if (unformat (input, "server-uri %s", &pm->server_uri))
-	vec_add1 (pm->server_uri, 0);
-      else if (unformat (input, "client-uri %s", &pm->client_uri))
-	vec_add1 (pm->client_uri, 0);
+      else if (unformat (line_input, "server-uri %s", &server_uri))
+	vec_add1 (server_uri, 0);
+      else if (unformat (line_input, "client-uri %s", &client_uri))
+	vec_add1 (client_uri, 0);
       else
-	return clib_error_return (0, "unknown input `%U'",
-				  format_unformat_error, input);
+	{
+	  error = clib_error_return (0, "unknown input `%U'",
+				     format_unformat_error, line_input);
+	  goto done;
+	}
     }
 
-  if (!pm->server_uri)
+  if (!server_uri)
     {
       clib_warning ("No server-uri provided, Using default: %s",
 		    default_server_uri);
-      pm->server_uri = format (0, "%s%c", default_server_uri, 0);
+      server_uri = format (0, "%s%c", default_server_uri, 0);
     }
-  if (!pm->client_uri)
+  if (!client_uri)
     {
       clib_warning ("No client-uri provided, Using default: %s",
 		    default_client_uri);
-      pm->client_uri = format (0, "%s%c", default_client_uri, 0);
+      client_uri = format (0, "%s%c", default_client_uri, 0);
+    }
+
+  if (parse_uri ((char *) server_uri, &pm->server_sep))
+    {
+      error = clib_error_return (0, "Invalid server uri %v", server_uri);
+      goto done;
+    }
+  if (parse_uri ((char *) client_uri, &pm->client_sep))
+    {
+      error = clib_error_return (0, "Invalid client uri %v", client_uri);
+      goto done;
     }
 
   vnet_session_enable_disable (vm, 1 /* turn on session and transport */ );
@@ -824,13 +905,16 @@ proxy_server_create_command_fn (vlib_main_t * vm, unformat_input_t * input,
     case 0:
       break;
     default:
-      return clib_error_return (0, "server_create returned %d", rv);
+      error = clib_error_return (0, "server_create returned %d", rv);
     }
 
-  return 0;
+done:
+  unformat_free (line_input);
+  vec_free (client_uri);
+  vec_free (server_uri);
+  return error;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (proxy_create_command, static) =
 {
   .path = "test proxy server",
@@ -841,7 +925,6 @@ VLIB_CLI_COMMAND (proxy_create_command, static) =
       "[private-segment-size <mem>][private-segment-count <nn>]",
   .function = proxy_server_create_command_fn,
 };
-/* *INDENT-ON* */
 
 clib_error_t *
 proxy_main_init (vlib_main_t * vm)
@@ -849,8 +932,6 @@ proxy_main_init (vlib_main_t * vm)
   proxy_main_t *pm = &proxy_main;
   pm->server_client_index = ~0;
   pm->active_open_client_index = ~0;
-  pm->proxy_session_by_active_open_handle = hash_create (0, sizeof (uword));
-  pm->proxy_session_by_server_handle = hash_create (0, sizeof (uword));
 
   return 0;
 }

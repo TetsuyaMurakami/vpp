@@ -49,7 +49,6 @@ ip_pmtu_dpo_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 		    vlib_frame_t *frame, ip_address_family_t af)
 {
   u32 n_left_from, *from, next_index, *to_next, n_left_to_next;
-  u32 frag_sent = 0, small_packets = 0;
 
   from = vlib_frame_vector_args (frame);
   n_left_from = frame->n_vectors;
@@ -114,8 +113,6 @@ ip_pmtu_dpo_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  if (error0 == IP_FRAG_ERROR_NONE)
 	    {
 	      /* Free original buffer chain */
-	      frag_sent += vec_len (buffer);
-	      small_packets += (vec_len (buffer) == 1);
 	      vlib_buffer_free_one (vm, pi0); /* Free original packet */
 	    }
 	  else
@@ -176,7 +173,8 @@ VLIB_REGISTER_NODE (ip4_ip_pmtu_dpo_node) = {
   .name = "ip4-pmtu-dpo",
   .vector_size = sizeof (u32),
   .format_trace = format_ip_pmtu_trace,
-  .n_errors = 0,
+  .n_errors = IP_FRAG_N_ERROR,
+  .error_counters = ip_frag_error_counters,
   .n_next_nodes = IP_PMTU_N_NEXT,
   .next_nodes =
   {
@@ -187,7 +185,8 @@ VLIB_REGISTER_NODE (ip6_ip_pmtu_dpo_node) = {
   .name = "ip6-pmtu-dpo",
   .vector_size = sizeof (u32),
   .format_trace = format_ip_pmtu_trace,
-  .n_errors = 0,
+  .n_errors = IP_FRAG_N_ERROR,
+  .error_counters = ip_frag_error_counters,
   .n_next_nodes = IP_PMTU_N_NEXT,
   .next_nodes =
   {

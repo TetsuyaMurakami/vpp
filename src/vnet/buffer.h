@@ -107,6 +107,25 @@ enum
 STATIC_ASSERT (((VNET_BUFFER_FLAGS_ALL_AVAIL & VLIB_BUFFER_FLAGS_ALL) == 0),
 	       "VLIB / VNET buffer flags overlap");
 
+#define foreach_vnet_buffer_offload_flag                                      \
+  _ (0, IP_CKSUM, "offload-ip-cksum", 1)                                      \
+  _ (1, TCP_CKSUM, "offload-tcp-cksum", 1)                                    \
+  _ (2, UDP_CKSUM, "offload-udp-cksum", 1)                                    \
+  _ (3, OUTER_IP_CKSUM, "offload-outer-ip-cksum", 1)                          \
+  _ (4, OUTER_UDP_CKSUM, "offload-outer-udp-cksum", 1)                        \
+  _ (5, TNL_VXLAN, "offload-vxlan-tunnel", 1)                                 \
+  _ (6, TNL_IPIP, "offload-ipip-tunnel", 1)
+
+typedef enum
+{
+#define _(bit, name, s, v) VNET_BUFFER_OFFLOAD_F_##name = (1 << bit),
+  foreach_vnet_buffer_offload_flag
+#undef _
+} vnet_buffer_oflags_t;
+
+#define VNET_BUFFER_OFFLOAD_F_TNL_MASK                                        \
+  (VNET_BUFFER_OFFLOAD_F_TNL_VXLAN | VNET_BUFFER_OFFLOAD_F_TNL_IPIP)
+
 #define foreach_buffer_opaque_union_subtype     \
 _(ip)                                           \
 _(l2)                                           \
@@ -138,7 +157,8 @@ typedef struct
   i16 l3_hdr_offset;
   i16 l4_hdr_offset;
   u8 feature_arc_index;
-  u8 dont_waste_me;
+  /* offload flags */
+  vnet_buffer_oflags_t oflags : 8;
 
   union
   {
@@ -170,8 +190,17 @@ typedef struct
 	  /* Rewrite length */
 	  u8 save_rewrite_length;
 
-	  /* MFIB RPF ID */
-	  u32 rpf_id;
+	  union
+	  {
+	    /* sw_if_index of the local interface the buffer was received on
+	     * - if hitting a DPO_RECEIVE - it is set in ip[46]-receive.
+	     * This is ~0 if the dpo is not a receive dpo, or if the
+	     * interface is not specified (e.g. route add via local) */
+	    u32 rx_sw_if_index;
+
+	    /* MFIB RPF ID */
+	    u32 rpf_id;
+	  };
 	};
 
 	/* ICMP */
@@ -215,7 +244,8 @@ typedef struct
 		u8 save_rewrite_length;
 		u8 ip_proto;	/* protocol in ip header */
 		u8 icmp_type_or_tcp_flags;
-		u8 is_non_first_fragment;
+		u8 is_non_first_fragment : 1;
+		u8 l4_layer_truncated : 7;
 		u32 tcp_seq_number;
 	      };
 	      /* full reassembly output variables */
@@ -290,13 +320,13 @@ typedef struct
     /* L2 classify */
     struct
     {
-      struct opaque_l2 pad;
+      u32 pad[4]; /* do not overlay w/ ip.fib_index nor l2 */
       union
       {
 	u32 table_index;
 	u32 opaque_index;
       };
-      u64 hash;
+      u32 hash;
     } l2_classify;
 
     /* vnet policer */
@@ -388,7 +418,9 @@ typedef struct
   };
 } vnet_buffer_opaque_t;
 
-#define VNET_REWRITE_TOTAL_BYTES (VLIB_BUFFER_PRE_DATA_SIZE)
+#define VNET_REWRITE_TOTAL_BYTES 128
+STATIC_ASSERT (VNET_REWRITE_TOTAL_BYTES <= VLIB_BUFFER_PRE_DATA_SIZE,
+	       "VNET_REWRITE_TOTAL_BYTES too big");
 
 STATIC_ASSERT (STRUCT_SIZE_OF (vnet_buffer_opaque_t, ip.save_rewrite_length)
 	       == STRUCT_SIZE_OF (vnet_buffer_opaque_t,
@@ -420,21 +452,6 @@ STATIC_ASSERT (sizeof (vnet_buffer_opaque_t) <=
 
 #define vnet_buffer(b) ((vnet_buffer_opaque_t *) (b)->opaque)
 
-#define foreach_vnet_buffer_offload_flag                                      \
-  _ (0, IP_CKSUM, "offload-ip-cksum", 1)                                      \
-  _ (1, TCP_CKSUM, "offload-tcp-cksum", 1)                                    \
-  _ (2, UDP_CKSUM, "offload-udp-cksum", 1)                                    \
-  _ (3, OUTER_IP_CKSUM, "offload-outer-ip-cksum", 1)                          \
-  _ (4, OUTER_TCP_CKSUM, "offload-outer-tcp-cksum", 1)                        \
-  _ (5, OUTER_UDP_CKSUM, "offload-outer-udp-cksum", 1)
-
-enum
-{
-#define _(bit, name, s, v) VNET_BUFFER_OFFLOAD_F_##name = (1 << bit),
-  foreach_vnet_buffer_offload_flag
-#undef _
-};
-
 /* Full cache line (64 bytes) of additional space */
 typedef struct
 {
@@ -450,15 +467,7 @@ typedef struct
   } qos;
 
   u8 loop_counter;
-  u8 __unused[1];
-
-  /* Group Based Policy */
-  struct
-  {
-    u8 __unused;
-    u8 flags;
-    u16 sclass;
-  } gbp;
+  u8 __unused[5];
 
   /**
    * The L4 payload size set on input on GSO enabled interfaces
@@ -472,34 +481,21 @@ typedef struct
     u16 gso_size;
     /* size of L4 prototol header */
     u16 gso_l4_hdr_sz;
-
-    /* offload flags */
-    u32 oflags;
+    i16 outer_l3_hdr_offset;
+    i16 outer_l4_hdr_offset;
   };
 
   struct
   {
     u32 arc_next;
-    /* cached session index from previous node */
-    u32 cached_session_index;
+    union
+    {
+      u32 cached_session_index;
+      u32 cached_dst_nat_session_index;
+    };
   } nat;
 
-  union
-  {
-    struct
-    {
-#if VLIB_BUFFER_TRACE_TRAJECTORY > 0
-      /* buffer trajectory tracing */
-      u16 *trajectory_trace;
-#endif
-    };
-    struct
-    {
-      u64 pad[1];
-      u64 pg_replay_timestamp;
-    };
-    u32 unused[8];
-  };
+  u32 unused[8];
 } vnet_buffer_opaque2_t;
 
 #define vnet_buffer2(b) ((vnet_buffer_opaque2_t *) (b)->opaque2)
@@ -508,8 +504,8 @@ typedef struct
  * The opaque2 field of the vlib_buffer_t is interpreted as a
  * vnet_buffer_opaque2_t. Hence it should be big enough to accommodate one.
  */
-STATIC_ASSERT (sizeof (vnet_buffer_opaque2_t) <=
-	       STRUCT_SIZE_OF (vlib_buffer_t, opaque2),
+STATIC_ASSERT (sizeof (vnet_buffer_opaque2_t) ==
+		 STRUCT_SIZE_OF (vlib_buffer_t, opaque2),
 	       "VNET buffer opaque2 meta-data too large for vlib_buffer");
 
 #define gso_mtu_sz(b) (vnet_buffer2(b)->gso_size + \
@@ -517,22 +513,34 @@ STATIC_ASSERT (sizeof (vnet_buffer_opaque2_t) <=
                        vnet_buffer(b)->l4_hdr_offset - \
                        vnet_buffer (b)->l3_hdr_offset)
 
-
+format_function_t format_vnet_buffer_no_chain;
 format_function_t format_vnet_buffer;
 format_function_t format_vnet_buffer_offload;
+format_function_t format_vnet_buffer_flags;
+format_function_t format_vnet_buffer_opaque;
+format_function_t format_vnet_buffer_opaque2;
 
 static_always_inline void
-vnet_buffer_offload_flags_set (vlib_buffer_t *b, u32 oflags)
+vnet_buffer_offload_flags_set (vlib_buffer_t *b, vnet_buffer_oflags_t oflags)
 {
-  vnet_buffer2 (b)->oflags |= oflags;
-  b->flags |= VNET_BUFFER_F_OFFLOAD;
+  if (b->flags & VNET_BUFFER_F_OFFLOAD)
+    {
+      /* add a flag to existing offload */
+      vnet_buffer (b)->oflags |= oflags;
+    }
+  else
+    {
+      /* no offload yet: reset offload flags to new value */
+      vnet_buffer (b)->oflags = oflags;
+      b->flags |= VNET_BUFFER_F_OFFLOAD;
+    }
 }
 
 static_always_inline void
-vnet_buffer_offload_flags_clear (vlib_buffer_t *b, u32 oflags)
+vnet_buffer_offload_flags_clear (vlib_buffer_t *b, vnet_buffer_oflags_t oflags)
 {
-  vnet_buffer2 (b)->oflags &= ~oflags;
-  if (0 == vnet_buffer2 (b)->oflags)
+  vnet_buffer (b)->oflags &= ~oflags;
+  if (0 == vnet_buffer (b)->oflags)
     b->flags &= ~VNET_BUFFER_F_OFFLOAD;
 }
 

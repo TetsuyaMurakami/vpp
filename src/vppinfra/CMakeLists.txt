@@ -27,19 +27,19 @@ endif(VPP_VECTOR_GROW_BY_ONE)
 
 configure_file(
   ${CMAKE_SOURCE_DIR}/vppinfra/config.h.in
-  ${CMAKE_BINARY_DIR}/vppinfra/config.h
+  ${CMAKE_CURRENT_BINARY_DIR}/config.h
 )
 
 install(
-  FILES ${CMAKE_BINARY_DIR}/vppinfra/config.h
-  DESTINATION include/vppinfra
+  FILES ${CMAKE_CURRENT_BINARY_DIR}/config.h
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/vppinfra
   COMPONENT vpp-dev
 )
 
 add_definitions(-fvisibility=hidden)
 
 # Ensure symbols from cJSON are exported
-set_source_files_properties( cJSON.c PROPERTIES
+set_source_files_properties( cJSON.c jsonformat.c PROPERTIES
   COMPILE_DEFINITIONS " CJSON_API_VISIBILITY " )
 
 
@@ -48,6 +48,7 @@ set_source_files_properties( cJSON.c PROPERTIES
 ##############################################################################
 set(VPPINFRA_SRCS
   backtrace.c
+  bitmap.c
   bihash_all_vector.c
   cpu.c
   dlmalloc.c
@@ -56,10 +57,11 @@ set(VPPINFRA_SRCS
   error.c
   fifo.c
   format.c
-  graph.c
+  format_table.c
   hash.c
   heap.c
   interrupt.c
+  jsonformat.c
   longjmp.S
   macros.c
   maplog.c
@@ -69,6 +71,9 @@ set(VPPINFRA_SRCS
   mhash.c
   mpcap.c
   pcap.c
+  perfmon/bundle_default.c
+  perfmon/bundle_core_power.c
+  perfmon/perfmon.c
   pmalloc.c
   pool.c
   ptclosure.c
@@ -95,11 +100,12 @@ set(VPPINFRA_SRCS
   valloc.c
   vec.c
   vector.c
+  vector/toeplitz.c
   cJSON.c
 )
 
 set(VPPINFRA_HEADERS
-  sanitizer.h
+  bihash_12_4.h
   bihash_16_8.h
   bihash_24_8.h
   bihash_32_8.h
@@ -122,6 +128,11 @@ set(VPPINFRA_HEADERS
   clib.h
   cpu.h
   crc32.h
+  crypto/sha2.h
+  crypto/ghash.h
+  crypto/aes.h
+  crypto/aes_cbc.h
+  crypto/aes_gcm.h
   dlist.h
   dlmalloc.h
   elf_clib.h
@@ -132,10 +143,11 @@ set(VPPINFRA_HEADERS
   fifo.h
   file.h
   format.h
-  graph.h
+  format_table.h
   hash.h
   heap.h
   interrupt.h
+  jsonformat.h
   lb_hash_hash.h
   llist.h
   lock.h
@@ -143,15 +155,16 @@ set(VPPINFRA_HEADERS
   macros.h
   maplog.h
   math.h
-  memcpy_avx2.h
-  memcpy_avx512.h
-  memcpy_sse3.h
+  memcpy.h
+  memcpy_x86_64.h
   mem.h
   mhash.h
   mpcap.h
   os.h
   pcap.h
   pcap_funcs.h
+  pcg.h
+  perfmon/perfmon.h
   pmalloc.h
   pool.h
   ptclosure.h
@@ -160,7 +173,6 @@ set(VPPINFRA_HEADERS
   random_isaac.h
   rbtree.h
   serialize.h
-  sha2.h
   smp.h
   socket.h
   sparse_vec.h
@@ -185,13 +197,18 @@ set(VPPINFRA_HEADERS
   vector_altivec.h
   vector_avx2.h
   vector_avx512.h
-  vector_funcs.h
+  vector/array_mask.h
+  vector/compress.h
+  vector/count_equal.h
+  vector/index_to_ptr.h
+  vector/ip_csum.h
+  vector/mask_compare.h
+  vector/toeplitz.h
   vector.h
   vector_neon.h
   vector_sse42.h
   warnings.h
   xxhash.h
-  linux/syscall.h
   linux/sysfs.h
 )
 
@@ -200,6 +217,7 @@ if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
     elf_clib.c
     linux/mem.c
     linux/sysfs.c
+    linux/netns.c
    )
 endif()
 
@@ -234,6 +252,7 @@ if(VPP_BUILD_VPPINFRA_TESTS)
     macros
     maplog
     pmalloc
+    pool_alloc
     pool_iterate
     ptclosure
     random
@@ -261,3 +280,32 @@ if(VPP_BUILD_VPPINFRA_TESTS)
       )
   endforeach()
 endif(VPP_BUILD_VPPINFRA_TESTS)
+
+set(test_files
+  test/aes_cbc.c
+  test/aes_gcm.c
+  test/array_mask.c
+  test/compress.c
+  test/count_equal.c
+  test/crc32c.c
+  test/index_to_ptr.c
+  test/ip_csum.c
+  test/mask_compare.c
+  test/memcpy_x86_64.c
+  test/sha2.c
+  test/toeplitz.c
+)
+
+add_vpp_executable(test_infra
+  SOURCES
+  test/test.c
+  ${test_files}
+  LINK_LIBRARIES vppinfra
+  NO_INSTALL
+)
+
+vpp_library_set_multiarch_sources(test_infra
+  SOURCES
+  ${test_files}
+)
+

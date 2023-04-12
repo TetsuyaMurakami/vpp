@@ -12,6 +12,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#ifdef HAVE_GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <unistd.h>
 #include <stdio.h>
 #include <signal.h>
@@ -21,6 +26,7 @@
 #include <stdarg.h>
 #include <sys/resource.h>
 #include <netinet/tcp.h>
+#include <netinet/udp.h>
 
 #include <vcl/ldp_socket_wrapper.h>
 #include <vcl/ldp.h>
@@ -50,6 +56,16 @@
 #endif
 
 #define LDP_MAX_NWORKERS 32
+
+#ifdef HAVE_GNU_SOURCE
+#define SOCKADDR_GET_SA(__addr) __addr.__sockaddr__;
+#else
+#define SOCKADDR_GET_SA(__addr) _addr;
+#endif
+
+#ifndef UDP_SEGMENT
+#define UDP_SEGMENT 103
+#endif
 
 typedef struct ldp_worker_ctx_
 {
@@ -143,15 +159,14 @@ ldp_worker_get_current (void)
 static inline void
 ldp_set_app_name (char *app_name)
 {
-  snprintf (ldp->app_name, LDP_APP_NAME_MAX,
-	    "ldp-%d-%s", getpid (), app_name);
+  snprintf (ldp->app_name, LDP_APP_NAME_MAX, "%s-ldp-%d", app_name, getpid ());
 }
 
 static inline char *
 ldp_get_app_name ()
 {
   if (ldp->app_name[0] == '\0')
-    ldp_set_app_name ("app");
+    ldp_set_app_name (program_invocation_short_name);
 
   return ldp->app_name;
 }
@@ -179,32 +194,9 @@ ldp_alloc_workers (void)
   pool_alloc (ldp->workers, LDP_MAX_NWORKERS);
 }
 
-static inline int
-ldp_init (void)
+static void
+ldp_init_cfg (void)
 {
-  ldp_worker_ctx_t *ldpw;
-  int rv;
-
-  if (PREDICT_TRUE (ldp->init))
-    return 0;
-
-  ldp->init = 1;
-  ldp->vcl_needs_real_epoll = 1;
-  rv = vls_app_create (ldp_get_app_name ());
-  if (rv != VPPCOM_OK)
-    {
-      ldp->vcl_needs_real_epoll = 0;
-      if (rv == VPPCOM_EEXIST)
-	return 0;
-      LDBG (2, "\nERROR: ldp_init: vppcom_app_create()"
-	    " failed!  rv = %d (%s)\n", rv, vppcom_retval_str (rv));
-      ldp->init = 0;
-      return rv;
-    }
-  ldp->vcl_needs_real_epoll = 0;
-  ldp_alloc_workers ();
-  ldpw = ldp_worker_get_current ();
-
   char *env_var_str = getenv (LDP_ENV_DEBUG);
   if (env_var_str)
     {
@@ -272,10 +264,11 @@ ldp_init (void)
       /* Make sure there are enough bits in the fd set for vcl sessions */
       if (ldp->vlsh_bit_val > FD_SETSIZE / 2)
 	{
-	  LDBG (0, "ERROR: LDP vlsh bit value %d > FD_SETSIZE/2 %d!",
+	  /* Only valid for select/pselect, so just WARNING and not exit */
+	  LDBG (0,
+		"WARNING: LDP vlsh bit value %d > FD_SETSIZE/2 %d, "
+		"select/pselect not supported now!",
 		ldp->vlsh_bit_val, FD_SETSIZE / 2);
-	  ldp->init = 0;
-	  return -1;
 	}
     }
   env_var_str = getenv (LDP_ENV_TLS_TRANS);
@@ -283,17 +276,51 @@ ldp_init (void)
     {
       ldp->transparent_tls = 1;
     }
+}
 
-  /* *INDENT-OFF* */
+static int
+ldp_init (void)
+{
+  ldp_worker_ctx_t *ldpw;
+  int rv;
+
+  ASSERT (!ldp->init);
+
+  ldp_init_cfg ();
+  ldp->init = 1;
+  ldp->vcl_needs_real_epoll = 1;
+  rv = vls_app_create (ldp_get_app_name ());
+  if (rv != VPPCOM_OK)
+    {
+      ldp->vcl_needs_real_epoll = 0;
+      if (rv == VPPCOM_EEXIST)
+	return 0;
+      LDBG (2,
+	    "\nERROR: ldp_init: vppcom_app_create()"
+	    " failed!  rv = %d (%s)\n",
+	    rv, vppcom_retval_str (rv));
+      ldp->init = 0;
+      return rv;
+    }
+  ldp->vcl_needs_real_epoll = 0;
+  ldp_alloc_workers ();
+  ldpw = ldp_worker_get_current ();
+
   pool_foreach (ldpw, ldp->workers)  {
     clib_memset (&ldpw->clib_time, 0, sizeof (ldpw->clib_time));
   }
-  /* *INDENT-ON* */
 
   LDBG (0, "LDP initialization: done!");
 
   return 0;
 }
+
+#define ldp_init_check()                                                      \
+  if (PREDICT_FALSE (!ldp->init))                                             \
+    {                                                                         \
+      if ((errno = -ldp_init ()))                                             \
+	return -1;                                                            \
+    }
 
 int
 close (int fd)
@@ -301,8 +328,7 @@ close (int fd)
   vls_handle_t vlsh;
   int rv, epfd;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (fd);
   if (vlsh != VLS_INVALID_HANDLE)
@@ -310,16 +336,16 @@ close (int fd)
       epfd = vls_attr (vlsh, VPPCOM_ATTR_GET_LIBC_EPFD, 0, 0);
       if (epfd > 0)
 	{
+	  ldp_worker_ctx_t *ldpw = ldp_worker_get_current ();
+	  u32 size = sizeof (epfd);
+
 	  LDBG (0, "fd %d: calling libc_close: epfd %u", fd, epfd);
 
-	  rv = libc_close (epfd);
-	  if (rv < 0)
-	    {
-	      u32 size = sizeof (epfd);
-	      epfd = 0;
+	  libc_close (epfd);
+	  ldpw->mq_epfd_added = 0;
 
-	      (void) vls_attr (vlsh, VPPCOM_ATTR_SET_LIBC_EPFD, &epfd, &size);
-	    }
+	  epfd = 0;
+	  (void) vls_attr (vlsh, VPPCOM_ATTR_SET_LIBC_EPFD, &epfd, &size);
 	}
       else if (PREDICT_FALSE (epfd < 0))
 	{
@@ -353,8 +379,7 @@ read (int fd, void *buf, size_t nbytes)
   vls_handle_t vlsh;
   ssize_t size;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (fd);
   if (vlsh != VLS_INVALID_HANDLE)
@@ -381,8 +406,7 @@ readv (int fd, const struct iovec * iov, int iovcnt)
   vls_handle_t vlsh;
   ssize_t size = 0;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (fd);
   if (vlsh != VLS_INVALID_HANDLE)
@@ -421,8 +445,7 @@ write (int fd, const void *buf, size_t nbytes)
   vls_handle_t vlsh;
   ssize_t size = 0;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (fd);
   if (vlsh != VLS_INVALID_HANDLE)
@@ -449,8 +472,7 @@ writev (int fd, const struct iovec * iov, int iovcnt)
   vls_handle_t vlsh;
   int i, rv = 0;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (fd);
   if (vlsh != VLS_INVALID_HANDLE)
@@ -543,8 +565,7 @@ fcntl (int fd, int cmd, ...)
   va_list ap;
   int rv;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   va_start (ap, cmd);
   rv = fcntl_internal (fd, cmd, ap);
@@ -559,8 +580,7 @@ fcntl64 (int fd, int cmd, ...)
   va_list ap;
   int rv;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   va_start (ap, cmd);
   rv = fcntl_internal (fd, cmd, ap);
@@ -575,8 +595,7 @@ ioctl (int fd, unsigned long int cmd, ...)
   va_list ap;
   int rv;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   va_start (ap, cmd);
 
@@ -726,10 +745,11 @@ ldp_pselect (int nfds, fd_set * __restrict readfds,
       time_out = (timeout->tv_sec == 0 && timeout->tv_nsec == 0) ?
 	(f64) 0 : (f64) timeout->tv_sec + (f64) timeout->tv_nsec / (f64) 1e9;
 
+      time_out += clib_time_now (&ldpw->clib_time);
+
       /* select as fine grained sleep */
       if (!nfds)
 	{
-	  time_out += clib_time_now (&ldpw->clib_time);
 	  while (clib_time_now (&ldpw->clib_time) < time_out)
 	    ;
 	  return 0;
@@ -968,9 +988,7 @@ assign_cert_key_pair (vls_handle_t vlsh)
     return -1;
 
   ckp_len = sizeof (ldp->ckpair_index);
-  return vppcom_session_attr (vlsh_to_session_index (vlsh),
-			      VPPCOM_ATTR_SET_CKPAIR, &ldp->ckpair_index,
-			      &ckp_len);
+  return vls_attr (vlsh, VPPCOM_ATTR_SET_CKPAIR, &ldp->ckpair_index, &ckp_len);
 }
 
 int
@@ -980,8 +998,7 @@ socket (int domain, int type, int protocol)
   u8 is_nonblocking = type & SOCK_NONBLOCK ? 1 : 0;
   vls_handle_t vlsh;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   if (((domain == AF_INET) || (domain == AF_INET6)) &&
       ((sock_type == SOCK_STREAM) || (sock_type == SOCK_DGRAM)))
@@ -1035,8 +1052,7 @@ socketpair (int domain, int type, int protocol, int fds[2])
 {
   int rv, sock_type = type & ~(SOCK_CLOEXEC | SOCK_NONBLOCK);
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   if (((domain == AF_INET) || (domain == AF_INET6)) &&
       ((sock_type == SOCK_STREAM) || (sock_type == SOCK_DGRAM)))
@@ -1055,13 +1071,13 @@ socketpair (int domain, int type, int protocol, int fds[2])
 }
 
 int
-bind (int fd, __CONST_SOCKADDR_ARG addr, socklen_t len)
+bind (int fd, __CONST_SOCKADDR_ARG _addr, socklen_t len)
 {
+  const struct sockaddr *addr = SOCKADDR_GET_SA (_addr);
   vls_handle_t vlsh;
   int rv;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (fd);
   if (vlsh != VLS_INVALID_HANDLE)
@@ -1128,14 +1144,12 @@ done:
 }
 
 static inline int
-ldp_copy_ep_to_sockaddr (__SOCKADDR_ARG addr, socklen_t * __restrict len,
-			 vppcom_endpt_t * ep)
+ldp_copy_ep_to_sockaddr (struct sockaddr *addr, socklen_t *__restrict len,
+			 vppcom_endpt_t *ep)
 {
-  int rv = 0;
-  int sa_len, copy_len;
+  int rv = 0, sa_len, copy_len;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   if (addr && len && ep)
     {
@@ -1174,13 +1188,13 @@ ldp_copy_ep_to_sockaddr (__SOCKADDR_ARG addr, socklen_t * __restrict len,
 }
 
 int
-getsockname (int fd, __SOCKADDR_ARG addr, socklen_t * __restrict len)
+getsockname (int fd, __SOCKADDR_ARG _addr, socklen_t *__restrict len)
 {
+  struct sockaddr *addr = SOCKADDR_GET_SA (_addr);
   vls_handle_t vlsh;
   int rv;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (fd);
   if (vlsh != VLS_INVALID_HANDLE)
@@ -1209,20 +1223,20 @@ getsockname (int fd, __SOCKADDR_ARG addr, socklen_t * __restrict len)
     }
   else
     {
-      rv = libc_getsockname (fd, addr, len);
+      rv = libc_getsockname (fd, _addr, len);
     }
 
   return rv;
 }
 
 int
-connect (int fd, __CONST_SOCKADDR_ARG addr, socklen_t len)
+connect (int fd, __CONST_SOCKADDR_ARG _addr, socklen_t len)
 {
+  const struct sockaddr *addr = SOCKADDR_GET_SA (_addr);
   vls_handle_t vlsh;
   int rv;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   if (!addr)
     {
@@ -1298,13 +1312,13 @@ done:
 }
 
 int
-getpeername (int fd, __SOCKADDR_ARG addr, socklen_t * __restrict len)
+getpeername (int fd, __SOCKADDR_ARG _addr, socklen_t *__restrict len)
 {
+  struct sockaddr *addr = SOCKADDR_GET_SA (_addr);
   vls_handle_t vlsh;
   int rv;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (fd);
   if (vlsh != VLS_INVALID_HANDLE)
@@ -1344,8 +1358,7 @@ send (int fd, const void *buf, size_t n, int flags)
   vls_handle_t vlsh = ldp_fd_to_vlsh (fd);
   ssize_t size;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   if (vlsh != VLS_INVALID_HANDLE)
     {
@@ -1371,8 +1384,7 @@ sendfile (int out_fd, int in_fd, off_t * offset, size_t len)
   vls_handle_t vlsh;
   ssize_t size = 0;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (out_fd);
   if (vlsh != VLS_INVALID_HANDLE)
@@ -1521,8 +1533,7 @@ recv (int fd, void *buf, size_t n, int flags)
   vls_handle_t vlsh;
   ssize_t size;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (fd);
   if (vlsh != VLS_INVALID_HANDLE)
@@ -1542,12 +1553,25 @@ recv (int fd, void *buf, size_t n, int flags)
   return size;
 }
 
-static int
-ldp_vls_sendo (vls_handle_t vlsh, const void *buf, size_t n, int flags,
-	       __CONST_SOCKADDR_ARG addr, socklen_t addr_len)
+ssize_t
+__recv_chk (int fd, void *buf, size_t n, size_t buflen, int flags)
 {
+  if (n > buflen)
+    return -1;
+
+  return recv (fd, buf, n, flags);
+}
+
+static inline int
+ldp_vls_sendo (vls_handle_t vlsh, const void *buf, size_t n,
+	       vppcom_endpt_tlv_t *app_tlvs, int flags,
+	       __CONST_SOCKADDR_ARG _addr, socklen_t addr_len)
+{
+  const struct sockaddr *addr = SOCKADDR_GET_SA (_addr);
   vppcom_endpt_t *ep = 0;
   vppcom_endpt_t _ep;
+
+  _ep.app_tlvs = app_tlvs;
 
   if (addr)
     {
@@ -1578,11 +1602,11 @@ ldp_vls_sendo (vls_handle_t vlsh, const void *buf, size_t n, int flags,
 }
 
 static int
-ldp_vls_recvfrom (vls_handle_t vlsh, void *__restrict buf, size_t n,
-		  int flags, __SOCKADDR_ARG addr,
-		  socklen_t * __restrict addr_len)
+ldp_vls_recvfrom (vls_handle_t vlsh, void *__restrict buf, size_t n, int flags,
+		  __SOCKADDR_ARG _addr, socklen_t *__restrict addr_len)
 {
   u8 src_addr[sizeof (struct sockaddr_in6)];
+  struct sockaddr *addr = SOCKADDR_GET_SA (_addr);
   vppcom_endpt_t ep;
   ssize_t size;
   int rv;
@@ -1607,18 +1631,18 @@ ldp_vls_recvfrom (vls_handle_t vlsh, void *__restrict buf, size_t n,
 
 ssize_t
 sendto (int fd, const void *buf, size_t n, int flags,
-	__CONST_SOCKADDR_ARG addr, socklen_t addr_len)
+	__CONST_SOCKADDR_ARG _addr, socklen_t addr_len)
 {
+  const struct sockaddr *addr = SOCKADDR_GET_SA (_addr);
   vls_handle_t vlsh;
   ssize_t size;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (fd);
-  if (vlsh != INVALID_SESSION_ID)
+  if (vlsh != VLS_INVALID_HANDLE)
     {
-      size = ldp_vls_sendo (vlsh, buf, n, flags, addr, addr_len);
+      size = ldp_vls_sendo (vlsh, buf, n, NULL, flags, addr, addr_len);
       if (size < 0)
 	{
 	  errno = -size;
@@ -1640,8 +1664,7 @@ recvfrom (int fd, void *__restrict buf, size_t n, int flags,
   vls_handle_t vlsh;
   ssize_t size;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (fd);
   if (vlsh != VLS_INVALID_HANDLE)
@@ -1661,26 +1684,119 @@ recvfrom (int fd, void *__restrict buf, size_t n, int flags,
   return size;
 }
 
+static int
+ldp_parse_cmsg (vls_handle_t vlsh, const struct msghdr *msg,
+		vppcom_endpt_tlv_t **app_tlvs)
+{
+  uint8_t *ad, *at = (uint8_t *) *app_tlvs;
+  vppcom_endpt_tlv_t *adh;
+  struct in_pktinfo *pi;
+  struct cmsghdr *cmsg;
+
+  cmsg = CMSG_FIRSTHDR (msg);
+
+  while (cmsg != NULL)
+    {
+      switch (cmsg->cmsg_level)
+	{
+	case SOL_UDP:
+	  switch (cmsg->cmsg_type)
+	    {
+	    case UDP_SEGMENT:
+	      vec_add2 (at, adh, sizeof (*adh));
+	      adh->data_type = VCL_UDP_SEGMENT;
+	      adh->data_len = sizeof (uint16_t);
+	      vec_add2 (at, ad, sizeof (uint16_t));
+	      *(uint16_t *) ad = *(uint16_t *) CMSG_DATA (cmsg);
+	      break;
+	    default:
+	      LDBG (1, "SOL_UDP cmsg_type %u not supported", cmsg->cmsg_type);
+	      break;
+	    }
+	  break;
+	case SOL_IP:
+	  switch (cmsg->cmsg_type)
+	    {
+	    case IP_PKTINFO:
+	      vec_add2 (at, adh, sizeof (*adh));
+	      adh->data_type = VCL_IP_PKTINFO;
+	      adh->data_len = sizeof (struct in_addr);
+	      vec_add2 (at, ad, sizeof (struct in_addr));
+	      pi = (void *) CMSG_DATA (cmsg);
+	      clib_memcpy_fast (ad, &pi->ipi_spec_dst,
+				sizeof (struct in_addr));
+	      break;
+	    default:
+	      LDBG (1, "SOL_IP cmsg_type %u not supported", cmsg->cmsg_type);
+	      break;
+	    }
+	  break;
+	default:
+	  LDBG (1, "cmsg_level %u not supported", cmsg->cmsg_level);
+	  break;
+	}
+      cmsg = CMSG_NXTHDR ((struct msghdr *) msg, cmsg);
+    }
+  *app_tlvs = (vppcom_endpt_tlv_t *) at;
+  return 0;
+}
+
+static int
+ldp_make_cmsg (vls_handle_t vlsh, struct msghdr *msg)
+{
+  u32 optval, optlen = sizeof (optval);
+  struct cmsghdr *cmsg;
+
+  cmsg = CMSG_FIRSTHDR (msg);
+
+  if (!vls_attr (vlsh, VPPCOM_ATTR_GET_IP_PKTINFO, (void *) &optval, &optlen))
+    return 0;
+
+  if (optval)
+    {
+      vppcom_endpt_t ep;
+      u8 addr_buf[sizeof (struct in_addr)];
+      u32 size = sizeof (ep);
+
+      ep.ip = addr_buf;
+
+      if (!vls_attr (vlsh, VPPCOM_ATTR_GET_LCL_ADDR, &ep, &size))
+	{
+	  struct in_pktinfo pi = {};
+
+	  clib_memcpy (&pi.ipi_addr, ep.ip, sizeof (struct in_addr));
+	  cmsg->cmsg_level = SOL_IP;
+	  cmsg->cmsg_type = IP_PKTINFO;
+	  cmsg->cmsg_len = CMSG_LEN (sizeof (pi));
+	  clib_memcpy (CMSG_DATA (cmsg), &pi, sizeof (pi));
+	}
+    }
+
+  return 0;
+}
+
 ssize_t
 sendmsg (int fd, const struct msghdr * msg, int flags)
 {
   vls_handle_t vlsh;
   ssize_t size;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (fd);
   if (vlsh != VLS_INVALID_HANDLE)
     {
+      vppcom_endpt_tlv_t *app_tlvs = 0;
       struct iovec *iov = msg->msg_iov;
       ssize_t total = 0;
-      int i, rv;
+      int i, rv = 0;
+
+      ldp_parse_cmsg (vlsh, msg, &app_tlvs);
 
       for (i = 0; i < msg->msg_iovlen; ++i)
 	{
-	  rv = ldp_vls_sendo (vlsh, iov[i].iov_base, iov[i].iov_len, flags,
-			      msg->msg_name, msg->msg_namelen);
+	  rv = ldp_vls_sendo (vlsh, iov[i].iov_base, iov[i].iov_len, app_tlvs,
+			      flags, msg->msg_name, msg->msg_namelen);
 	  if (rv < 0)
 	    break;
 	  else
@@ -1690,6 +1806,8 @@ sendmsg (int fd, const struct msghdr * msg, int flags)
 		break;
 	    }
 	}
+
+      vec_free (app_tlvs);
 
       if (rv < 0 && total == 0)
 	{
@@ -1707,7 +1825,7 @@ sendmsg (int fd, const struct msghdr * msg, int flags)
   return size;
 }
 
-#ifdef USE_GNU
+#ifdef _GNU_SOURCE
 int
 sendmmsg (int fd, struct mmsghdr *vmessages, unsigned int vlen, int flags)
 {
@@ -1715,10 +1833,9 @@ sendmmsg (int fd, struct mmsghdr *vmessages, unsigned int vlen, int flags)
   const char *func_str;
   u32 sh = ldp_fd_to_vlsh (fd);
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
-  if (sh != INVALID_SESSION_ID)
+  if (sh != VLS_INVALID_HANDLE)
     {
       clib_warning ("LDP<%d>: LDP-TBD", getpid ());
       errno = ENOSYS;
@@ -1761,8 +1878,7 @@ recvmsg (int fd, struct msghdr * msg, int flags)
   vls_handle_t vlsh;
   ssize_t size;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (fd);
   if (vlsh != VLS_INVALID_HANDLE)
@@ -1798,7 +1914,11 @@ recvmsg (int fd, struct msghdr * msg, int flags)
 	  size = -1;
 	}
       else
-	size = total;
+	{
+	  if (msg->msg_controllen)
+	    ldp_make_cmsg (vlsh, msg);
+	  size = total;
+	}
     }
   else
     {
@@ -1808,53 +1928,60 @@ recvmsg (int fd, struct msghdr * msg, int flags)
   return size;
 }
 
-#ifdef USE_GNU
+#ifdef _GNU_SOURCE
 int
 recvmmsg (int fd, struct mmsghdr *vmessages,
 	  unsigned int vlen, int flags, struct timespec *tmo)
 {
-  ssize_t size;
-  const char *func_str;
-  u32 sh = ldp_fd_to_vlsh (fd);
+  ldp_worker_ctx_t *ldpw = ldp_worker_get_current ();
+  u32 sh;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
-  if (sh != INVALID_SESSION_ID)
+  sh = ldp_fd_to_vlsh (fd);
+
+  if (sh != VLS_INVALID_HANDLE)
     {
-      clib_warning ("LDP<%d>: LDP-TBD", getpid ());
-      errno = ENOSYS;
-      size = -1;
+      struct mmsghdr *mh;
+      ssize_t rv = 0;
+      u32 nvecs = 0;
+      f64 time_out;
+
+      if (PREDICT_FALSE (ldpw->clib_time.init_cpu_time == 0))
+	clib_time_init (&ldpw->clib_time);
+      if (tmo)
+	{
+	  time_out = (f64) tmo->tv_sec + (f64) tmo->tv_nsec / (f64) 1e9;
+	  time_out += clib_time_now (&ldpw->clib_time);
+	}
+      else
+	{
+	  time_out = (f64) ~0;
+	}
+
+      while (nvecs < vlen)
+	{
+	  mh = &vmessages[nvecs];
+	  rv = recvmsg (fd, &mh->msg_hdr, flags);
+	  if (rv > 0)
+	    {
+	      mh->msg_len = rv;
+	      nvecs += 1;
+	      continue;
+	    }
+
+	  if (!time_out || clib_time_now (&ldpw->clib_time) >= time_out)
+	    break;
+
+	  usleep (1);
+	}
+
+      return nvecs > 0 ? nvecs : rv;
     }
   else
     {
-      func_str = "libc_recvmmsg";
-
-      if (LDP_DEBUG > 2)
-	clib_warning ("LDP<%d>: fd %d (0x%x): calling %s(): "
-		      "vmessages %p, vlen %u, flags 0x%x, tmo %p",
-		      getpid (), fd, fd, func_str, vmessages, vlen,
-		      flags, tmo);
-
-      size = libc_recvmmsg (fd, vmessages, vlen, flags, tmo);
+      return libc_recvmmsg (fd, vmessages, vlen, flags, tmo);
     }
-
-  if (LDP_DEBUG > 2)
-    {
-      if (size < 0)
-	{
-	  int errno_val = errno;
-	  perror (func_str);
-	  clib_warning ("LDP<%d>: ERROR: fd %d (0x%x): %s() failed! "
-			"rv %d, errno = %d", getpid (), fd, fd,
-			func_str, size, errno_val);
-	  errno = errno_val;
-	}
-      else
-	clib_warning ("LDP<%d>: fd %d (0x%x): returning %d (0x%x)",
-		      getpid (), fd, fd, size, size);
-    }
-  return size;
 }
 #endif
 
@@ -1865,8 +1992,7 @@ getsockopt (int fd, int level, int optname,
   vls_handle_t vlsh;
   int rv;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (fd);
   if (vlsh != VLS_INVALID_HANDLE)
@@ -1952,11 +2078,20 @@ getsockopt (int fd, int level, int optname,
 	    case SO_REUSEADDR:
 	      rv = vls_attr (vlsh, VPPCOM_ATTR_GET_REUSEADDR, optval, optlen);
 	      break;
+	    case SO_REUSEPORT:
+	      rv = vls_attr (vlsh, VPPCOM_ATTR_GET_REUSEPORT, optval, optlen);
+	      break;
 	    case SO_BROADCAST:
 	      rv = vls_attr (vlsh, VPPCOM_ATTR_GET_BROADCAST, optval, optlen);
 	      break;
+	    case SO_DOMAIN:
+	      rv = vls_attr (vlsh, VPPCOM_ATTR_GET_DOMAIN, optval, optlen);
+	      break;
 	    case SO_ERROR:
 	      rv = vls_attr (vlsh, VPPCOM_ATTR_GET_ERROR, optval, optlen);
+	      break;
+	    case SO_BINDTODEVICE:
+	      rv = 0;
 	      break;
 	    default:
 	      LDBG (0, "ERROR: fd %d: getsockopt SOL_SOCKET: vlsh %u "
@@ -1989,8 +2124,7 @@ setsockopt (int fd, int level, int optname,
   vls_handle_t vlsh;
   int rv;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (fd);
   if (vlsh != VLS_INVALID_HANDLE)
@@ -2053,13 +2187,35 @@ setsockopt (int fd, int level, int optname,
 	      rv = vls_attr (vlsh, VPPCOM_ATTR_SET_REUSEADDR,
 			     (void *) optval, &optlen);
 	      break;
+	    case SO_REUSEPORT:
+	      rv = vls_attr (vlsh, VPPCOM_ATTR_SET_REUSEPORT, (void *) optval,
+			     &optlen);
+	      break;
 	    case SO_BROADCAST:
 	      rv = vls_attr (vlsh, VPPCOM_ATTR_SET_BROADCAST,
 			     (void *) optval, &optlen);
 	      break;
+	    case SO_LINGER:
+	      rv = 0;
+	      break;
 	    default:
 	      LDBG (0, "ERROR: fd %d: setsockopt SOL_SOCKET: vlsh %u "
 		    "optname %d unsupported!", fd, vlsh, optname);
+	      break;
+	    }
+	  break;
+	case SOL_IP:
+	  switch (optname)
+	    {
+	    case IP_PKTINFO:
+	      rv = vls_attr (vlsh, VPPCOM_ATTR_SET_IP_PKTINFO, (void *) optval,
+			     &optlen);
+	      break;
+	    default:
+	      LDBG (0,
+		    "ERROR: fd %d: setsockopt SOL_IP: vlsh %u optname %d"
+		    "unsupported!",
+		    fd, vlsh, optname);
 	      break;
 	    }
 	  break;
@@ -2087,8 +2243,7 @@ listen (int fd, int n)
   vls_handle_t vlsh;
   int rv;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (fd);
   if (vlsh != VLS_INVALID_HANDLE)
@@ -2113,14 +2268,14 @@ listen (int fd, int n)
 }
 
 static inline int
-ldp_accept4 (int listen_fd, __SOCKADDR_ARG addr,
-	     socklen_t * __restrict addr_len, int flags)
+ldp_accept4 (int listen_fd, __SOCKADDR_ARG _addr,
+	     socklen_t *__restrict addr_len, int flags)
 {
+  struct sockaddr *addr = SOCKADDR_GET_SA (_addr);
   vls_handle_t listen_vlsh, accept_vlsh;
   int rv;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   listen_vlsh = ldp_fd_to_vlsh (listen_fd);
   if (listen_vlsh != VLS_INVALID_HANDLE)
@@ -2184,31 +2339,15 @@ int
 shutdown (int fd, int how)
 {
   vls_handle_t vlsh;
-  int rv = 0, flags;
-  u32 flags_len = sizeof (flags);
+  int rv = 0;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vlsh = ldp_fd_to_vlsh (fd);
   if (vlsh != VLS_INVALID_HANDLE)
     {
       LDBG (0, "called shutdown: fd %u vlsh %u how %d", fd, vlsh, how);
-
-      if (vls_attr (vlsh, VPPCOM_ATTR_SET_SHUT, &how, &flags_len))
-	{
-	  close (fd);
-	  return -1;
-	}
-
-      if (vls_attr (vlsh, VPPCOM_ATTR_GET_SHUT, &flags, &flags_len))
-	{
-	  close (fd);
-	  return -1;
-	}
-
-      if (flags == SHUT_RDWR)
-	rv = close (fd);
+      rv = vls_shutdown (vlsh, how);
     }
   else
     {
@@ -2226,8 +2365,7 @@ epoll_create1 (int flags)
   vls_handle_t vlsh;
   int rv;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   if (ldp->vcl_needs_real_epoll || vls_use_real_epoll ())
     {
@@ -2270,8 +2408,7 @@ epoll_ctl (int epfd, int op, int fd, struct epoll_event *event)
   vls_handle_t vep_vlsh, vlsh;
   int rv;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   vep_vlsh = ldp_fd_to_vlsh (epfd);
   if (PREDICT_FALSE (vep_vlsh == VLS_INVALID_HANDLE))
@@ -2281,8 +2418,10 @@ epoll_ctl (int epfd, int op, int fd, struct epoll_event *event)
        * was acquired outside of the LD_PRELOAD process context.
        * In any case, if we get one, punt it to libc_epoll_ctl.
        */
-      LDBG (1, "epfd %d: calling libc_epoll_ctl: op %d, fd %d"
-	    " event %p", epfd, op, fd, event);
+      LDBG (1,
+	    "epfd %d: calling libc_epoll_ctl: op %d, fd %d"
+	    " events 0x%x",
+	    epfd, op, fd, event ? event->events : 0);
 
       rv = libc_epoll_ctl (epfd, op, fd, event);
       goto done;
@@ -2295,8 +2434,10 @@ epoll_ctl (int epfd, int op, int fd, struct epoll_event *event)
 
   if (vlsh != VLS_INVALID_HANDLE)
     {
-      LDBG (1, "epfd %d: calling vls_epoll_ctl: ep_vlsh %d op %d, vlsh %u,"
-	    " event %p", epfd, vep_vlsh, op, vlsh, event);
+      LDBG (1,
+	    "epfd %d: calling vls_epoll_ctl: ep_vlsh %d op %d, vlsh %u,"
+	    " events 0x%x",
+	    epfd, vep_vlsh, op, vlsh, event ? event->events : 0);
 
       rv = vls_epoll_ctl (vep_vlsh, op, vlsh, event);
       if (rv != VPPCOM_OK)
@@ -2353,13 +2494,12 @@ static inline int
 ldp_epoll_pwait (int epfd, struct epoll_event *events, int maxevents,
 		 int timeout, const sigset_t * sigmask)
 {
-  ldp_worker_ctx_t *ldpw = ldp_worker_get_current ();
+  ldp_worker_ctx_t *ldpw;
   double time_to_wait = (double) 0, max_time;
   int libc_epfd, rv = 0;
   vls_handle_t ep_vlsh;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   if (PREDICT_FALSE (!events || (timeout < -1)))
     {
@@ -2367,6 +2507,10 @@ ldp_epoll_pwait (int epfd, struct epoll_event *events, int maxevents,
       return -1;
     }
 
+  if (PREDICT_FALSE (vppcom_worker_index () == ~0))
+    vls_register_vcl_worker ();
+
+  ldpw = ldp_worker_get_current ();
   if (epfd == ldpw->vcl_mq_epfd)
     return libc_epoll_pwait (epfd, events, maxevents, timeout, sigmask);
 
@@ -2431,12 +2575,12 @@ static inline int
 ldp_epoll_pwait_eventfd (int epfd, struct epoll_event *events,
 			 int maxevents, int timeout, const sigset_t * sigmask)
 {
+  int libc_epfd, rv = 0, num_ev, libc_num_ev, vcl_wups = 0;
+  struct epoll_event *libc_evts;
   ldp_worker_ctx_t *ldpw;
-  int libc_epfd, rv = 0, num_ev;
   vls_handle_t ep_vlsh;
 
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   if (PREDICT_FALSE (!events || (timeout < -1)))
     {
@@ -2506,9 +2650,14 @@ ldp_epoll_pwait_eventfd (int epfd, struct epoll_event *events,
       ldpw->mq_epfd_added = 1;
     }
 
-  rv = vls_epoll_wait (ep_vlsh, events, maxevents, 0);
+  /* Request to only drain unhandled to prevent libc_epoll_wait starved */
+  rv = vls_epoll_wait (ep_vlsh, events, maxevents, -2);
   if (rv > 0)
-    goto done;
+    {
+      timeout = 0;
+      if (rv >= maxevents)
+	goto done;
+    }
   else if (PREDICT_FALSE (rv < 0))
     {
       errno = -rv;
@@ -2516,26 +2665,40 @@ ldp_epoll_pwait_eventfd (int epfd, struct epoll_event *events,
       goto done;
     }
 
-  rv = libc_epoll_pwait (libc_epfd, events, maxevents, timeout, sigmask);
-  if (rv <= 0)
-    goto done;
-  for (int i = 0; i < rv; i++)
+epoll_again:
+
+  libc_evts = &events[rv];
+  libc_num_ev =
+    libc_epoll_pwait (libc_epfd, libc_evts, maxevents - rv, timeout, sigmask);
+  if (libc_num_ev <= 0)
     {
-      if (events[i].data.fd == ldpw->vcl_mq_epfd)
+      rv = rv >= 0 ? rv : -1;
+      goto done;
+    }
+
+  for (int i = 0; i < libc_num_ev; i++)
+    {
+      if (libc_evts[i].data.fd == ldpw->vcl_mq_epfd)
 	{
 	  /* We should remove mq epoll fd from events. */
-	  rv--;
-	  if (i != rv)
+	  libc_num_ev--;
+	  if (i != libc_num_ev)
 	    {
-	      events[i].events = events[rv].events;
-	      events[i].data.u64 = events[rv].data.u64;
+	      libc_evts[i].events = libc_evts[libc_num_ev].events;
+	      libc_evts[i].data.u64 = libc_evts[libc_num_ev].data.u64;
 	    }
-	  num_ev = vls_epoll_wait (ep_vlsh, &events[rv], maxevents - rv, 0);
+	  num_ev = vls_epoll_wait (ep_vlsh, &libc_evts[libc_num_ev],
+				   maxevents - libc_num_ev, 0);
 	  if (PREDICT_TRUE (num_ev > 0))
 	    rv += num_ev;
+	  /* Woken up by vcl but no events generated. Accept it once */
+	  if (rv == 0 && libc_num_ev == 0 && timeout && vcl_wups++ < 1)
+	    goto epoll_again;
 	  break;
 	}
     }
+
+  rv += libc_num_ev;
 
 done:
   return rv;
@@ -2665,13 +2828,12 @@ done:
   return rv;
 }
 
-#ifdef USE_GNU
+#ifdef _GNU_SOURCE
 int
 ppoll (struct pollfd *fds, nfds_t nfds,
        const struct timespec *timeout, const sigset_t * sigmask)
 {
-  if ((errno = -ldp_init ()))
-    return -1;
+  ldp_init_check ();
 
   clib_warning ("LDP<%d>: LDP-TBD", getpid ());
   errno = ENOSYS;

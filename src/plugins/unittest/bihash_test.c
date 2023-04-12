@@ -207,16 +207,16 @@ test_bihash_threads (bihash_test_main_t * tm)
   tm->thread_barrier = 1;
 
   /* Start the worker threads */
+  tm->threads_running = 0;
   for (i = 0; i < tm->nthreads; i++)
     {
       rv = pthread_create (&handle, NULL, test_bihash_thread_fn,
 			   (void *) (uword) i);
       if (rv)
-	{
-	  clib_unix_warning ("pthread_create returned %d", rv);
-	}
+	clib_unix_warning ("pthread_create returned %d", rv);
+      else
+	tm->threads_running++;
     }
-  tm->threads_running = i;
   tm->sequence_number = 0;
   CLIB_MEMORY_BARRIER ();
 
@@ -338,14 +338,18 @@ test_bihash (bihash_test_main_t * tm)
 	    {
 	      kv.key = tm->keys[i];
 	      if (BV (clib_bihash_search) (h, &kv, &kv) < 0)
-		if (BV (clib_bihash_search) (h, &kv, &kv) < 0)
-		  clib_warning
-		    ("[%d] search for key %lld failed unexpectedly\n", i,
-		     tm->keys[i]);
+		{
+		  if (BV (clib_bihash_search) (h, &kv, &kv) < 0)
+		    {
+		      return clib_error_return (
+			0, "[%d] search for key %lld failed unexpectedly\n", i,
+			tm->keys[i]);
+		    }
+		}
 	      if (kv.value != (u64) (i + 1))
-		clib_warning
-		  ("[%d] search for key %lld returned %lld, not %lld\n", i,
-		   tm->keys, kv.value, (u64) (i + 1));
+		return clib_error_return (
+		  0, "[%d] search for key %lld returned %lld, not %lld\n", i,
+		  tm->keys, kv.value, (u64) (i + 1));
 	    }
 	}
 
@@ -373,7 +377,8 @@ test_bihash (bihash_test_main_t * tm)
 	    {
 	      p = hash_get (tm->key_hash, tm->keys[i]);
 	      if (p == 0 || p[0] != (uword) (i + 1))
-		clib_warning ("ugh, couldn't find %lld\n", tm->keys[i]);
+		return clib_error_return (0, "ugh, couldn't find %lld\n",
+					  tm->keys[i]);
 	    }
 	}
 
@@ -401,8 +406,8 @@ test_bihash (bihash_test_main_t * tm)
 	  rv = BV (clib_bihash_add_del) (h, &kv, 0 /* is_add */ );
 
 	  if (rv < 0)
-	    clib_warning ("delete key %lld not ok but should be",
-			  tm->keys[i]);
+	    return clib_error_return (
+	      0, "delete key %lld not ok but should be", tm->keys[i]);
 
 	  if (tm->careful_delete_tests)
 	    {
@@ -412,14 +417,14 @@ test_bihash (bihash_test_main_t * tm)
 		  rv = BV (clib_bihash_search) (h, &kv, &kv);
 		  if (j <= i && rv >= 0)
 		    {
-		      clib_warning
-			("i %d j %d search ok but should not be, value %lld",
-			 i, j, kv.value);
+		      return clib_error_return (
+			0, "i %d j %d search ok but should not be, value %lld",
+			i, j, kv.value);
 		    }
 		  if (j > i && rv < 0)
 		    {
-		      clib_warning ("i %d j %d search not ok but should be",
-				    i, j);
+		      return clib_error_return (
+			0, "i %d j %d search not ok but should be", i, j);
 		    }
 		}
 	    }
@@ -471,6 +476,7 @@ test_bihash_command_fn (vlib_main_t * vm,
   tm->ncycles = 10;
   tm->report_every_n = 50000;
   tm->seed = 0x1badf00d;
+  tm->search_iter = 1;
 
   memset (&tm->stats, 0, sizeof (tm->stats));
 
@@ -512,7 +518,7 @@ test_bihash_command_fn (vlib_main_t * vm,
   /* Preallocate hash table, key vector */
   tm->key_hash = hash_create (tm->nitems, sizeof (uword));
   vec_validate (tm->keys, tm->nitems - 1);
-  _vec_len (tm->keys) = 0;
+  vec_set_len (tm->keys, 0);
 
   switch (which)
     {

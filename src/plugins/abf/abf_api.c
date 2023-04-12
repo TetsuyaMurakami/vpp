@@ -34,10 +34,11 @@
 #include <abf/abf.api_types.h>
 
 /**
- * Base message ID fot the plugin
+ * Base message ID for the plugin
  */
 static u32 abf_base_msg_id;
 
+#define REPLY_MSG_ID_BASE (abf_base_msg_id)
 #include <vlibapi/api_helper_macros.h>
 
 static void
@@ -68,6 +69,12 @@ vl_api_abf_policy_add_del_t_handler (vl_api_abf_policy_add_del_t * mp)
   int rv = 0;
   u8 pi;
 
+  if (mp->policy.n_paths == 0)
+    {
+      rv = VNET_API_ERROR_INVALID_VALUE;
+      goto done;
+    }
+
   vec_validate (paths, mp->policy.n_paths - 1);
 
   for (pi = 0; pi < mp->policy.n_paths; pi++)
@@ -93,7 +100,7 @@ vl_api_abf_policy_add_del_t_handler (vl_api_abf_policy_add_del_t * mp)
 done:
   vec_free (paths);
 
-  REPLY_MACRO (VL_API_ABF_POLICY_ADD_DEL_REPLY + abf_base_msg_id);
+  REPLY_MACRO (VL_API_ABF_POLICY_ADD_DEL_REPLY);
 }
 
 static void
@@ -106,19 +113,17 @@ vl_api_abf_itf_attach_add_del_t_handler (vl_api_abf_itf_attach_add_del_t * mp)
 
   if (mp->is_add)
     {
-      abf_itf_attach (fproto,
-		      ntohl (mp->attach.policy_id),
-		      ntohl (mp->attach.priority),
-		      ntohl (mp->attach.sw_if_index));
+      rv = abf_itf_attach (fproto, ntohl (mp->attach.policy_id),
+			   ntohl (mp->attach.priority),
+			   ntohl (mp->attach.sw_if_index));
     }
   else
     {
-      abf_itf_detach (fproto,
-		      ntohl (mp->attach.policy_id),
-		      ntohl (mp->attach.sw_if_index));
+      rv = abf_itf_detach (fproto, ntohl (mp->attach.policy_id),
+			   ntohl (mp->attach.sw_if_index));
     }
 
-  REPLY_MACRO (VL_API_ABF_ITF_ATTACH_ADD_DEL_REPLY + abf_base_msg_id);
+  REPLY_MACRO (VL_API_ABF_ITF_ATTACH_ADD_DEL_REPLY);
 }
 
 typedef struct abf_dump_walk_ctx_t_

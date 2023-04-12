@@ -19,8 +19,9 @@
 #include <vlib/unix/unix.h>
 #include <vnet/fib/ip6_fib.h>
 #include <vnet/fib/ip4_fib.h>
-#include <vnet/fib/fib_sas.h>
+#include <vnet/ip/ip_sas.h>
 #include <vnet/ip/ip6_link.h>
+#include <vnet/ip/ip6_ll_table.h>
 #include <vnet/plugin/plugin.h>
 #include <vpp/app/version.h>
 
@@ -155,7 +156,7 @@ clear_cli_process_id_by_icmp_id_mt (vlib_main_t * vm, u16 icmp_id)
   {
     if (pr->icmp_id == icmp_id)
       {
-	vec_del1 (pm->active_ping_runs, pm->active_ping_runs - pr);
+	vec_del1 (pm->active_ping_runs, pr - pm->active_ping_runs);
 	break;
       }
   }
@@ -575,6 +576,200 @@ VLIB_REGISTER_NODE (ip4_icmp_echo_request_node,static) = {
 };
 /* *INDENT-ON* */
 
+typedef enum
+{
+  ICMP6_ECHO_REQUEST_NEXT_LOOKUP,
+  ICMP6_ECHO_REQUEST_NEXT_OUTPUT,
+  ICMP6_ECHO_REQUEST_N_NEXT,
+} icmp6_echo_request_next_t;
+
+static uword
+ip6_icmp_echo_request (vlib_main_t *vm, vlib_node_runtime_t *node,
+		       vlib_frame_t *frame)
+{
+  u32 *from, *to_next;
+  u32 n_left_from, n_left_to_next, next_index;
+  ip6_main_t *im = &ip6_main;
+
+  from = vlib_frame_vector_args (frame);
+  n_left_from = frame->n_vectors;
+  next_index = node->cached_next_index;
+
+  if (node->flags & VLIB_NODE_FLAG_TRACE)
+    vlib_trace_frame_buffers_only (vm, node, from, frame->n_vectors,
+				   /* stride */ 1,
+				   sizeof (icmp6_input_trace_t));
+
+  while (n_left_from > 0)
+    {
+      vlib_get_next_frame (vm, node, next_index, to_next, n_left_to_next);
+
+      while (n_left_from > 2 && n_left_to_next > 2)
+	{
+	  vlib_buffer_t *p0, *p1;
+	  ip6_header_t *ip0, *ip1;
+	  icmp46_header_t *icmp0, *icmp1;
+	  ip6_address_t tmp0, tmp1;
+	  ip_csum_t sum0, sum1;
+	  u32 bi0, bi1;
+	  u32 fib_index0, fib_index1;
+	  u32 next0 = ICMP6_ECHO_REQUEST_NEXT_LOOKUP;
+	  u32 next1 = ICMP6_ECHO_REQUEST_NEXT_LOOKUP;
+
+	  bi0 = to_next[0] = from[0];
+	  bi1 = to_next[1] = from[1];
+
+	  from += 2;
+	  n_left_from -= 2;
+	  to_next += 2;
+	  n_left_to_next -= 2;
+
+	  p0 = vlib_get_buffer (vm, bi0);
+	  p1 = vlib_get_buffer (vm, bi1);
+	  ip0 = vlib_buffer_get_current (p0);
+	  ip1 = vlib_buffer_get_current (p1);
+	  icmp0 = ip6_next_header (ip0);
+	  icmp1 = ip6_next_header (ip1);
+
+	  /* Check icmp type to echo reply and update icmp checksum. */
+	  sum0 = icmp0->checksum;
+	  sum1 = icmp1->checksum;
+
+	  ASSERT (icmp0->type == ICMP6_echo_request);
+	  ASSERT (icmp1->type == ICMP6_echo_request);
+	  sum0 = ip_csum_update (sum0, ICMP6_echo_request, ICMP6_echo_reply,
+				 icmp46_header_t, type);
+	  sum1 = ip_csum_update (sum1, ICMP6_echo_request, ICMP6_echo_reply,
+				 icmp46_header_t, type);
+
+	  icmp0->checksum = ip_csum_fold (sum0);
+	  icmp1->checksum = ip_csum_fold (sum1);
+
+	  icmp0->type = ICMP6_echo_reply;
+	  icmp1->type = ICMP6_echo_reply;
+
+	  /* Swap source and destination address. */
+	  tmp0 = ip0->src_address;
+	  tmp1 = ip1->src_address;
+
+	  ip0->src_address = ip0->dst_address;
+	  ip1->src_address = ip1->dst_address;
+
+	  ip0->dst_address = tmp0;
+	  ip1->dst_address = tmp1;
+
+	  /* New hop count. */
+	  ip0->hop_limit = im->host_config.ttl;
+	  ip1->hop_limit = im->host_config.ttl;
+
+	  if (ip6_address_is_link_local_unicast (&ip0->src_address) &&
+	      !ip6_address_is_link_local_unicast (&ip0->dst_address))
+	    {
+	      fib_index0 = vec_elt (im->fib_index_by_sw_if_index,
+				    vnet_buffer (p0)->sw_if_index[VLIB_RX]);
+	      vnet_buffer (p0)->sw_if_index[VLIB_TX] = fib_index0;
+	    }
+	  if (ip6_address_is_link_local_unicast (&ip1->src_address) &&
+	      !ip6_address_is_link_local_unicast (&ip1->dst_address))
+	    {
+	      fib_index1 = vec_elt (im->fib_index_by_sw_if_index,
+				    vnet_buffer (p1)->sw_if_index[VLIB_RX]);
+	      vnet_buffer (p1)->sw_if_index[VLIB_TX] = fib_index1;
+	    }
+	  p0->flags |= VNET_BUFFER_F_LOCALLY_ORIGINATED;
+	  p1->flags |= VNET_BUFFER_F_LOCALLY_ORIGINATED;
+
+	  /* verify speculative enqueues, maybe switch current next frame */
+	  /* if next0==next1==next_index then nothing special needs to be done
+	   */
+	  vlib_validate_buffer_enqueue_x2 (vm, node, next_index, to_next,
+					   n_left_to_next, bi0, bi1, next0,
+					   next1);
+	}
+
+      while (n_left_from > 0 && n_left_to_next > 0)
+	{
+	  vlib_buffer_t *p0;
+	  ip6_header_t *ip0;
+	  icmp46_header_t *icmp0;
+	  u32 bi0;
+	  ip6_address_t tmp0;
+	  ip_csum_t sum0;
+	  u32 fib_index0;
+	  u32 next0 = ICMP6_ECHO_REQUEST_NEXT_LOOKUP;
+
+	  bi0 = to_next[0] = from[0];
+
+	  from += 1;
+	  n_left_from -= 1;
+	  to_next += 1;
+	  n_left_to_next -= 1;
+
+	  p0 = vlib_get_buffer (vm, bi0);
+	  ip0 = vlib_buffer_get_current (p0);
+	  icmp0 = ip6_next_header (ip0);
+
+	  /* Check icmp type to echo reply and update icmp checksum. */
+	  sum0 = icmp0->checksum;
+
+	  ASSERT (icmp0->type == ICMP6_echo_request);
+	  sum0 = ip_csum_update (sum0, ICMP6_echo_request, ICMP6_echo_reply,
+				 icmp46_header_t, type);
+
+	  icmp0->checksum = ip_csum_fold (sum0);
+
+	  icmp0->type = ICMP6_echo_reply;
+
+	  /* Swap source and destination address. */
+	  tmp0 = ip0->src_address;
+	  ip0->src_address = ip0->dst_address;
+	  ip0->dst_address = tmp0;
+
+	  ip0->hop_limit = im->host_config.ttl;
+
+	  if (ip6_address_is_link_local_unicast (&ip0->src_address) &&
+	      !ip6_address_is_link_local_unicast (&ip0->dst_address))
+	    {
+	      /* if original packet was to the link local, then the
+	       * fib index is that of the LL table, we can't use that
+	       * to foward the response if the new destination
+	       * is global, so reset to the fib index of the link.
+	       * In other case, the fib index we need has been written
+	       * to the buffer already. */
+	      fib_index0 = vec_elt (im->fib_index_by_sw_if_index,
+				    vnet_buffer (p0)->sw_if_index[VLIB_RX]);
+	      vnet_buffer (p0)->sw_if_index[VLIB_TX] = fib_index0;
+	    }
+	  p0->flags |= VNET_BUFFER_F_LOCALLY_ORIGINATED;
+	  /* Verify speculative enqueue, maybe switch current next frame */
+	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next,
+					   n_left_to_next, bi0, next0);
+	}
+
+      vlib_put_next_frame (vm, node, next_index, n_left_to_next);
+    }
+
+  vlib_error_count (vm, ip6_icmp_input_node.index,
+		    ICMP6_ERROR_ECHO_REPLIES_SENT, frame->n_vectors);
+
+  return frame->n_vectors;
+}
+
+VLIB_REGISTER_NODE (ip6_icmp_echo_request_node,static) = {
+  .function = ip6_icmp_echo_request,
+  .name = "ip6-icmp-echo-request",
+
+  .vector_size = sizeof (u32),
+
+  .format_trace = format_icmp6_input_trace,
+
+  .n_next_nodes = ICMP6_ECHO_REQUEST_N_NEXT,
+  .next_nodes = {
+    [ICMP6_ECHO_REQUEST_NEXT_LOOKUP] = "ip6-lookup",
+    [ICMP6_ECHO_REQUEST_NEXT_OUTPUT] = "interface-output",
+  },
+};
+
 /*
  * A swarm of address-family agnostic helper functions
  * for building and sending the ICMP echo request.
@@ -682,13 +877,16 @@ ip46_get_resolving_interface (u32 fib_index, ip46_address_t * pa46,
 }
 
 static u32
-ip46_fib_table_get_index_for_sw_if_index (u32 sw_if_index, int is_ip6)
+ip46_fib_table_get_index_for_sw_if_index (u32 sw_if_index, int is_ip6,
+					  ip46_address_t *pa46)
 {
-  u32 fib_table_index = is_ip6 ?
-    ip6_fib_table_get_index_for_sw_if_index (sw_if_index) :
-    ip4_fib_table_get_index_for_sw_if_index (sw_if_index);
-  return fib_table_index;
-
+  if (is_ip6)
+    {
+      if (ip6_address_is_link_local_unicast (&pa46->ip6))
+	return ip6_ll_fib_get (sw_if_index);
+      return ip6_fib_table_get_index_for_sw_if_index (sw_if_index);
+    }
+  return ip4_fib_table_get_index_for_sw_if_index (sw_if_index);
 }
 
 
@@ -735,13 +933,15 @@ ip46_set_src_address (u32 sw_if_index, vlib_buffer_t * b0, int is_ip6)
     {
       ip6_header_t *ip6 = vlib_buffer_get_current (b0);
 
-      res = fib_sas6_get (sw_if_index, &ip6->dst_address, &ip6->src_address);
+      res = ip6_sas_by_sw_if_index (sw_if_index, &ip6->dst_address,
+				    &ip6->src_address);
     }
   else
     {
       ip4_header_t *ip4 = vlib_buffer_get_current (b0);
 
-      res = fib_sas4_get (sw_if_index, &ip4->dst_address, &ip4->src_address);
+      res = ip4_sas_by_sw_if_index (sw_if_index, &ip4->dst_address,
+				    &ip4->src_address);
     }
   return res;
 }
@@ -870,12 +1070,10 @@ at_most_a_frame (u32 count)
 }
 
 static int
-ip46_enqueue_packet (vlib_main_t * vm, vlib_buffer_t * b0, u32 burst,
-		     int is_ip6)
+ip46_enqueue_packet (vlib_main_t *vm, vlib_buffer_t *b0, u32 burst,
+		     u32 lookup_node_index)
 {
   vlib_frame_t *f = 0;
-  u32 lookup_node_index =
-    is_ip6 ? ip6_lookup_node.index : ip4_lookup_node.index;
   int n_sent = 0;
 
   u16 n_to_send;
@@ -964,7 +1162,6 @@ send_ip46_ping (vlib_main_t * vm,
     ERROR_OUT (SEND_PING_ALLOC_FAIL);
 
   b0 = vlib_get_buffer (vm, bi0);
-  VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b0);
 
   /*
    * if the user did not provide a source interface,
@@ -979,7 +1176,7 @@ send_ip46_ping (vlib_main_t * vm,
     }
   else
     fib_index =
-      ip46_fib_table_get_index_for_sw_if_index (sw_if_index, is_ip6);
+      ip46_fib_table_get_index_for_sw_if_index (sw_if_index, is_ip6, pa46);
 
   if (~0 == fib_index)
     ERROR_OUT (SEND_PING_NO_TABLE);
@@ -1003,7 +1200,23 @@ send_ip46_ping (vlib_main_t * vm,
 
   ip46_fix_len_and_csum (vm, l4_header_offset, data_len, b0, is_ip6);
 
-  int n_sent = ip46_enqueue_packet (vm, b0, burst, is_ip6);
+  u32 node_index = ip6_lookup_node.index;
+  if (is_ip6)
+    {
+      if (pa46->ip6.as_u32[0] == clib_host_to_net_u32 (0xff020000))
+	{
+	  node_index = ip6_rewrite_mcast_node.index;
+	  vnet_buffer (b0)->sw_if_index[VLIB_RX] = sw_if_index;
+	  vnet_buffer (b0)->sw_if_index[VLIB_TX] = sw_if_index;
+	  vnet_buffer (b0)->ip.adj_index[VLIB_TX] =
+	    ip6_link_get_mcast_adj (sw_if_index);
+	}
+    }
+  else
+    {
+      node_index = ip4_lookup_node.index;
+    }
+  int n_sent = ip46_enqueue_packet (vm, b0, burst, node_index);
   if (n_sent < burst)
     err = SEND_PING_NO_BUFFERS;
 
@@ -1462,6 +1675,8 @@ ping_cli_init (vlib_main_t * vm)
 
   ip4_icmp_register_type (vm, ICMP4_echo_request,
 			  ip4_icmp_echo_request_node.index);
+  icmp6_register_type (vm, ICMP6_echo_request,
+		       ip6_icmp_echo_request_node.index);
 
   return 0;
 }

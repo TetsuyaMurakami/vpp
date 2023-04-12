@@ -15,6 +15,8 @@
 #ifndef __IPSEC_SPD_H__
 #define __IPSEC_SPD_H__
 
+#include <vppinfra/bihash_40_8.h>
+#include <vppinfra/bihash_16_8.h>
 #include <vlib/vlib.h>
 
 #define foreach_ipsec_spd_policy_type                 \
@@ -40,8 +42,33 @@ typedef enum ipsec_spd_policy_t_
 
 extern u8 *format_ipsec_policy_type (u8 * s, va_list * args);
 
+typedef struct
+{
+  /* index in the mask types pool */
+  u32 mask_type_idx;
+  /* counts references correspond to given mask type index */
+  u32 refcount;
+} ipsec_fp_mask_id_t;
+
 /**
- * @brief A Secruity Policy Database
+ * @brief A fast path Security Policy Database
+ */
+typedef struct
+{
+  ipsec_fp_mask_id_t *fp_mask_ids[IPSEC_SPD_POLICY_N_TYPES];
+  /* names of bihash tables */
+  u8 *name4_out;
+  u8 *name4_in;
+  u8 *name6_out;
+  u8 *name6_in;
+  u32 ip6_out_lookup_hash_idx; /* fp ip6 lookup hash out index in the pool */
+  u32 ip4_out_lookup_hash_idx; /* fp ip4 lookup hash out index in the pool */
+  u32 ip6_in_lookup_hash_idx;  /* fp ip6 lookup hash in index in the pool */
+  u32 ip4_in_lookup_hash_idx;  /* fp ip4 lookup hash in index in the pool */
+} ipsec_spd_fp_t;
+
+/**
+ * @brief A Security Policy Database
  */
 typedef struct
 {
@@ -49,6 +76,7 @@ typedef struct
   u32 id;
   /** vectors for each of the policy types */
   u32 *policies[IPSEC_SPD_POLICY_N_TYPES];
+  ipsec_spd_fp_t fp_spd;
 } ipsec_spd_t;
 
 /**
@@ -63,6 +91,9 @@ extern int ipsec_set_interface_spd (vlib_main_t * vm,
 				    u32 sw_if_index, u32 spd_id, int is_add);
 
 extern u8 *format_ipsec_spd (u8 * s, va_list * args);
+
+extern u8 *format_ipsec_out_spd_flow_cache (u8 *s, va_list *args);
+extern u8 *format_ipsec_in_spd_flow_cache (u8 *s, va_list *args);
 
 #endif /* __IPSEC_SPD_H__ */
 

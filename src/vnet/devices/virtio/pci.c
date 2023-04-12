@@ -116,7 +116,7 @@ virtio_pci_irq_queue_handler (vlib_main_t * vm, vlib_pci_dev_handle_t h,
   line--;
   u16 qid = line;
 
-  virtio_vring_t *vring = vec_elt_at_index (vif->rxq_vrings, qid);
+  vnet_virtio_vring_t *vring = vec_elt_at_index (vif->rxq_vrings, qid);
   vnet_hw_if_rx_queue_set_int_pending (vnm, vring->queue_index);
 }
 
@@ -131,13 +131,11 @@ virtio_pci_irq_config_handler (vlib_main_t * vm, vlib_pci_dev_handle_t h,
 
   if (virtio_pci_is_link_up (vm, vif) & VIRTIO_NET_S_LINK_UP)
     {
-      vif->flags |= VIRTIO_IF_FLAG_ADMIN_UP;
       vnet_hw_interface_set_flags (vnm, vif->hw_if_index,
 				   VNET_HW_INTERFACE_FLAG_LINK_UP);
     }
   else
     {
-      vif->flags &= ~VIRTIO_IF_FLAG_ADMIN_UP;
       vnet_hw_interface_set_flags (vnm, vif->hw_if_index, 0);
     }
 }
@@ -200,18 +198,18 @@ static int
 virtio_pci_send_ctrl_msg_packed (vlib_main_t * vm, virtio_if_t * vif,
 				 virtio_ctrl_msg_t * data, u32 len)
 {
-  virtio_vring_t *vring = vif->cxq_vring;
+  vnet_virtio_vring_t *vring = vif->cxq_vring;
   virtio_net_ctrl_ack_t status = VIRTIO_NET_ERR;
   virtio_ctrl_msg_t result;
   u32 buffer_index;
   vlib_buffer_t *b;
   u16 used, next;
-  u16 sz = vring->size;
+  u16 sz = vring->queue_size;
   u16 flags = 0, first_desc_flags = 0;
 
   used = vring->desc_in_use;
   next = vring->desc_next;
-  vring_packed_desc_t *d = &vring->packed_desc[next];
+  vnet_virtio_vring_packed_desc_t *d = &vring->packed_desc[next];
 
   if (vlib_buffer_alloc (vm, &buffer_index, 1))
     b = vlib_get_buffer (vm, buffer_index);
@@ -319,9 +317,9 @@ virtio_pci_send_ctrl_msg_packed (vlib_main_t * vm, virtio_if_t * vif,
 	 || (flags & VRING_DESC_F_USED) != (vring->used_wrap_counter << 15));
 
   last += 3;
-  if (last >= vring->size)
+  if (last >= vring->queue_size)
     {
-      last = last - vring->size;
+      last = last - vring->queue_size;
       vring->used_wrap_counter ^= 1;
     }
   vring->desc_in_use -= 3;
@@ -340,19 +338,19 @@ static int
 virtio_pci_send_ctrl_msg_split (vlib_main_t * vm, virtio_if_t * vif,
 				virtio_ctrl_msg_t * data, u32 len)
 {
-  virtio_vring_t *vring = vif->cxq_vring;
+  vnet_virtio_vring_t *vring = vif->cxq_vring;
   virtio_net_ctrl_ack_t status = VIRTIO_NET_ERR;
   virtio_ctrl_msg_t result;
   u32 buffer_index;
   vlib_buffer_t *b;
   u16 used, next, avail;
-  u16 sz = vring->size;
+  u16 sz = vring->queue_size;
   u16 mask = sz - 1;
 
   used = vring->desc_in_use;
   next = vring->desc_next;
   avail = vring->avail->idx;
-  vring_desc_t *d = &vring->desc[next];
+  vnet_virtio_vring_desc_t *d = &vring->desc[next];
 
   if (vlib_buffer_alloc (vm, &buffer_index, 1))
     b = vlib_get_buffer (vm, buffer_index);
@@ -405,7 +403,7 @@ virtio_pci_send_ctrl_msg_split (vlib_main_t * vm, virtio_if_t * vif,
 
   while (n_left)
     {
-      vring_used_elem_t *e = &vring->used->ring[last & mask];
+      vnet_virtio_vring_used_elem_t *e = &vring->used->ring[last & mask];
       u16 slot = e->id;
 
       d = &vring->desc[slot];
@@ -508,7 +506,7 @@ virtio_pci_offloads (vlib_main_t * vm, virtio_if_t * vif, int gso_enabled,
 		     int csum_offload_enabled)
 {
   vnet_main_t *vnm = vnet_get_main ();
-  vnet_hw_interface_t *hw = vnet_get_hw_interface (vnm, vif->hw_if_index);
+  vnet_hw_if_caps_change_t cc = {};
 
   if ((vif->features & VIRTIO_FEATURE (VIRTIO_NET_F_CTRL_VQ)) &&
       (vif->features & VIRTIO_FEATURE (VIRTIO_NET_F_CTRL_GUEST_OFFLOADS)))
@@ -524,9 +522,10 @@ virtio_pci_offloads (vlib_main_t * vm, virtio_if_t * vif, int gso_enabled,
 	  else
 	    {
 	      vif->gso_enabled = 1;
-	      vif->csum_offload_enabled = 0;
-	      hw->flags |= VNET_HW_INTERFACE_FLAG_SUPPORTS_GSO |
-		VNET_HW_INTERFACE_FLAG_SUPPORTS_TX_L4_CKSUM_OFFLOAD;
+	      vif->csum_offload_enabled = 1;
+	      cc.val = cc.mask = VNET_HW_IF_CAP_TCP_GSO |
+				 VNET_HW_IF_CAP_TX_TCP_CKSUM |
+				 VNET_HW_IF_CAP_TX_UDP_CKSUM;
 	    }
 	}
       else if (csum_offload_enabled
@@ -540,9 +539,10 @@ virtio_pci_offloads (vlib_main_t * vm, virtio_if_t * vif, int gso_enabled,
 	    {
 	      vif->csum_offload_enabled = 1;
 	      vif->gso_enabled = 0;
-	      hw->flags &= ~VNET_HW_INTERFACE_FLAG_SUPPORTS_GSO;
-	      hw->flags |=
-		VNET_HW_INTERFACE_FLAG_SUPPORTS_TX_L4_CKSUM_OFFLOAD;
+	      cc.val =
+		VNET_HW_IF_CAP_TX_TCP_CKSUM | VNET_HW_IF_CAP_TX_UDP_CKSUM;
+	      cc.mask = VNET_HW_IF_CAP_TCP_GSO | VNET_HW_IF_CAP_TX_TCP_CKSUM |
+			VNET_HW_IF_CAP_TX_UDP_CKSUM;
 	    }
 	}
       else
@@ -555,11 +555,14 @@ virtio_pci_offloads (vlib_main_t * vm, virtio_if_t * vif, int gso_enabled,
 	    {
 	      vif->csum_offload_enabled = 0;
 	      vif->gso_enabled = 0;
-	      hw->flags &= ~(VNET_HW_INTERFACE_FLAG_SUPPORTS_GSO |
-			     VNET_HW_INTERFACE_FLAG_SUPPORTS_TX_L4_CKSUM_OFFLOAD);
+	      cc.val = 0;
+	      cc.mask = VNET_HW_IF_CAP_L4_TX_CKSUM | VNET_HW_IF_CAP_TCP_GSO;
 	    }
 	}
     }
+
+  if (cc.mask)
+    vnet_hw_if_change_caps (vnm, vif->hw_if_index, &cc);
 
   return 0;
 }
@@ -597,7 +600,7 @@ virtio_pci_control_vring_packed_init (vlib_main_t * vm, virtio_if_t * vif,
 {
   clib_error_t *error = 0;
   u16 queue_size = 0;
-  virtio_vring_t *vring;
+  vnet_virtio_vring_t *vring;
   u32 i = 0;
   void *ptr = NULL;
 
@@ -612,34 +615,36 @@ virtio_pci_control_vring_packed_init (vlib_main_t * vm, virtio_if_t * vif,
   vec_validate_aligned (vif->cxq_vring, 0, CLIB_CACHE_LINE_BYTES);
   vring = vec_elt_at_index (vif->cxq_vring, 0);
 
-  i =
-    (((queue_size * sizeof (vring_packed_desc_t)) +
-      sizeof (vring_desc_event_t) + VIRTIO_PCI_VRING_ALIGN -
-      1) & ~(VIRTIO_PCI_VRING_ALIGN - 1)) + sizeof (vring_desc_event_t);
+  i = (((queue_size * sizeof (vnet_virtio_vring_packed_desc_t)) +
+	sizeof (vnet_virtio_vring_desc_event_t) + VNET_VIRTIO_PCI_VRING_ALIGN -
+	1) &
+       ~(VNET_VIRTIO_PCI_VRING_ALIGN - 1)) +
+      sizeof (vnet_virtio_vring_desc_event_t);
 
-  ptr =
-    vlib_physmem_alloc_aligned_on_numa (vm, i, VIRTIO_PCI_VRING_ALIGN,
-					vif->numa_node);
+  ptr = vlib_physmem_alloc_aligned_on_numa (vm, i, VNET_VIRTIO_PCI_VRING_ALIGN,
+					    vif->numa_node);
   if (!ptr)
     return vlib_physmem_last_error (vm);
   clib_memset (ptr, 0, i);
 
   vring->packed_desc = ptr;
 
-  vring->driver_event = ptr + (queue_size * sizeof (vring_packed_desc_t));
+  vring->driver_event =
+    ptr + (queue_size * sizeof (vnet_virtio_vring_packed_desc_t));
   vring->driver_event->off_wrap = 0;
   vring->driver_event->flags = VRING_EVENT_F_DISABLE;
 
   vring->device_event =
-    ptr +
-    (((queue_size * sizeof (vring_packed_desc_t)) +
-      sizeof (vring_desc_event_t) + VIRTIO_PCI_VRING_ALIGN -
-      1) & ~(VIRTIO_PCI_VRING_ALIGN - 1));
+    ptr + (((queue_size * sizeof (vnet_virtio_vring_packed_desc_t)) +
+	    sizeof (vnet_virtio_vring_desc_event_t) +
+	    VNET_VIRTIO_PCI_VRING_ALIGN - 1) &
+	   ~(VNET_VIRTIO_PCI_VRING_ALIGN - 1));
   vring->device_event->off_wrap = 0;
   vring->device_event->flags = 0;
 
+  vring->total_packets = 0;
   vring->queue_id = queue_num;
-  vring->size = queue_size;
+  vring->queue_size = queue_size;
   vring->avail_wrap_counter = 1;
   vring->used_wrap_counter = 1;
 
@@ -647,7 +652,7 @@ virtio_pci_control_vring_packed_init (vlib_main_t * vm, virtio_if_t * vif,
 
   virtio_log_debug (vif, "control-queue: number %u, size %u", queue_num,
 		    queue_size);
-  vif->virtio_pci_func->setup_queue (vm, vif, queue_num, (void *) vring);
+  vif->virtio_pci_func->setup_queue (vm, vif, queue_num, vring);
   vring->queue_notify_offset =
     vif->notify_off_multiplier *
     vif->virtio_pci_func->get_queue_notify_off (vm, vif, queue_num);
@@ -662,8 +667,7 @@ virtio_pci_control_vring_split_init (vlib_main_t * vm, virtio_if_t * vif,
 {
   clib_error_t *error = 0;
   u16 queue_size = 0;
-  virtio_vring_t *vring;
-  vring_t vr;
+  vnet_virtio_vring_t *vring;
   u32 i = 0;
   void *ptr = NULL;
 
@@ -682,27 +686,21 @@ virtio_pci_control_vring_split_init (vlib_main_t * vm, virtio_if_t * vif,
 
   vec_validate_aligned (vif->cxq_vring, 0, CLIB_CACHE_LINE_BYTES);
   vring = vec_elt_at_index (vif->cxq_vring, 0);
-  i = vring_size (queue_size, VIRTIO_PCI_VRING_ALIGN);
-  i = round_pow2 (i, VIRTIO_PCI_VRING_ALIGN);
-  ptr =
-    vlib_physmem_alloc_aligned_on_numa (vm, i, VIRTIO_PCI_VRING_ALIGN,
-					vif->numa_node);
+  i = vnet_virtio_vring_size (queue_size, VNET_VIRTIO_PCI_VRING_ALIGN);
+  i = round_pow2 (i, VNET_VIRTIO_PCI_VRING_ALIGN);
+  ptr = vlib_physmem_alloc_aligned_on_numa (vm, i, VNET_VIRTIO_PCI_VRING_ALIGN,
+					    vif->numa_node);
   if (!ptr)
     return vlib_physmem_last_error (vm);
   clib_memset (ptr, 0, i);
-  vring_init (&vr, queue_size, ptr, VIRTIO_PCI_VRING_ALIGN);
-  vring->desc = vr.desc;
-  vring->avail = vr.avail;
-  vring->used = vr.used;
+  vnet_virtio_vring_init (vring, queue_size, ptr, VNET_VIRTIO_PCI_VRING_ALIGN);
   vring->queue_id = queue_num;
-  vring->avail->flags = VIRTIO_RING_FLAG_MASK_INT;
+  vring->total_packets = 0;
 
   ASSERT (vring->buffers == 0);
-
-  vring->size = queue_size;
   virtio_log_debug (vif, "control-queue: number %u, size %u", queue_num,
 		    queue_size);
-  vif->virtio_pci_func->setup_queue (vm, vif, queue_num, ptr);
+  vif->virtio_pci_func->setup_queue (vm, vif, queue_num, vring);
   vring->queue_notify_offset =
     vif->notify_off_multiplier *
     vif->virtio_pci_func->get_queue_notify_off (vm, vif, queue_num);
@@ -726,11 +724,9 @@ clib_error_t *
 virtio_pci_vring_split_init (vlib_main_t * vm, virtio_if_t * vif,
 			     u16 queue_num)
 {
-  vlib_thread_main_t *vtm = vlib_get_thread_main ();
   clib_error_t *error = 0;
   u16 queue_size = 0;
-  virtio_vring_t *vring;
-  vring_t vr;
+  vnet_virtio_vring_t *vring;
   u32 i = 0;
   void *ptr = NULL;
 
@@ -752,8 +748,7 @@ virtio_pci_vring_split_init (vlib_main_t * vm, virtio_if_t * vif,
       vec_validate_aligned (vif->txq_vrings, TX_QUEUE_ACCESS (queue_num),
 			    CLIB_CACHE_LINE_BYTES);
       vring = vec_elt_at_index (vif->txq_vrings, TX_QUEUE_ACCESS (queue_num));
-      if (vif->max_queue_pairs < vtm->n_vlib_mains)
-	clib_spinlock_init (&vring->lockp);
+      clib_spinlock_init (&vring->lockp);
     }
   else
     {
@@ -761,21 +756,18 @@ virtio_pci_vring_split_init (vlib_main_t * vm, virtio_if_t * vif,
 			    CLIB_CACHE_LINE_BYTES);
       vring = vec_elt_at_index (vif->rxq_vrings, RX_QUEUE_ACCESS (queue_num));
     }
-  i = vring_size (queue_size, VIRTIO_PCI_VRING_ALIGN);
-  i = round_pow2 (i, VIRTIO_PCI_VRING_ALIGN);
-  ptr =
-    vlib_physmem_alloc_aligned_on_numa (vm, i, VIRTIO_PCI_VRING_ALIGN,
-					vif->numa_node);
+  i = vnet_virtio_vring_size (queue_size, VNET_VIRTIO_PCI_VRING_ALIGN);
+  i = round_pow2 (i, VNET_VIRTIO_PCI_VRING_ALIGN);
+  ptr = vlib_physmem_alloc_aligned_on_numa (vm, i, VNET_VIRTIO_PCI_VRING_ALIGN,
+					    vif->numa_node);
   if (!ptr)
     return vlib_physmem_last_error (vm);
   clib_memset (ptr, 0, i);
-  vring_init (&vr, queue_size, ptr, VIRTIO_PCI_VRING_ALIGN);
-  vring->desc = vr.desc;
-  vring->avail = vr.avail;
-  vring->used = vr.used;
+  vnet_virtio_vring_init (vring, queue_size, ptr, VNET_VIRTIO_PCI_VRING_ALIGN);
   vring->queue_id = queue_num;
   vring->avail->flags = VIRTIO_RING_FLAG_MASK_INT;
   vring->flow_table = 0;
+  vring->total_packets = 0;
 
   ASSERT (vring->buffers == 0);
   vec_validate_aligned (vring->buffers, queue_size, CLIB_CACHE_LINE_BYTES);
@@ -790,8 +782,8 @@ virtio_pci_vring_split_init (vlib_main_t * vm, virtio_if_t * vif,
       virtio_log_debug (vif, "rx-queue: number %u, size %u", queue_num,
 			queue_size);
     }
-  vring->size = queue_size;
-  if (vif->virtio_pci_func->setup_queue (vm, vif, queue_num, ptr))
+  vring->queue_size = queue_size;
+  if (vif->virtio_pci_func->setup_queue (vm, vif, queue_num, vring))
     return clib_error_return (0, "error in queue address setup");
 
   vring->queue_notify_offset =
@@ -806,10 +798,9 @@ clib_error_t *
 virtio_pci_vring_packed_init (vlib_main_t * vm, virtio_if_t * vif,
 			      u16 queue_num)
 {
-  vlib_thread_main_t *vtm = vlib_get_thread_main ();
   clib_error_t *error = 0;
   u16 queue_size = 0;
-  virtio_vring_t *vring;
+  vnet_virtio_vring_t *vring;
   u32 i = 0;
   void *ptr = NULL;
 
@@ -826,8 +817,7 @@ virtio_pci_vring_packed_init (vlib_main_t * vm, virtio_if_t * vif,
       vec_validate_aligned (vif->txq_vrings, TX_QUEUE_ACCESS (queue_num),
 			    CLIB_CACHE_LINE_BYTES);
       vring = vec_elt_at_index (vif->txq_vrings, TX_QUEUE_ACCESS (queue_num));
-      if (vif->max_queue_pairs < vtm->n_vlib_mains)
-	clib_spinlock_init (&vring->lockp);
+      clib_spinlock_init (&vring->lockp);
     }
   else
     {
@@ -836,29 +826,30 @@ virtio_pci_vring_packed_init (vlib_main_t * vm, virtio_if_t * vif,
       vring = vec_elt_at_index (vif->rxq_vrings, RX_QUEUE_ACCESS (queue_num));
     }
 
-  i =
-    (((queue_size * sizeof (vring_packed_desc_t)) +
-      sizeof (vring_desc_event_t) + VIRTIO_PCI_VRING_ALIGN -
-      1) & ~(VIRTIO_PCI_VRING_ALIGN - 1)) + sizeof (vring_desc_event_t);
+  i = (((queue_size * sizeof (vnet_virtio_vring_packed_desc_t)) +
+	sizeof (vnet_virtio_vring_desc_event_t) + VNET_VIRTIO_PCI_VRING_ALIGN -
+	1) &
+       ~(VNET_VIRTIO_PCI_VRING_ALIGN - 1)) +
+      sizeof (vnet_virtio_vring_desc_event_t);
 
-  ptr =
-    vlib_physmem_alloc_aligned_on_numa (vm, i, VIRTIO_PCI_VRING_ALIGN,
-					vif->numa_node);
+  ptr = vlib_physmem_alloc_aligned_on_numa (vm, i, VNET_VIRTIO_PCI_VRING_ALIGN,
+					    vif->numa_node);
   if (!ptr)
     return vlib_physmem_last_error (vm);
 
   clib_memset (ptr, 0, i);
   vring->packed_desc = ptr;
 
-  vring->driver_event = ptr + (queue_size * sizeof (vring_packed_desc_t));
+  vring->driver_event =
+    ptr + (queue_size * sizeof (vnet_virtio_vring_packed_desc_t));
   vring->driver_event->off_wrap = 0;
   vring->driver_event->flags = VRING_EVENT_F_DISABLE;
 
   vring->device_event =
-    ptr +
-    (((queue_size * sizeof (vring_packed_desc_t)) +
-      sizeof (vring_desc_event_t) + VIRTIO_PCI_VRING_ALIGN -
-      1) & ~(VIRTIO_PCI_VRING_ALIGN - 1));
+    ptr + (((queue_size * sizeof (vnet_virtio_vring_packed_desc_t)) +
+	    sizeof (vnet_virtio_vring_desc_event_t) +
+	    VNET_VIRTIO_PCI_VRING_ALIGN - 1) &
+	   ~(VNET_VIRTIO_PCI_VRING_ALIGN - 1));
   vring->device_event->off_wrap = 0;
   vring->device_event->flags = 0;
 
@@ -866,6 +857,7 @@ virtio_pci_vring_packed_init (vlib_main_t * vm, virtio_if_t * vif,
 
   vring->avail_wrap_counter = 1;
   vring->used_wrap_counter = 1;
+  vring->total_packets = 0;
 
   ASSERT (vring->buffers == 0);
   vec_validate_aligned (vring->buffers, queue_size, CLIB_CACHE_LINE_BYTES);
@@ -880,8 +872,8 @@ virtio_pci_vring_packed_init (vlib_main_t * vm, virtio_if_t * vif,
       virtio_log_debug (vif, "rx-queue: number %u, size %u", queue_num,
 			queue_size);
     }
-  vring->size = queue_size;
-  if (vif->virtio_pci_func->setup_queue (vm, vif, queue_num, (void *) vring))
+  vring->queue_size = queue_size;
+  if (vif->virtio_pci_func->setup_queue (vm, vif, queue_num, vring))
     return clib_error_return (0, "error in queue address setup");
 
   vring->queue_notify_offset =
@@ -1146,7 +1138,6 @@ virtio_pci_device_init (vlib_main_t * vm, virtio_if_t * vif,
 			virtio_pci_create_if_args_t * args, void **bar)
 {
   clib_error_t *error = 0;
-  vlib_thread_main_t *vtm = vlib_get_thread_main ();
   u8 status = 0;
 
   if ((error = virtio_pci_read_caps (vm, vif, bar)))
@@ -1253,22 +1244,6 @@ virtio_pci_device_init (vlib_main_t * vm, virtio_if_t * vif,
 	  vif->num_rxqs++;
 	}
 
-      if (i >= vtm->n_vlib_mains)
-	{
-	  /*
-	   * There is 1:1 mapping between tx queue and vpp worker thread.
-	   * tx queue 0 is bind with thread index 0, tx queue 1 on thread
-	   * index 1 and so on.
-	   * Multiple worker threads can poll same tx queue when number of
-	   * workers are more than tx queues. In this case, 1:N mapping
-	   * between tx queue and vpp worker thread.
-	   */
-	  virtio_log_debug (vif, "%s %u, %s", "tx-queue: number",
-			    TX_QUEUE (i),
-			    "no VPP worker thread is available");
-	  continue;
-	}
-
       if ((error = virtio_pci_vring_init (vm, vif, TX_QUEUE (i))))
 	{
 	  args->rv = VNET_API_ERROR_INIT_FAILED;
@@ -1368,6 +1343,24 @@ virtio_pci_create_if (vlib_main_t * vm, virtio_pci_create_if_args_t * args)
   }
   /* *INDENT-ON* */
 
+  if (args->bind)
+    {
+      vlib_pci_addr_t pci = { .as_u32 = args->addr };
+      error = vlib_pci_bind_to_uio (vm, &pci, (char *) "auto",
+				    VIRTIO_BIND_FORCE == args->bind);
+      if (error)
+	{
+	  args->rv = VNET_API_ERROR_INVALID_INTERFACE;
+	  args->error =
+	    clib_error_return (error, "%U: %s", format_vlib_pci_addr, &pci,
+			       "error encountered on binding pci device");
+	  vlib_log (VLIB_LOG_LEVEL_ERR, vim->log_default, "%U: %s",
+		    format_vlib_pci_addr, &pci,
+		    "error encountered on binding pci devicee");
+	  return;
+	}
+    }
+
   pool_get (vim->interfaces, vif);
   vif->dev_instance = vif - vim->interfaces;
   vif->per_interface_next_index = ~0;
@@ -1451,10 +1444,12 @@ virtio_pci_create_if (vlib_main_t * vm, virtio_pci_create_if_args_t * args)
       vif->support_int_mode = 1;
       virtio_log_debug (vif, "device supports msix interrupts");
     }
-  else if (interrupt_count == 1)
+  else
     {
       /*
-       * if msix table-size is 1, fall back to intX.
+       * WARN: performance will be sub-optimal.
+       * Fall back to intX, if msix table-size is 1 or
+       * if UIO driver is being used.
        */
       if ((error =
 	   vlib_pci_register_intx_handler (vm, h, &virtio_pci_irq_handler)))
@@ -1465,15 +1460,6 @@ virtio_pci_create_if (vlib_main_t * vm, virtio_pci_create_if_args_t * args)
 	}
       vif->support_int_mode = 1;
       virtio_log_debug (vif, "pci register interrupt handler");
-    }
-  else
-    {
-      /*
-       * WARN: intX is showing some weird behaviour.
-       * Please don't use interrupt mode with UIO driver.
-       */
-      vif->support_int_mode = 0;
-      virtio_log_debug (vif, "driver is configured in poll mode only");
     }
 
   if ((error = vlib_pci_intr_enable (vm, h)))
@@ -1489,25 +1475,18 @@ virtio_pci_create_if (vlib_main_t * vm, virtio_pci_create_if_args_t * args)
     }
 
   /* create interface */
-  error = ethernet_register_interface (vnm, virtio_device_class.index,
-				       vif->dev_instance, vif->mac_addr,
-				       &vif->hw_if_index,
-				       virtio_pci_flag_change);
-
-  if (error)
-    {
-      args->rv = VNET_API_ERROR_INVALID_REGISTRATION;
-      virtio_log_error (vif,
-			"error encountered on ethernet register interface");
-      goto error;
-    }
+  vnet_eth_interface_registration_t eir = {};
+  eir.dev_class_index = virtio_device_class.index;
+  eir.dev_instance = vif->dev_instance;
+  eir.address = vif->mac_addr;
+  eir.cb.flag_change = virtio_pci_flag_change;
+  vif->hw_if_index = vnet_eth_register_interface (vnm, &eir);
 
   vnet_sw_interface_t *sw = vnet_get_hw_sw_interface (vnm, vif->hw_if_index);
   vif->sw_if_index = sw->sw_if_index;
   args->sw_if_index = sw->sw_if_index;
 
-  vnet_hw_interface_t *hw = vnet_get_hw_interface (vnm, vif->hw_if_index);
-  hw->flags |= VNET_HW_INTERFACE_FLAG_SUPPORTS_INT_MODE;
+  vnet_hw_if_set_caps (vnm, vif->hw_if_index, VNET_HW_IF_CAP_INT_MODE);
 
   if (args->virtio_flags & VIRTIO_FLAG_BUFFERING)
     {
@@ -1521,11 +1500,12 @@ virtio_pci_create_if (vlib_main_t * vm, virtio_pci_create_if_args_t * args)
 	}
     }
 
+  virtio_pre_input_node_enable (vm, vif);
   virtio_vring_set_rx_queues (vm, vif);
+  virtio_vring_set_tx_queues (vm, vif);
 
   if (virtio_pci_is_link_up (vm, vif) & VIRTIO_NET_S_LINK_UP)
     {
-      vif->flags |= VIRTIO_IF_FLAG_ADMIN_UP;
       vnet_hw_interface_set_flags (vnm, vif->hw_if_index,
 				   VNET_HW_INTERFACE_FLAG_LINK_UP);
     }
@@ -1584,7 +1564,7 @@ virtio_pci_delete_if (vlib_main_t * vm, virtio_if_t * vif)
 
   vec_foreach_index (i, vif->rxq_vrings)
   {
-    virtio_vring_t *vring = vec_elt_at_index (vif->rxq_vrings, i);
+    vnet_virtio_vring_t *vring = vec_elt_at_index (vif->rxq_vrings, i);
     if (vring->used)
       {
 	virtio_free_buffers (vm, vring);
@@ -1593,9 +1573,11 @@ virtio_pci_delete_if (vlib_main_t * vm, virtio_if_t * vif)
     vlib_physmem_free (vm, vring->desc);
   }
 
+  virtio_pre_input_node_disable (vm, vif);
+
   vec_foreach_index (i, vif->txq_vrings)
   {
-    virtio_vring_t *vring = vec_elt_at_index (vif->txq_vrings, i);
+    vnet_virtio_vring_t *vring = vec_elt_at_index (vif->txq_vrings, i);
     if (vring->used)
       {
 	virtio_free_buffers (vm, vring);

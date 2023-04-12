@@ -103,7 +103,7 @@ lldp_cfg_intf_set (u32 hw_if_index, u8 ** port_desc, u8 ** mgmt_ip4,
 	}
 
       /* Add MAC address to an interface's filter */
-      if (hi->flags & VNET_HW_INTERFACE_FLAG_SUPPORTS_MAC_FILTER)
+      if (hi->caps & VNET_HW_IF_CAP_MAC_FILTER)
 	{
 	  error =
 	    vnet_hw_interface_add_del_mac_address (lm->vnet_main,
@@ -130,7 +130,7 @@ lldp_cfg_intf_set (u32 hw_if_index, u8 ** port_desc, u8 ** mgmt_ip4,
       lldp_intf_t *n = lldp_get_intf (lm, hi->sw_if_index);
       lldp_delete_intf (lm, n);
       /* Remove MAC address from the interface's filter */
-      if ((n) && (hi->flags & VNET_HW_INTERFACE_FLAG_SUPPORTS_MAC_FILTER))
+      if ((n) && (hi->caps & VNET_HW_IF_CAP_MAC_FILTER))
 	{
 	  error =
 	    vnet_hw_interface_add_del_mac_address (lm->vnet_main,
@@ -175,13 +175,13 @@ lldp_intf_cmd (vlib_main_t * vm, unformat_input_t * input,
 	if (unformat (input, "mgmt-ip4 %U", unformat_ip4_address, &ip4_addr))
 	{
 	  vec_validate (mgmt_ip4, sizeof (ip4_address_t) - 1);
-	  clib_memcpy (mgmt_ip4, &ip4_addr, vec_len (mgmt_ip4));
+	  clib_memcpy (mgmt_ip4, &ip4_addr, sizeof (ip4_addr));
 	}
       else
 	if (unformat (input, "mgmt-ip6 %U", unformat_ip6_address, &ip6_addr))
 	{
 	  vec_validate (mgmt_ip6, sizeof (ip6_address_t) - 1);
-	  clib_memcpy (mgmt_ip6, &ip6_addr, vec_len (mgmt_ip6));
+	  clib_memcpy (mgmt_ip6, &ip6_addr, sizeof (ip6_addr));
 	}
       else if (unformat (input, "mgmt-oid %s", &mgmt_oid))
 	;

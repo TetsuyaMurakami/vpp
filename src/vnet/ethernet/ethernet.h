@@ -43,7 +43,6 @@
 #include <vnet/vnet.h>
 #include <vnet/ethernet/packet.h>
 #include <vnet/ethernet/mac_address.h>
-#include <vnet/pg/pg.h>
 #include <vnet/feature/feature.h>
 
 /* ethernet-input frame flags and scalar data */
@@ -129,6 +128,15 @@ struct vnet_hw_interface_t;
 typedef u32 (ethernet_flag_change_function_t)
   (vnet_main_t * vnm, struct vnet_hw_interface_t * hi, u32 flags);
 
+typedef struct
+{
+  /* ethernet interface flags change */
+  ethernet_flag_change_function_t *flag_change;
+
+  /* set Max Frame Size callback */
+  vnet_interface_set_max_frame_size_function_t *set_max_frame_size;
+} vnet_eth_if_callbacks_t;
+
 #define ETHERNET_MIN_PACKET_BYTES  64
 #define ETHERNET_MAX_PACKET_BYTES  9216
 
@@ -162,11 +170,8 @@ typedef struct ethernet_interface
   /* Set interface to accept all packets (promiscuous mode). */
 #define ETHERNET_INTERFACE_FLAG_ACCEPT_ALL 1
 
-  /* Change MTU on interface from hw interface structure */
-#define ETHERNET_INTERFACE_FLAG_MTU        2
-
   /* Callback, e.g. to turn on/off promiscuous mode */
-  ethernet_flag_change_function_t *flag_change;
+  vnet_eth_if_callbacks_t cb;
 
   u32 driver_instance;
 
@@ -354,14 +359,6 @@ mac_address_t *ethernet_interface_add_del_address (ethernet_main_t * em,
 						   const u8 * address,
 						   u8 is_add);
 
-clib_error_t *ethernet_register_interface (vnet_main_t * vnm,
-					   u32 dev_class_index,
-					   u32 dev_instance,
-					   const u8 * address,
-					   u32 * hw_if_index_return,
-					   ethernet_flag_change_function_t
-					   flag_change);
-
 void ethernet_delete_interface (vnet_main_t * vnm, u32 hw_if_index);
 
 /* Register given node index to take input for given ethernet type. */
@@ -404,16 +401,7 @@ uword unformat_ethernet_interface (unformat_input_t * input, va_list * args);
 
 uword unformat_pg_ethernet_header (unformat_input_t * input, va_list * args);
 
-always_inline void
-ethernet_setup_node (vlib_main_t * vm, u32 node_index)
-{
-  vlib_node_t *n = vlib_get_node (vm, node_index);
-  pg_node_t *pn = pg_get_node (node_index);
-
-  n->format_buffer = format_ethernet_header_with_length;
-  n->unformat_buffer = unformat_ethernet_header;
-  pn->unformat_edit = unformat_pg_ethernet_header;
-}
+void ethernet_setup_node (vlib_main_t *vm, u32 node_index);
 
 always_inline ethernet_header_t *
 ethernet_buffer_get_header (vlib_buffer_t * b)
@@ -584,6 +572,18 @@ vnet_get_ethernet_main (void)
   return &ethernet_main;
 }
 
+typedef struct
+{
+  u32 dev_class_index;
+  u32 dev_instance;
+  u16 max_frame_size;
+  u16 frame_overhead;
+  vnet_eth_if_callbacks_t cb;
+  const u8 *address;
+} vnet_eth_interface_registration_t;
+
+u32 vnet_eth_register_interface (vnet_main_t *vnm,
+				 vnet_eth_interface_registration_t *r);
 void ethernet_update_adjacency (vnet_main_t * vnm, u32 sw_if_index, u32 ai);
 u8 *ethernet_build_rewrite (vnet_main_t * vnm,
 			    u32 sw_if_index,

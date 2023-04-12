@@ -58,7 +58,7 @@ vlib_add_trace_inline (vlib_main_t * vm,
 {
   vlib_trace_main_t *tm = &vm->trace_main;
   vlib_trace_header_t *h;
-  u32 n_data_words;
+  u32 n_data_words, trace_index;
 
   ASSERT (vnet_trace_placeholder);
 
@@ -83,12 +83,23 @@ vlib_add_trace_inline (vlib_main_t * vm,
     if (PREDICT_FALSE (!vlib_add_handoff_trace (vm, b)))
       return vnet_trace_placeholder;
 
-  vlib_validate_trace (tm, b);
+  /*
+   * there is a small chance of a race condition with 'clear trace' here: if a
+   * buffer was set to be traced before the 'clear trace' and is still going
+   * through the graph after the 'clear trace', its trace_index is staled as
+   * the pool was destroyed.
+   * The pool may have been re-allocated because of a new traced buffer, and
+   * the trace_index might be valid by pure (bad) luck. In that case the trace
+   * will be a mix of both buffer traces, but this should be acceptable.
+   */
+  trace_index = vlib_buffer_get_trace_index (b);
+  if (PREDICT_FALSE (pool_is_free_index (tm->trace_buffer_pool, trace_index)))
+    return vnet_trace_placeholder;
 
   n_data_bytes = round_pow2 (n_data_bytes, sizeof (h[0]));
   n_data_words = n_data_bytes / sizeof (h[0]);
-  vec_add2_aligned (tm->trace_buffer_pool[vlib_buffer_get_trace_index (b)], h,
-		    1 + n_data_words, sizeof (h[0]));
+  vec_add2_aligned (tm->trace_buffer_pool[trace_index], h, 1 + n_data_words,
+		    sizeof (h[0]));
 
   h->time = vm->cpu_time_last_node_dispatch;
   h->n_data = n_data_words;
@@ -114,7 +125,7 @@ vlib_free_trace (vlib_main_t * vm, vlib_buffer_t * b)
   vlib_trace_main_t *tm = &vm->trace_main;
   u32 trace_index = vlib_buffer_get_trace_index (b);
   vlib_validate_trace (tm, b);
-  _vec_len (tm->trace_buffer_pool[trace_index]) = 0;
+  vec_set_len (tm->trace_buffer_pool[trace_index], 0);
   pool_put_index (tm->trace_buffer_pool, trace_index);
 }
 
@@ -153,9 +164,9 @@ vlib_trace_buffer (vlib_main_t * vm,
   if (PREDICT_FALSE (vlib_global_main.trace_filter.trace_filter_enable))
     {
       /* See if we're supposed to trace this packet... */
-      if (vnet_is_packet_traced
-	  (b, vlib_global_main.trace_filter.classify_table_index,
-	   0 /* full classify */ ) != 1)
+      if (vnet_is_packet_traced (
+	    b, vlib_global_main.trace_filter.classify_table_index,
+	    0 /* full classify */) != 1)
 	return 0;
     }
 

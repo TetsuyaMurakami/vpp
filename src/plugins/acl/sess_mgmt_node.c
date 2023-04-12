@@ -188,8 +188,7 @@ acl_fa_check_idle_sessions (acl_main_t * am, u16 thread_index, u64 now)
       }
   }
   if (pw->wip_session_change_requests)
-    _vec_len (pw->wip_session_change_requests) = 0;
-
+    vec_set_len (pw->wip_session_change_requests, 0);
 
   {
     u8 tt = 0;
@@ -309,7 +308,7 @@ acl_fa_check_idle_sessions (acl_main_t * am, u16 thread_index, u64 now)
   total_expired = vec_len (pw->expired);
   /* zero out the vector which we have acted on */
   if (pw->expired)
-    _vec_len (pw->expired) = 0;
+    vec_set_len (pw->expired, 0);
   /* if we were advancing and reached the end
    * (no more sessions to recycle), reset the fast-forward timestamp */
 
@@ -361,8 +360,9 @@ send_one_worker_interrupt (vlib_main_t * vm, acl_main_t * am,
   if (!pw->interrupt_is_pending)
     {
       pw->interrupt_is_pending = 1;
-      vlib_node_set_interrupt_pending (vlib_mains[thread_index],
-				       acl_fa_worker_session_cleaner_process_node.index);
+      vlib_node_set_interrupt_pending (
+	vlib_get_main_by_index (thread_index),
+	acl_fa_worker_session_cleaner_process_node.index);
       elog_acl_maybe_trace_X1 (am,
 			       "send_one_worker_interrupt: send interrupt to worker %u",
 			       "i4", ((u32) thread_index));
@@ -560,7 +560,7 @@ send_interrupts_to_workers (vlib_main_t * vm, acl_main_t * am)
 {
   int i;
   /* Can't use vec_len(am->per_worker_data) since the threads might not have come up yet; */
-  int n_threads = vec_len (vlib_mains);
+  int n_threads = vlib_get_n_threads ();
   for (i = 0; i < n_threads; i++)
     {
       send_one_worker_interrupt (vm, am, i);
@@ -600,7 +600,7 @@ acl_fa_session_cleaner_process (vlib_main_t * vm, vlib_node_runtime_t * rt,
        *
        * Also, while we are at it, calculate the earliest we need to wake up.
        */
-      for (ti = 0; ti < vec_len (vlib_mains); ti++)
+      for (ti = 0; ti < vlib_get_n_threads (); ti++)
 	{
 	  if (ti >= vec_len (am->per_worker_data))
 	    {
@@ -723,6 +723,7 @@ acl_fa_session_cleaner_process (vlib_main_t * vm, vlib_node_runtime_t * rt,
 		}
 	      else
 		{
+		  clib_bitmap_free (pw0->pending_clear_sw_if_index_bitmap);
 		  if (clear_all)
 		    {
 		      /* if we need to clear all, then just clear the interfaces that we are servicing */
@@ -746,7 +747,7 @@ acl_fa_session_cleaner_process (vlib_main_t * vm, vlib_node_runtime_t * rt,
 
 	    /* now wait till they all complete */
 	    acl_log_info ("CLEANER mains len: %u per-worker len: %d",
-			  vec_len (vlib_mains),
+			  vlib_get_n_threads (),
 			  vec_len (am->per_worker_data));
 	    vec_foreach (pw0, am->per_worker_data)
 	    {
@@ -787,7 +788,7 @@ acl_fa_session_cleaner_process (vlib_main_t * vm, vlib_node_runtime_t * rt,
       send_interrupts_to_workers (vm, am);
 
       if (event_data)
-	_vec_len (event_data) = 0;
+	vec_set_len (event_data, 0);
 
       /*
        * If the interrupts were not processed yet, ensure we wait a bit,
@@ -859,10 +860,8 @@ acl_fa_enable_disable (u32 sw_if_index, int is_input, int enable_disable)
     {
       acl_fa_verify_init_sessions (am);
       am->fa_total_enabled_count++;
-      void *oldheap = clib_mem_set_heap (am->vlib_main->heap_base);
       vlib_process_signal_event (am->vlib_main, am->fa_cleaner_node_index,
 				 ACL_FA_CLEANER_RESCHEDULE, 0);
-      clib_mem_set_heap (oldheap);
     }
   else
     {
@@ -873,12 +872,10 @@ acl_fa_enable_disable (u32 sw_if_index, int is_input, int enable_disable)
     {
       ASSERT (clib_bitmap_get (am->fa_in_acl_on_sw_if_index, sw_if_index) !=
 	      enable_disable);
-      void *oldheap = clib_mem_set_heap (am->vlib_main->heap_base);
       vnet_feature_enable_disable ("ip4-unicast", "acl-plugin-in-ip4-fa",
 				   sw_if_index, enable_disable, 0, 0);
       vnet_feature_enable_disable ("ip6-unicast", "acl-plugin-in-ip6-fa",
 				   sw_if_index, enable_disable, 0, 0);
-      clib_mem_set_heap (oldheap);
       am->fa_in_acl_on_sw_if_index =
 	clib_bitmap_set (am->fa_in_acl_on_sw_if_index, sw_if_index,
 			 enable_disable);
@@ -887,12 +884,10 @@ acl_fa_enable_disable (u32 sw_if_index, int is_input, int enable_disable)
     {
       ASSERT (clib_bitmap_get (am->fa_out_acl_on_sw_if_index, sw_if_index) !=
 	      enable_disable);
-      void *oldheap = clib_mem_set_heap (am->vlib_main->heap_base);
       vnet_feature_enable_disable ("ip4-output", "acl-plugin-out-ip4-fa",
 				   sw_if_index, enable_disable, 0, 0);
       vnet_feature_enable_disable ("ip6-output", "acl-plugin-out-ip6-fa",
 				   sw_if_index, enable_disable, 0, 0);
-      clib_mem_set_heap (oldheap);
       am->fa_out_acl_on_sw_if_index =
 	clib_bitmap_set (am->fa_out_acl_on_sw_if_index, sw_if_index,
 			 enable_disable);
@@ -904,11 +899,9 @@ acl_fa_enable_disable (u32 sw_if_index, int is_input, int enable_disable)
       clib_warning ("ENABLE-DISABLE: clean the connections on interface %d",
 		    sw_if_index);
 #endif
-      void *oldheap = clib_mem_set_heap (am->vlib_main->heap_base);
       vlib_process_signal_event (am->vlib_main, am->fa_cleaner_node_index,
 				 ACL_FA_CLEANER_DELETE_BY_SW_IF_INDEX,
 				 sw_if_index);
-      clib_mem_set_heap (oldheap);
     }
 }
 

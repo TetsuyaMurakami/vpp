@@ -1,143 +1,133 @@
-/*
- * Copyright (c) 2015 Cisco and/or its affiliates.
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at:
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+/* SPDX-License-Identifier: Apache-2.0
+ * Copyright(c) 2022 Cisco Systems, Inc.
  */
-/*
-  Copyright (c) 2001, 2002, 2003 Eliot Dresselhaus
-
-  Permission is hereby granted, free of charge, to any person obtaining
-  a copy of this software and associated documentation files (the
-  "Software"), to deal in the Software without restriction, including
-  without limitation the rights to use, copy, modify, merge, publish,
-  distribute, sublicense, and/or sell copies of the Software, and to
-  permit persons to whom the Software is furnished to do so, subject to
-  the following conditions:
-
-  The above copyright notice and this permission notice shall be
-  included in all copies or substantial portions of the Software.
-
-  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
-  LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
-  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-*/
 
 #include <vppinfra/vec.h>
 #include <vppinfra/mem.h>
 
-/* Vector resize operator.  Called as needed by various macros such as
-   vec_add1() when we need to allocate memory. */
-__clib_export void *
-vec_resize_allocate_memory (void *v,
-			    word length_increment,
-			    uword data_bytes,
-			    uword header_bytes, uword data_align,
-			    uword numa_id)
-{
-  vec_header_t *vh = _vec_find (v);
-  uword old_alloc_bytes, new_alloc_bytes;
-  void *old, *new;
-  void *oldheap;
-
-  header_bytes = vec_header_bytes (header_bytes);
-
-  data_bytes += header_bytes;
-
-  if (PREDICT_FALSE (numa_id != VEC_NUMA_UNSPECIFIED))
-    {
-      oldheap = clib_mem_get_per_cpu_heap ();
-      clib_mem_set_per_cpu_heap (clib_mem_get_per_numa_heap (numa_id));
-    }
-
-  if (!v)
-    {
-      new = clib_mem_alloc_aligned_at_offset (data_bytes, data_align, header_bytes, 1	/* yes, call os_out_of_memory */
-	);
-      new_alloc_bytes = clib_mem_size (new);
-      CLIB_MEM_UNPOISON (new + data_bytes, new_alloc_bytes - data_bytes);
-      clib_memset (new, 0, new_alloc_bytes);
-      CLIB_MEM_POISON (new + data_bytes, new_alloc_bytes - data_bytes);
-      v = new + header_bytes;
-      _vec_len (v) = length_increment;
-      _vec_numa (v) = numa_id;
-      if (PREDICT_FALSE (numa_id != VEC_NUMA_UNSPECIFIED))
-	clib_mem_set_per_cpu_heap (oldheap);
-      return v;
-    }
-
-  vh->len += length_increment;
-  old = v - header_bytes;
-
-  /* Vector header must start heap object. */
-  ASSERT (clib_mem_is_heap_object (old));
-
-  old_alloc_bytes = clib_mem_size (old);
-
-  /* Need to resize? */
-  if (data_bytes <= old_alloc_bytes)
-    {
-      CLIB_MEM_UNPOISON (v, data_bytes);
-      if (PREDICT_FALSE (numa_id != VEC_NUMA_UNSPECIFIED))
-	clib_mem_set_per_cpu_heap (oldheap);
-      return v;
-    }
-
-#if CLIB_VECTOR_GROW_BY_ONE > 0
-  new_alloc_bytes = data_bytes;
-#else
-  new_alloc_bytes = (old_alloc_bytes * 3) / 2;
-  if (new_alloc_bytes < data_bytes)
-    new_alloc_bytes = data_bytes;
+#ifndef CLIB_VECTOR_GROW_BY_ONE
+#define CLIB_VECTOR_GROW_BY_ONE 0
 #endif
 
-  new =
-    clib_mem_alloc_aligned_at_offset (new_alloc_bytes, data_align,
-				      header_bytes,
-				      1 /* yes, call os_out_of_memory */ );
-
-  /* FIXME fail gracefully. */
-  if (!new)
-    clib_panic
-      ("vec_resize fails, length increment %d, data bytes %d, alignment %d",
-       length_increment, data_bytes, data_align);
-
-  CLIB_MEM_UNPOISON (old, old_alloc_bytes);
-  clib_memcpy_fast (new, old, old_alloc_bytes);
-  clib_mem_free (old);
-
-  /* Allocator may give a bit of extra room. */
-  new_alloc_bytes = clib_mem_size (new);
-  v = new;
-
-  /* Zero new memory. */
-  CLIB_MEM_UNPOISON (new + data_bytes, new_alloc_bytes - data_bytes);
-  memset (v + old_alloc_bytes, 0, new_alloc_bytes - old_alloc_bytes);
-  CLIB_MEM_POISON (new + data_bytes, new_alloc_bytes - data_bytes);
-
-  _vec_numa ((v + header_bytes)) = numa_id;
-  if (PREDICT_FALSE (numa_id != VEC_NUMA_UNSPECIFIED))
-    clib_mem_set_per_cpu_heap (oldheap);
-
-  return v + header_bytes;
+__clib_export uword
+vec_mem_size (void *v)
+{
+  return v ? clib_mem_size (v - vec_get_header_size (v)) : 0;
 }
 
-__clib_export uword
-clib_mem_is_vec_h (void *v, uword header_bytes)
+__clib_export void *
+_vec_alloc_internal (uword n_elts, const vec_attr_t *const attr)
 {
-  return clib_mem_is_heap_object (vec_header (v, header_bytes));
+  uword req_size, alloc_size, data_offset, align;
+  uword elt_sz = attr->elt_sz;
+  void *p, *v, *heap = attr->heap;
+
+  /* alignment must be power of 2 */
+  align = clib_max (attr->align, VEC_MIN_ALIGN);
+  ASSERT (count_set_bits (align) == 1);
+
+  /* calc offset where vector data starts */
+  data_offset = attr->hdr_sz + sizeof (vec_header_t);
+  data_offset += heap ? sizeof (void *) : 0;
+  data_offset = round_pow2 (data_offset, align);
+
+  req_size = data_offset + n_elts * elt_sz;
+  p = clib_mem_heap_alloc_aligned (heap, req_size, align);
+
+  /* zero out whole alocation */
+  alloc_size = clib_mem_size (p);
+  clib_mem_unpoison (p, alloc_size);
+  clib_memset_u8 (p, 0, alloc_size);
+
+  /* fill vector header */
+  v = p + data_offset;
+  _vec_find (v)->len = n_elts;
+  _vec_find (v)->hdr_size = data_offset / VEC_MIN_ALIGN;
+  _vec_find (v)->log2_align = min_log2 (align);
+  if (heap)
+    {
+      _vec_find (v)->default_heap = 0;
+      _vec_heap (v) = heap;
+    }
+  else
+    _vec_find (v)->default_heap = 1;
+
+  /* poison extra space given by allocator */
+  clib_mem_poison (p + req_size, alloc_size - req_size);
+  _vec_set_grow_elts (v, (alloc_size - req_size) / elt_sz);
+  return v;
+}
+
+static inline void
+_vec_update_len (void *v, uword n_elts, uword elt_sz, uword n_data_bytes,
+		 uword unused_bytes)
+{
+  _vec_find (v)->len = n_elts;
+  _vec_set_grow_elts (v, unused_bytes / elt_sz);
+  clib_mem_unpoison (v, n_data_bytes);
+  clib_mem_poison (v + n_data_bytes, unused_bytes);
+}
+
+__clib_export void *
+_vec_realloc_internal (void *v, uword n_elts, const vec_attr_t *const attr)
+{
+  uword old_alloc_sz, new_alloc_sz, new_data_size, n_data_bytes, data_offset;
+  uword elt_sz;
+
+  if (PREDICT_FALSE (v == 0))
+    return _vec_alloc_internal (n_elts, attr);
+
+  elt_sz = attr->elt_sz;
+  n_data_bytes = n_elts * elt_sz;
+  data_offset = vec_get_header_size (v);
+  new_data_size = data_offset + n_data_bytes;
+  new_alloc_sz = old_alloc_sz = clib_mem_size (vec_header (v));
+
+  /* realloc if new size cannot fit into existing allocation */
+  if (old_alloc_sz < new_data_size)
+    {
+      uword n_bytes, req_size = new_data_size;
+      void *p = v - data_offset;
+
+      req_size += CLIB_VECTOR_GROW_BY_ONE ? 0 : n_data_bytes / 2;
+
+      p = clib_mem_heap_realloc_aligned (vec_get_heap (v), p, req_size,
+					 vec_get_align (v));
+      new_alloc_sz = clib_mem_size (p);
+      v = p + data_offset;
+
+      /* zero out new allocation */
+      n_bytes = new_alloc_sz - old_alloc_sz;
+      clib_mem_unpoison (p + old_alloc_sz, n_bytes);
+      clib_memset_u8 (p + old_alloc_sz, 0, n_bytes);
+    }
+
+  _vec_update_len (v, n_elts, elt_sz, n_data_bytes,
+		   new_alloc_sz - new_data_size);
+  return v;
+}
+
+__clib_export void *
+_vec_resize_internal (void *v, uword n_elts, const vec_attr_t *const attr)
+{
+  uword elt_sz = attr->elt_sz;
+  if (PREDICT_TRUE (v != 0))
+    {
+      uword hs = _vec_find (v)->hdr_size * VEC_MIN_ALIGN;
+      uword alloc_sz = clib_mem_size (v - hs);
+      uword n_data_bytes = elt_sz * n_elts;
+      word unused_bytes = alloc_sz - (n_data_bytes + hs);
+
+      if (PREDICT_TRUE (unused_bytes >= 0))
+	{
+	  _vec_update_len (v, n_elts, elt_sz, n_data_bytes, unused_bytes);
+	  return v;
+	}
+    }
+
+  /* this shouled emit tail jump and likely avoid stack usasge inside this
+   * function */
+  return _vec_realloc_internal (v, n_elts, attr);
 }
 
 __clib_export u32
@@ -151,62 +141,3 @@ vec_free_not_inline (void *v)
 {
   vec_free (v);
 }
-
-/** \cond */
-
-#ifdef TEST
-
-#include <stdio.h>
-
-void
-main (int argc, char *argv[])
-{
-  word n = atoi (argv[1]);
-  word i, *x = 0;
-
-  typedef struct
-  {
-    word x, y, z;
-  } FOO;
-
-  FOO *foos = vec_init (FOO, 10), *f;
-
-  vec_validate (foos, 100);
-  foos[100].x = 99;
-
-  _vec_len (foos) = 0;
-  for (i = 0; i < n; i++)
-    {
-      vec_add1 (x, i);
-      vec_add2 (foos, f, 1);
-      f->x = 2 * i;
-      f->y = 3 * i;
-      f->z = 4 * i;
-    }
-
-  {
-    word n = 2;
-    word m = 42;
-    vec_delete (foos, n, m);
-  }
-
-  {
-    word n = 2;
-    word m = 42;
-    vec_insert (foos, n, m);
-  }
-
-  vec_free (x);
-  vec_free (foos);
-  exit (0);
-}
-#endif
-/** \endcond */
-
-/*
- * fd.io coding-style-patch-verification: ON
- *
- * Local Variables:
- * eval: (c-set-style "gnu")
- * End:
- */

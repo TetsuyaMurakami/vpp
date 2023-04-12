@@ -214,6 +214,14 @@ session_lookup_get_index_for_fib (u32 fib_proto, u32 fib_index)
   return fib_index_to_table_index[fib_proto][fib_index];
 }
 
+u32
+session_lookup_get_or_alloc_index_for_fib (u32 fib_proto, u32 fib_index)
+{
+  session_table_t *st;
+  st = session_table_get_or_alloc (fib_proto, fib_index);
+  return session_table_index (st);
+}
+
 /**
  * Add transport connection to a session table
  *
@@ -1038,9 +1046,7 @@ session_lookup_connection4 (u32 fib_index, ip4_address_t * lcl,
 /**
  * Lookup session with ip4 and transport layer information
  *
- * Important note: this may look into another thread's pool table and
- * register as 'peeker'. Caller should call @ref session_pool_remove_peeker as
- * if needed as soon as possible.
+ * Important note: this may look into another thread's pool table
  *
  * Lookup logic is similar to that of @ref session_lookup_connection_wt4 but
  * this returns a session as opposed to a transport connection and it does not
@@ -1444,6 +1450,7 @@ session_rule_command_fn (vlib_main_t * vm, unformat_input_t * input,
 			 vlib_cli_command_t * cmd)
 {
   u32 proto = ~0, lcl_port, rmt_port, action = 0, lcl_plen = 0, rmt_plen = 0;
+  clib_error_t *error = 0;
   u32 appns_index, scope = 0;
   ip46_address_t lcl_ip, rmt_ip;
   u8 is_ip4 = 1, conn_set = 0;
@@ -1493,29 +1500,32 @@ session_rule_command_fn (vlib_main_t * vm, unformat_input_t * input,
       else if (unformat (input, "tag %_%v%_", &tag))
 	;
       else
-	return clib_error_return (0, "unknown input `%U'",
-				  format_unformat_error, input);
+	{
+	  error = clib_error_return (0, "unknown input `%U'",
+				     format_unformat_error, input);
+	  goto done;
+	}
     }
 
   if (proto == ~0)
     {
       vlib_cli_output (vm, "proto must be set");
-      return 0;
+      goto done;
     }
   if (is_add && !conn_set && action == ~0)
     {
       vlib_cli_output (vm, "connection and action must be set for add");
-      return 0;
+      goto done;
     }
   if (!is_add && !tag && !conn_set)
     {
       vlib_cli_output (vm, "connection or tag must be set for delete");
-      return 0;
+      goto done;
     }
   if (vec_len (tag) > SESSION_RULE_TAG_MAX_LEN)
     {
       vlib_cli_output (vm, "tag too long (max u64)");
-      return 0;
+      goto done;
     }
 
   if (ns_id)
@@ -1524,7 +1534,7 @@ session_rule_command_fn (vlib_main_t * vm, unformat_input_t * input,
       if (!app_ns)
 	{
 	  vlib_cli_output (vm, "namespace %v does not exist", ns_id);
-	  return 0;
+	  goto done;
 	}
     }
   else
@@ -1551,10 +1561,12 @@ session_rule_command_fn (vlib_main_t * vm, unformat_input_t * input,
     .scope = scope,
   };
   if ((rv = vnet_session_rule_add_del (&args)))
-    return clib_error_return (0, "rule add del returned %u", rv);
+    error = clib_error_return (0, "rule add del returned %u", rv);
 
+done:
+  vec_free (ns_id);
   vec_free (tag);
-  return 0;
+  return error;
 }
 
 /* *INDENT-OFF* */

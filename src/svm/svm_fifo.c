@@ -72,8 +72,8 @@ CLIB_MARCH_FN (svm_fifo_copy_from_chunk, void, svm_fifo_t *f,
       c = f_cptr (f, c->next);
       while ((to_copy -= n_chunk))
 	{
-	  CLIB_MEM_UNPOISON (c, sizeof (*c));
-	  CLIB_MEM_UNPOISON (c->data, c->length);
+	  clib_mem_unpoison (c, sizeof (*c));
+	  clib_mem_unpoison (c->data, c->length);
 	  n_chunk = clib_min (c->length, to_copy);
 	  clib_memcpy_fast (dst + (len - to_copy), &c->data[0], n_chunk);
 	  c = c->length <= to_copy ? f_cptr (f, c->next) : c;
@@ -1010,25 +1010,26 @@ svm_fifo_enqueue_segments (svm_fifo_t * f, const svm_fifo_seg_t segs[],
     }
   else
     {
-      len = clib_min (free_count, len);
+      u32 n_left = clib_min (free_count, len);
 
-      if (f_pos_gt (tail + len, f_chunk_end (f_end_cptr (f))))
+      if (f_pos_gt (tail + n_left, f_chunk_end (f_end_cptr (f))))
 	{
-	  if (PREDICT_FALSE (f_try_chunk_alloc (f, head, tail, len)))
+	  if (PREDICT_FALSE (f_try_chunk_alloc (f, head, tail, n_left)))
 	    {
-	      len = f_chunk_end (f_end_cptr (f)) - tail;
-	      if (!len)
+	      n_left = f_chunk_end (f_end_cptr (f)) - tail;
+	      if (!n_left)
 		return SVM_FIFO_EGROW;
 	    }
 	}
 
+      len = n_left;
       i = 0;
-      while (len)
+      while (n_left)
 	{
-	  u32 to_copy = clib_min (segs[i].len, len);
+	  u32 to_copy = clib_min (segs[i].len, n_left);
 	  svm_fifo_copy_to_chunk (f, f_tail_cptr (f), tail, segs[i].data,
 				  to_copy, &f->shr->tail_chunk);
-	  len -= to_copy;
+	  n_left -= to_copy;
 	  tail += to_copy;
 	  i++;
 	}
@@ -1154,7 +1155,7 @@ svm_fifo_peek (svm_fifo_t * f, u32 offset, u32 len, u8 * dst)
   len = clib_min (cursize - offset, len);
   head_idx = head + offset;
 
-  CLIB_MEM_UNPOISON (f->ooo_deq, sizeof (*f->ooo_deq));
+  clib_mem_unpoison (f->ooo_deq, sizeof (*f->ooo_deq));
   if (!f->ooo_deq || !f_chunk_includes_pos (f->ooo_deq, head_idx))
     f_update_ooo_deq (f, head_idx, head_idx + len);
 
@@ -1257,6 +1258,9 @@ svm_fifo_provision_chunks (svm_fifo_t *f, svm_fifo_seg_t *fs, u32 n_segs,
   if (n_avail < len && f_try_chunk_alloc (f, head, tail, len))
     return SVM_FIFO_EGROW;
 
+  if (!fs || !n_segs)
+    return 0;
+
   c = f_tail_cptr (f);
   head_pos = (tail - c->start_byte);
   fs[0].data = c->data + head_pos;
@@ -1277,8 +1281,8 @@ svm_fifo_provision_chunks (svm_fifo_t *f, svm_fifo_seg_t *fs, u32 n_segs,
 }
 
 int
-svm_fifo_segments (svm_fifo_t * f, u32 offset, svm_fifo_seg_t * fs,
-		   u32 n_segs, u32 max_bytes)
+svm_fifo_segments (svm_fifo_t *f, u32 offset, svm_fifo_seg_t *fs, u32 *n_segs,
+		   u32 max_bytes)
 {
   u32 cursize, to_read, head, tail, fs_index = 1;
   u32 n_bytes, head_pos, len, start;
@@ -1311,7 +1315,7 @@ svm_fifo_segments (svm_fifo_t * f, u32 offset, svm_fifo_seg_t * fs,
   fs[0].len = clib_min (c->length - head_pos, to_read);
   n_bytes = fs[0].len;
 
-  while (n_bytes < to_read && fs_index < n_segs)
+  while (n_bytes < to_read && fs_index < *n_segs)
     {
       c = f_cptr (f, c->next);
       len = clib_min (c->length, to_read - n_bytes);
@@ -1320,6 +1324,7 @@ svm_fifo_segments (svm_fifo_t * f, u32 offset, svm_fifo_seg_t * fs,
       n_bytes += len;
       fs_index += 1;
     }
+  *n_segs = fs_index;
 
   return n_bytes;
 }

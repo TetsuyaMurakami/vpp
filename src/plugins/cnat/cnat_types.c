@@ -103,16 +103,28 @@ unformat_cnat_ep (unformat_input_t * input, va_list * args)
 }
 
 uword
+unformat_cnat_ep_flags (unformat_input_t *input, va_list *args)
+{
+  int *a = va_arg (*args, int *);
+  if (unformat (input, ":nonat"))
+    *a = CNAT_TRK_FLAG_NO_NAT;
+  return 1;
+}
+
+uword
 unformat_cnat_ep_tuple (unformat_input_t * input, va_list * args)
 {
   cnat_endpoint_tuple_t *a = va_arg (*args, cnat_endpoint_tuple_t *);
-  if (unformat (input, "%U->%U", unformat_cnat_ep, &a->src_ep,
-		unformat_cnat_ep, &a->dst_ep))
-    ;
-  else if (unformat (input, "->%U", unformat_cnat_ep, &a->dst_ep))
-    ;
-  else if (unformat (input, "%U->", unformat_cnat_ep, &a->src_ep))
-    ;
+  int flgs = 0;
+  if (unformat (input, "%U->%U%U", unformat_cnat_ep, &a->src_ep,
+		unformat_cnat_ep, &a->dst_ep, unformat_cnat_ep_flags, &flgs))
+    a->ep_flags = flgs;
+  else if (unformat (input, "->%U%U", unformat_cnat_ep, &a->dst_ep,
+		     unformat_cnat_ep_flags, &flgs))
+    a->ep_flags = flgs;
+  else if (unformat (input, "%U->%U", unformat_cnat_ep, &a->src_ep,
+		     unformat_cnat_ep_flags, &flgs))
+    a->ep_flags = flgs;
   else
     return 0;
   return 1;
@@ -181,10 +193,12 @@ cnat_config (vlib_main_t * vm, unformat_input_t * input)
   cm->translation_hash_buckets = CNAT_DEFAULT_TRANSLATION_BUCKETS;
   cm->snat_hash_memory = CNAT_DEFAULT_SNAT_MEMORY;
   cm->snat_hash_buckets = CNAT_DEFAULT_SNAT_BUCKETS;
+  cm->snat_if_map_length = CNAT_DEFAULT_SNAT_IF_MAP_LEN;
   cm->scanner_timeout = CNAT_DEFAULT_SCANNER_TIMEOUT;
   cm->session_max_age = CNAT_DEFAULT_SESSION_MAX_AGE;
   cm->tcp_max_age = CNAT_DEFAULT_TCP_MAX_AGE;
   cm->default_scanner_state = CNAT_SCANNER_ON;
+  cm->maglev_len = CNAT_DEFAULT_MAGLEV_LEN;
   cm->lazy_init_done = 0;
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
@@ -203,6 +217,8 @@ cnat_config (vlib_main_t * vm, unformat_input_t * input)
 	;
       else if (unformat (input, "snat-db-buckets %u", &cm->snat_hash_buckets))
 	;
+      else if (unformat (input, "snat-if-map-len %u", &cm->snat_if_map_length))
+	;
       else if (unformat (input, "snat-db-memory %U",
 			 unformat_memory_size, &cm->snat_hash_memory))
 	;
@@ -216,6 +232,8 @@ cnat_config (vlib_main_t * vm, unformat_input_t * input)
       else if (unformat (input, "session-max-age %u", &cm->session_max_age))
 	;
       else if (unformat (input, "tcp-max-age %u", &cm->tcp_max_age))
+	;
+      else if (unformat (input, "maglev-len %u", &cm->maglev_len))
 	;
       else
 	return clib_error_return (0, "unknown input '%U'",

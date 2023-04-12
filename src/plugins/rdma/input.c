@@ -389,10 +389,10 @@ rdma_device_input_bufs (vlib_main_t * vm, const rdma_device_t * rd,
     {
       if (PREDICT_TRUE (n_left_from >= 8))
 	{
-	  CLIB_PREFETCH (&wc[4 + 0], CLIB_CACHE_LINE_BYTES, LOAD);
-	  CLIB_PREFETCH (&wc[4 + 1], CLIB_CACHE_LINE_BYTES, LOAD);
-	  CLIB_PREFETCH (&wc[4 + 2], CLIB_CACHE_LINE_BYTES, LOAD);
-	  CLIB_PREFETCH (&wc[4 + 3], CLIB_CACHE_LINE_BYTES, LOAD);
+	  clib_prefetch_load (&wc[4 + 0]);
+	  clib_prefetch_load (&wc[4 + 1]);
+	  clib_prefetch_load (&wc[4 + 2]);
+	  clib_prefetch_load (&wc[4 + 3]);
 	  vlib_prefetch_buffer_header (b[4 + 0], STORE);
 	  vlib_prefetch_buffer_header (b[4 + 1], STORE);
 	  vlib_prefetch_buffer_header (b[4 + 2], STORE);
@@ -609,6 +609,7 @@ rdma_device_poll_cq_mlx5dv (rdma_device_t * rd, rdma_rxq_t * rxq,
 	  n_rx_packets++;
 	  cq_ci++;
 	  byte_cnt++;
+	  cqe_flags++;
 	  continue;
 	}
 
@@ -670,46 +671,77 @@ rdma_device_mlx5dv_l3_validate_and_swap_bc (rdma_per_thread_data_t
 					    * ptd, int n_rx_packets, u32 * bc)
 {
   u16 mask = CQE_FLAG_L3_HDR_TYPE_MASK | CQE_FLAG_L3_OK;
-  u16 match = CQE_FLAG_L3_HDR_TYPE_IP4 << CQE_FLAG_L3_HDR_TYPE_SHIFT;
+  u16 match =
+    CQE_FLAG_L3_HDR_TYPE_IP4 << CQE_FLAG_L3_HDR_TYPE_SHIFT | CQE_FLAG_L3_OK;
+
+  /* convert mask/match to big endian for subsequant comparison */
+  mask = clib_host_to_net_u16 (mask);
+  match = clib_host_to_net_u16 (match);
 
   /* verify that all ip4 packets have l3_ok flag set and convert packet
      length from network to host byte order */
   int skip_ip4_cksum = 1;
+  int n_left = n_rx_packets;
+  u16 *cqe_flags = ptd->cqe_flags;
 
 #if defined CLIB_HAVE_VEC256
-  u16x16 mask16 = u16x16_splat (mask);
-  u16x16 match16 = u16x16_splat (match);
-  u16x16 r = { };
+  if (n_left >= 16)
+    {
+      u16x16 mask16 = u16x16_splat (mask);
+      u16x16 match16 = u16x16_splat (match);
+      u16x16 r16 = {};
 
-  for (int i = 0; i * 16 < n_rx_packets; i++)
-    r |= (ptd->cqe_flags16[i] & mask16) != match16;
+      while (n_left >= 16)
+	{
+	  r16 |= (*(u16x16 *) cqe_flags & mask16) != match16;
 
-  if (!u16x16_is_all_zero (r))
-    skip_ip4_cksum = 0;
+	  *(u32x8 *) bc = u32x8_byte_swap (*(u32x8 *) bc);
+	  *(u32x8 *) (bc + 8) = u32x8_byte_swap (*(u32x8 *) (bc + 8));
 
-  for (int i = 0; i < n_rx_packets; i += 8)
-    *(u32x8 *) (bc + i) = u32x8_byte_swap (*(u32x8 *) (bc + i));
+	  cqe_flags += 16;
+	  bc += 16;
+	  n_left -= 16;
+	}
+
+      if (!u16x16_is_all_zero (r16))
+	skip_ip4_cksum = 0;
+    }
 #elif defined CLIB_HAVE_VEC128
-  u16x8 mask8 = u16x8_splat (mask);
-  u16x8 match8 = u16x8_splat (match);
-  u16x8 r = { };
+  if (n_left >= 8)
+    {
+      u16x8 mask8 = u16x8_splat (mask);
+      u16x8 match8 = u16x8_splat (match);
+      u16x8 r8 = {};
 
-  for (int i = 0; i * 8 < n_rx_packets; i++)
-    r |= (ptd->cqe_flags8[i] & mask8) != match8;
+      while (n_left >= 8)
+	{
+	  r8 |= (*(u16x8 *) cqe_flags & mask8) != match8;
 
-  if (!u16x8_is_all_zero (r))
-    skip_ip4_cksum = 0;
+	  *(u32x4 *) bc = u32x4_byte_swap (*(u32x4 *) bc);
+	  *(u32x4 *) (bc + 4) = u32x4_byte_swap (*(u32x4 *) (bc + 4));
 
-  for (int i = 0; i < n_rx_packets; i += 4)
-    *(u32x4 *) (bc + i) = u32x4_byte_swap (*(u32x4 *) (bc + i));
-#else
-  for (int i = 0; i < n_rx_packets; i++)
-    if ((ptd->cqe_flags[i] & mask) == match)
-      skip_ip4_cksum = 0;
+	  cqe_flags += 8;
+	  bc += 8;
+	  n_left -= 8;
+	}
 
-  for (int i = 0; i < n_rx_packets; i++)
-    bc[i] = clib_net_to_host_u32 (bc[i]);
+      if (!u16x8_is_all_zero (r8))
+	skip_ip4_cksum = 0;
+    }
 #endif
+
+  while (n_left >= 1)
+    {
+      if ((cqe_flags[0] & mask) != match)
+	skip_ip4_cksum = 0;
+
+      bc[0] = clib_net_to_host_u32 (bc[0]);
+
+      cqe_flags += 1;
+      bc += 1;
+      n_left -= 1;
+    }
+
   return skip_ip4_cksum;
 }
 
@@ -973,9 +1005,8 @@ rdma_device_input_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  slow_path_needed =
 	    rdma_device_mlx5dv_legacy_rq_slow_path_needed (rxq->buf_sz,
 							   n_rx_packets, bc);
-	  n_rx_bytes =
-	    rdma_device_mlx5dv_fast_input (vm, rxq, bufs, mask, &bt, to_next,
-					   n_rx_packets, bc, ~1);
+	  n_rx_bytes = rdma_device_mlx5dv_fast_input (
+	    vm, rxq, bufs, mask, &bt, to_next, n_rx_packets, bc, ~0);
 
 	  /* If there are chained buffers, some of the head buffers have a current length
 	     higher than buf_sz: it needs to be fixed */
@@ -1029,7 +1060,7 @@ VLIB_NODE_FN (rdma_input_node) (vlib_main_t * vm,
       if (PREDICT_TRUE (rd->flags & RDMA_DEVICE_F_ADMIN_UP) == 0)
 	continue;
 
-      if (PREDICT_TRUE (rd->flags & RDMA_DEVICE_F_ERROR))
+      if (PREDICT_FALSE (rd->flags & RDMA_DEVICE_F_ERROR))
 	continue;
 
       if (PREDICT_TRUE (rd->flags & RDMA_DEVICE_F_MLX5DV))

@@ -37,11 +37,10 @@ Version: %{_version}
 Release: %{_release}
 BuildRequires: systemd, chrpath
 BuildRequires: check, check-devel
-BuildRequires: mbedtls-devel mbedtls
 %if 0%{?fedora}
 Requires: vpp-lib = %{_version}-%{_release}, vpp-selinux-policy = %{_version}-%{_release}, net-tools, pciutils
 Requires: compat-openssl10
-Requires: boost-filesystem mbedtls libffi-devel
+Requires: libffi-devel
 BuildRequires: subunit, subunit-devel
 BuildRequires: compat-openssl10-devel
 BuildRequires: python, python-devel, python-virtualenv, python-ply
@@ -49,28 +48,35 @@ BuildRequires: python3, python36-devel, python3-virtualenv
 BuildRequires: cmake
 %else
 %if 0%{rhel} >= 7
-Requires: vpp-lib = %{_version}-%{_release}, vpp-selinux-policy = %{_version}-%{_release}, net-tools, pciutils, python36
-Requires: boost-filesystem mbedtls libffi-devel
+Requires: vpp-lib = %{_version}-%{_release}, vpp-selinux-policy = %{_version}-%{_release}, net-tools, pciutils
+Requires: libffi-devel
 BuildRequires: epel-release
-BuildRequires: mbedtls-devel mbedtls
 BuildREquires: openssl-devel
-BuildRequires: python36-devel
 %if 0%{rhel} == 7
+Requires: python36
 BuildRequires: devtoolset-9-toolchain
 BuildRequires: cmake3
 BuildRequires: glibc-static, yum-utils
+BuildRequires: python36-devel
 %else
+%if 0%{rhel} == 8
+Requires: python36
 BuildRequires: cmake
 BuildRequires: dnf-utils
+BuildRequires: python36-devel
+%else
+Requires: python3
+BuildRequires: cmake
+BuildRequires: dnf-utils
+BuildRequires: python3-devel
+%endif
 %endif
 %endif
 %endif
 BuildRequires: libffi-devel
-BuildRequires: redhat-lsb
 BuildRequires: apr-devel
 BuildRequires: numactl-devel
 BuildRequires: autoconf automake libtool byacc bison flex
-BuildRequires: boost boost-devel
 BuildRequires: selinux-policy selinux-policy-devel
 
 Source: %{name}-%{_version}-%{_release}.tar.xz
@@ -274,18 +280,25 @@ mkdir -p -m755 %{buildroot}%{_localstatedir}/log/vpp
 #
 # vpp-plugins
 #
-mkdir -p -m755 %{buildroot}/usr/lib/vpp_plugins
-mkdir -p -m755 %{buildroot}/usr/lib/vpp_api_test_plugins
-for file in $(cd %{_mu_build_dir}/%{_vpp_install_dir}/vpp/lib/vpp_plugins && find -type f -print)
+mkdir -p -m755 %{buildroot}/usr/%{_lib}/vpp_plugins
+mkdir -p -m755 %{buildroot}/usr/%{_lib}/vpp_api_test_plugins
+mkdir -p -m755 %{buildroot}/usr/%{_lib}/vat2_plugins
+for file in $(cd %{_mu_build_dir}/%{_vpp_install_dir}/vpp/%{_lib}/vpp_plugins && find -type f -print)
 do
-        install -p -m 755 %{_mu_build_dir}/%{_vpp_install_dir}/vpp/lib/vpp_plugins/$file \
-           %{buildroot}/usr/lib/vpp_plugins/$file
+        install -p -m 755 %{_mu_build_dir}/%{_vpp_install_dir}/vpp/%{_lib}/vpp_plugins/$file \
+           %{buildroot}/usr/%{_lib}/vpp_plugins/$file
 done
 
-for file in $(cd %{_mu_build_dir}/%{_vpp_install_dir}/vpp/lib/vpp_api_test_plugins && find -type f -print)
+for file in $(cd %{_mu_build_dir}/%{_vpp_install_dir}/vpp/%{_lib}/vpp_api_test_plugins && find -type f -print)
 do
-        install -p -m 755 %{_mu_build_dir}/%{_vpp_install_dir}/vpp/lib/vpp_api_test_plugins/$file \
-           %{buildroot}/usr/lib/vpp_api_test_plugins/$file
+        install -p -m 755 %{_mu_build_dir}/%{_vpp_install_dir}/vpp/%{_lib}/vpp_api_test_plugins/$file \
+           %{buildroot}/usr/%{_lib}/vpp_api_test_plugins/$file
+done
+
+for file in $(cd %{_mu_build_dir}/%{_vpp_install_dir}/vpp/%{_lib}/vat2_plugins && find -type f -print)
+do
+        install -p -m 755 %{_mu_build_dir}/%{_vpp_install_dir}/vpp/%{_lib}/vat2_plugins/$file \
+           %{buildroot}/usr/%{_lib}/vat2_plugins/$file
 done
 
 for file in $(find %{_mu_build_dir}/%{_vpp_install_dir}/vpp/share/vpp/api/plugins -type f -name '*.api.json' -print )
@@ -317,7 +330,7 @@ fi
 
 
 %postun
-%systemd_postun
+%systemd_postun vpp.service
 if [ $1 -eq 0 ] ; then
     echo "Uninstalling, unbind user-mode PCI drivers"
     # Unbind user-mode PCI drivers
@@ -353,6 +366,7 @@ fi
 %files
 %defattr(-,bin,bin)
 %{_unitdir}/vpp.service
+/usr/bin/vat2
 /usr/bin/vpp*
 /usr/bin/svm*
 %config(noreplace) /etc/sysctl.d/80-vpp.conf
@@ -370,6 +384,7 @@ fi
 %global __requires_exclude_from %{_libdir}/librte_pmd_mlx[45]_glue\\.so.*$
 %exclude %{_libdir}/vpp_plugins
 %exclude %{_libdir}/vpp_api_test_plugins
+%exclude %{_libdir}/vat2_plugins
 %{_libdir}/*
 /usr/share/vpp/api/*
 
@@ -398,6 +413,7 @@ fi
 
 %files plugins
 %defattr(-,bin,bin)
-/usr/lib/vpp_plugins/*
-/usr/lib/vpp_api_test_plugins/*
+/usr/%{_lib}/vpp_plugins/*
+/usr/%{_lib}/vpp_api_test_plugins/*
+/usr/%{_lib}/vat2_plugins/*
 /usr/share/vpp/api/*

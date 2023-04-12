@@ -25,6 +25,7 @@
 #include <vnet/ip/ip6_packet.h>
 #include <vnet/ip/icmp6.h>
 #include <vnet/ip/ip6.h>
+#include <vnet/ip/ip.api_enum.h>
 #include <vnet/ip/format.h>
 #include <vnet/ethernet/arp_packet.h>
 
@@ -289,6 +290,9 @@ arp_term_l2bd (vlib_main_t * vm,
 	  ethertype0 = clib_net_to_host_u16 (*(u16 *) (l3h0 - 2));
 	  arp0 = (ethernet_arp_header_t *) l3h0;
 
+	  if (p0->flags & VNET_BUFFER_F_LOCALLY_ORIGINATED)
+	    goto next_l2_feature;
+
 	  if (ethertype0 != ETHERNET_TYPE_ARP)
 	    goto check_ip6_nd;
 
@@ -332,8 +336,8 @@ arp_term_l2bd (vlib_main_t * vm,
 	      || ethernet_address_cast (arp0->ip4_over_ethernet[0].mac.bytes))
 	    {
 	      /* VRRP virtual MAC may be different to SMAC in ARP reply */
-	      if (!ethernet_mac_address_equal
-		  (arp0->ip4_over_ethernet[0].mac.bytes, vrrp_prefix))
+	      if (clib_memcmp (arp0->ip4_over_ethernet[0].mac.bytes,
+			       vrrp_prefix, sizeof (vrrp_prefix)) != 0)
 		{
 		  error0 = ETHERNET_ARP_ERROR_l2_address_mismatch;
 		  goto drop;

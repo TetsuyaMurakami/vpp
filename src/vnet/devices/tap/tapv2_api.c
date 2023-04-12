@@ -24,33 +24,110 @@
 #include <vnet/api_errno.h>
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/ip/ip.h>
-
 #include <vnet/ethernet/ethernet_types_api.h>
 #include <vnet/ip/ip_types_api.h>
-
-#include <vnet/vnet_msg_enum.h>
-
-#define vl_typedefs		/* define message structures */
-#include <vnet/vnet_all_api_h.h>
-#undef vl_typedefs
-
-#define vl_endianfun		/* define message structures */
-#include <vnet/vnet_all_api_h.h>
-#undef vl_endianfun
-
-/* instantiate all the print functions we know about */
-#define vl_print(handle, ...) vlib_cli_output (handle, __VA_ARGS__)
-#define vl_printfun
-#include <vnet/vnet_all_api_h.h>
-#undef vl_printfun
-
-#include <vlibapi/api_helper_macros.h>
 #include <vnet/devices/tap/tap.h>
 
-#define foreach_tapv2_api_msg                     \
-_(TAP_CREATE_V2, tap_create_v2)                   \
-_(TAP_DELETE_V2, tap_delete_v2)                   \
-_(SW_INTERFACE_TAP_V2_DUMP, sw_interface_tap_v2_dump)
+#include <vnet/format_fns.h>
+#include <vnet/devices/tap/tapv2.api_enum.h>
+#include <vnet/devices/tap/tapv2.api_types.h>
+
+#define REPLY_MSG_ID_BASE tap_main.msg_id_base
+#include <vlibapi/api_helper_macros.h>
+
+static void
+vl_api_tap_create_v3_t_handler (vl_api_tap_create_v3_t *mp)
+{
+  vl_api_registration_t *reg;
+  int rv;
+
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
+
+  vnet_main_t *vnm = vnet_get_main ();
+  vlib_main_t *vm = vlib_get_main ();
+  vl_api_tap_create_v3_reply_t *rmp;
+
+  tap_create_if_args_t _a, *ap = &_a;
+
+  clib_memset (ap, 0, sizeof (*ap));
+
+  ap->id = mp->id;
+  if (!mp->use_random_mac)
+    {
+      mac_address_decode (mp->mac_address, &ap->mac_addr);
+      ap->mac_addr_set = 1;
+    }
+  ap->rx_ring_sz = mp->rx_ring_sz;
+  ap->tx_ring_sz = mp->tx_ring_sz;
+  ap->sw_if_index = (u32) ~0;
+  ap->num_rx_queues = clib_max (1, mp->num_rx_queues);
+  ap->num_tx_queues = mp->num_tx_queues;
+
+  if (mp->host_if_name_set)
+    ap->host_if_name = format (0, "%s%c", mp->host_if_name, 0);
+
+  if (mp->host_mac_addr_set)
+    {
+      mac_address_decode (mp->host_mac_addr, &ap->host_mac_addr);
+    }
+
+  if (mp->host_namespace_set)
+    ap->host_namespace = format (0, "%s%c", mp->host_namespace, 0);
+
+  if (mp->host_bridge_set)
+    ap->host_bridge = format (0, "%s%c", mp->host_bridge, 0);
+
+  if (mp->host_ip4_prefix_set)
+    {
+      ip4_address_decode (mp->host_ip4_prefix.address, &ap->host_ip4_addr);
+      ap->host_ip4_prefix_len = mp->host_ip4_prefix.len;
+    }
+
+  if (mp->host_ip6_prefix_set)
+    {
+      ip6_address_decode (mp->host_ip6_prefix.address, &ap->host_ip6_addr);
+      ap->host_ip6_prefix_len = mp->host_ip6_prefix.len;
+    }
+
+  if (mp->host_ip4_gw_set)
+    {
+      ip4_address_decode (mp->host_ip4_gw, &ap->host_ip4_gw);
+      ap->host_ip4_gw_set = 1;
+    }
+
+  if (mp->host_ip6_gw_set)
+    {
+      ip6_address_decode (mp->host_ip6_gw, &ap->host_ip6_gw);
+      ap->host_ip6_gw_set = 1;
+    }
+
+  if (mp->host_mtu_set)
+    {
+      ap->host_mtu_size = mp->host_mtu_size;
+      ap->host_mtu_set = 1;
+    }
+
+  ap->tap_flags = mp->tap_flags;
+
+  tap_create_if (vm, ap);
+
+  /* If a tag was supplied... */
+  if (vl_api_string_len (&mp->tag))
+    {
+      u8 *tag = vl_api_from_api_to_new_vec (mp, &mp->tag);
+      vnet_set_sw_interface_tag (vnm, tag, ap->sw_if_index);
+    }
+
+  vec_free (ap->host_if_name);
+  vec_free (ap->host_namespace);
+  vec_free (ap->host_bridge);
+
+  rv = ap->rv;
+  REPLY_MACRO2_END (VL_API_TAP_CREATE_V3_REPLY,
+		    ({ rmp->sw_if_index = ap->sw_if_index; }));
+}
 
 static void
 vl_api_tap_create_v2_t_handler (vl_api_tap_create_v2_t * mp)
@@ -78,6 +155,7 @@ vl_api_tap_create_v2_t_handler (vl_api_tap_create_v2_t * mp)
   ap->tx_ring_sz = ntohs (mp->tx_ring_sz);
   ap->sw_if_index = (u32) ~ 0;
   ap->num_rx_queues = 1;
+  ap->num_tx_queues = 1;
 
   if (mp->num_rx_queues > 1)
     ap->num_rx_queues = mp->num_rx_queues;
@@ -158,7 +236,7 @@ vl_api_tap_create_v2_t_handler (vl_api_tap_create_v2_t * mp)
     }
 
   rmp = vl_msg_api_alloc (sizeof (*rmp));
-  rmp->_vl_msg_id = ntohs (VL_API_TAP_CREATE_V2_REPLY);
+  rmp->_vl_msg_id = ntohs (REPLY_MSG_ID_BASE + VL_API_TAP_CREATE_V2_REPLY);
   rmp->context = mp->context;
   rmp->retval = ntohl (ap->rv);
   rmp->sw_if_index = ntohl (ap->sw_if_index);
@@ -189,7 +267,7 @@ vl_api_tap_delete_v2_t_handler (vl_api_tap_delete_v2_t * mp)
   rv = tap_delete_if (vm, sw_if_index);
 
   rmp = vl_msg_api_alloc (sizeof (*rmp));
-  rmp->_vl_msg_id = ntohs (VL_API_TAP_DELETE_V2_REPLY);
+  rmp->_vl_msg_id = ntohs (REPLY_MSG_ID_BASE + VL_API_TAP_DELETE_V2_REPLY);
   rmp->context = mp->context;
   rmp->retval = ntohl (rv);
 
@@ -207,7 +285,8 @@ tap_send_sw_interface_details (vpe_api_main_t * am,
   vl_api_sw_interface_tap_v2_details_t *mp;
   mp = vl_msg_api_alloc (sizeof (*mp));
   clib_memset (mp, 0, sizeof (*mp));
-  mp->_vl_msg_id = htons (VL_API_SW_INTERFACE_TAP_V2_DETAILS);
+  mp->_vl_msg_id =
+    htons (REPLY_MSG_ID_BASE + VL_API_SW_INTERFACE_TAP_V2_DETAILS);
   mp->id = htonl (tap_if->id);
   mp->sw_if_index = htonl (tap_if->sw_if_index);
   mp->tap_flags = htonl (tap_if->tap_flags);
@@ -273,37 +352,14 @@ vl_api_sw_interface_tap_v2_dump_t_handler (vl_api_sw_interface_tap_v2_dump_t *
   vec_free (tapifs);
 }
 
-#define vl_msg_name_crc_list
-#include <vnet/vnet_all_api_h.h>
-#undef vl_msg_name_crc_list
-
-static void
-tap_setup_message_id_table (api_main_t * am)
-{
-#define _(id,n,crc) vl_msg_api_add_msg_name_crc (am, #n "_" #crc, id);
-  foreach_vl_msg_name_crc_tapv2;
-#undef _
-}
-
+#include <vnet/devices/tap/tapv2.api.c>
 static clib_error_t *
 tapv2_api_hookup (vlib_main_t * vm)
 {
-  api_main_t *am = vlibapi_get_main ();
-
-#define _(N,n)                                                  \
-    vl_msg_api_set_handlers(VL_API_##N, #n,                     \
-                           vl_api_##n##_t_handler,              \
-                           vl_noop_handler,                     \
-                           vl_api_##n##_t_endian,               \
-                           vl_api_##n##_t_print,                \
-                           sizeof(vl_api_##n##_t), 1);
-  foreach_tapv2_api_msg;
-#undef _
-
   /*
    * Set up the (msg_name, crc, message-id) table
    */
-  tap_setup_message_id_table (am);
+  REPLY_MSG_ID_BASE = setup_message_id_table ();
 
   return 0;
 }

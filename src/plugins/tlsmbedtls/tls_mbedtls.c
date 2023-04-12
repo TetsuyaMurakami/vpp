@@ -74,7 +74,8 @@ mbedtls_ctx_alloc (void)
   mbedtls_main_t *tm = &mbedtls_main;
   mbedtls_ctx_t **ctx;
 
-  pool_get (tm->ctx_pool[thread_index], ctx);
+  pool_get_aligned_safe (tm->ctx_pool[thread_index], ctx,
+			 CLIB_CACHE_LINE_BYTES);
   if (!(*ctx))
     *ctx = clib_mem_alloc (sizeof (mbedtls_ctx_t));
 
@@ -554,7 +555,13 @@ mbedtls_app_close (tls_ctx_t * ctx)
 {
   tls_disconnect_transport (ctx);
   session_transport_delete_notify (&ctx->connection);
-  mbedtls_ctx_free (ctx);
+  return 0;
+}
+
+static int
+mbedtls_reinit_ca_chain (void)
+{
+  /* Not supported Yet */
   return 0;
 }
 
@@ -572,6 +579,7 @@ const static tls_engine_vft_t mbedtls_engine = {
   .ctx_stop_listen = mbedtls_stop_listen,
   .ctx_transport_close = mbedtls_transport_close,
   .ctx_app_close = mbedtls_app_close,
+  .ctx_reinit_cachain = mbedtls_reinit_ca_chain,
 };
 
 int

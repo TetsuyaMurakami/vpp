@@ -257,6 +257,8 @@ typedef struct
 {
   u32 sw_if_index;
   ip_address_t addr;
+  u8 *hostname;
+  u8 is_resolved;
 } ikev2_responder_t;
 
 typedef struct
@@ -310,6 +312,8 @@ typedef struct
 
 typedef struct
 {
+  u16 notify_type;
+  u8 kex;
   u8 protocol_id;
   u32 spi;
   u32 ispi;
@@ -518,9 +522,6 @@ typedef struct
   /* logging level */
   ikev2_log_level_t log_level;
 
-  /* custom ipsec-over-udp ports managed by ike */
-  uword *udp_ports;
-
   /* how often a liveness check will be performed */
   u32 liveness_period;
 
@@ -529,6 +530,19 @@ typedef struct
 
   /* dead peer detection */
   u8 dpd_disabled;
+
+  /* pointer to name resolver function in dns plugin */
+  void *dns_resolve_name_ptr;
+
+  /* flag indicating whether lazy init is done or not */
+  int lazy_init_done;
+
+  /* refcount for IKEv2 udp ports and IPsec NATT punt registration */
+  int bind_refcount;
+
+  /* punt handle for IPsec NATT IPSEC_PUNT_IP4_SPI_UDP_0 reason */
+  vlib_punt_hdl_t punt_hdl;
+
 } ikev2_main_t;
 
 extern ikev2_main_t ikev2_main;

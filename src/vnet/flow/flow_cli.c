@@ -223,6 +223,11 @@ show_flow_entry (vlib_main_t * vm, unformat_input_t * input,
       vlib_cli_output (vm, "%-10s: %u", "index", f->index);
       vlib_cli_output (vm, "%-10s: %s", "type", flow_type_strings[f->type]);
       vlib_cli_output (vm, "%-10s: %U", "match", format_flow, f);
+      if (f->type == VNET_FLOW_TYPE_GENERIC)
+	{
+	  vlib_cli_output (vm, "%s: %s", "spec", f->generic.pattern.spec);
+	  vlib_cli_output (vm, "%s: %s", "mask", f->generic.pattern.mask);
+	}
       /* *INDENT-OFF* */
       hash_foreach (hw_if_index, private_data, f->private_data,
         ({
@@ -243,6 +248,11 @@ no_args:
   pool_foreach (f, fm->global_flow_pool)
     {
       vlib_cli_output (vm, "%U\n", format_flow, f);
+      if (f->type == VNET_FLOW_TYPE_GENERIC)
+	{
+	  vlib_cli_output (vm, "%s: %s", "spec", f->generic.pattern.spec);
+	  vlib_cli_output (vm, "%s: %s", "mask", f->generic.pattern.mask);
+	}
     }
   /* *INDENT-ON* */
 
@@ -353,17 +363,19 @@ test_flow (vlib_main_t * vm, unformat_input_t * input,
   u32 hw_if_index = ~0, flow_index = ~0;
   int rv;
   u32 teid = 0, session_id = 0, spi = 0;
-  u16 vni = 0;
+  u32 vni = 0;
+  u32 queue_start = 0, queue_end = 0;
   vnet_flow_type_t type = VNET_FLOW_TYPE_UNKNOWN;
-  ip4_address_and_mask_t ip4s = { };
-  ip4_address_and_mask_t ip4d = { };
-  ip6_address_and_mask_t ip6s = { };
-  ip6_address_and_mask_t ip6d = { };
-  ip_port_and_mask_t sport = { };
-  ip_port_and_mask_t dport = { };
-  ip_prot_and_mask_t protocol = { };
+  ip4_address_and_mask_t ip4s = {}, in_ip4s = {};
+  ip4_address_and_mask_t ip4d = {}, in_ip4d = {};
+  ip6_address_and_mask_t ip6s = {}, in_ip6s = {};
+  ip6_address_and_mask_t ip6d = {}, in_ip6d = {};
+  ip_port_and_mask_t sport = {}, in_sport = {};
+  ip_port_and_mask_t dport = {}, in_dport = {};
+  ip_prot_and_mask_t protocol = {}, in_proto = {};
   u16 eth_type;
-  bool tcp_udp_port_set = false;
+  bool inner_ip4_set = false, inner_ip6_set = false;
+  bool tcp_udp_port_set = false, inner_port_set = false;
   bool gtpc_set = false;
   bool gtpu_set = false;
   bool vni_set = false;
@@ -371,6 +383,8 @@ test_flow (vlib_main_t * vm, unformat_input_t * input,
   bool ipsec_esp_set = false, ipsec_ah_set = false;
   u8 *rss_type[3] = { };
   u8 *type_str = NULL;
+  u8 *spec = NULL;
+  u8 *mask = NULL;
 
   clib_memset (&flow, 0, sizeof (vnet_flow_t));
   flow.index = ~0;
@@ -389,6 +403,10 @@ test_flow (vlib_main_t * vm, unformat_input_t * input,
 	action = FLOW_ENABLE;
       else if (unformat (line_input, "disable"))
 	action = FLOW_DISABLE;
+      else if (unformat (line_input, "spec %s", &spec))
+	;
+      else if (unformat (line_input, "mask %s", &mask))
+	;
       else if (unformat (line_input, "eth-type %U",
 			 unformat_ethernet_type_host_byte_order, &eth_type))
 	flow_class = FLOW_ETHERNET_CLASS;
@@ -398,12 +416,24 @@ test_flow (vlib_main_t * vm, unformat_input_t * input,
       else if (unformat (line_input, "dst-ip %U",
 			 unformat_ip4_address_and_mask, &ip4d))
 	flow_class = FLOW_IPV4_CLASS;
+      else if (unformat (line_input, "in-src-ip %U",
+			 unformat_ip4_address_and_mask, &in_ip4s))
+	inner_ip4_set = true;
+      else if (unformat (line_input, "in-dst-ip %U",
+			 unformat_ip4_address_and_mask, &in_ip4d))
+	inner_ip4_set = true;
       else if (unformat (line_input, "ip6-src-ip %U",
 			 unformat_ip6_address_and_mask, &ip6s))
 	flow_class = FLOW_IPV6_CLASS;
       else if (unformat (line_input, "ip6-dst-ip %U",
 			 unformat_ip6_address_and_mask, &ip6d))
 	flow_class = FLOW_IPV6_CLASS;
+      else if (unformat (line_input, "in-ip6-src-ip %U",
+			 unformat_ip6_address_and_mask, &in_ip6s))
+	inner_ip6_set = true;
+      else if (unformat (line_input, "in-ip6-dst-ip %U",
+			 unformat_ip6_address_and_mask, &in_ip6d))
+	inner_ip6_set = true;
       else if (unformat (line_input, "src-port %U", unformat_ip_port_and_mask,
 			 &sport))
 	tcp_udp_port_set = true;
@@ -414,6 +444,15 @@ test_flow (vlib_main_t * vm, unformat_input_t * input,
 	if (unformat
 	    (line_input, "proto %U", unformat_ip_protocol_and_mask,
 	     &protocol))
+	;
+      else if (unformat (line_input, "in-src-port %U",
+			 unformat_ip_port_and_mask, &in_sport))
+	inner_port_set = true;
+      else if (unformat (line_input, "in-dst-port %U",
+			 unformat_ip_port_and_mask, &in_dport))
+	inner_port_set = true;
+      else if (unformat (line_input, "in-proto %U",
+			 unformat_ip_protocol_and_mask, &in_proto))
 	;
       else if (unformat (line_input, "gtpc teid %u", &teid))
 	gtpc_set = true;
@@ -506,6 +545,21 @@ test_flow (vlib_main_t * vm, unformat_input_t * input,
 #undef _
 	    flow.actions |= VNET_FLOW_ACTION_RSS;
 	}
+      else if (unformat (line_input, "rss queues"))
+	{
+	  if (unformat (line_input, "%d to %d", &queue_start, &queue_end))
+	    ;
+	  else
+	    {
+	      return clib_error_return (0, "unknown input `%U'",
+					format_unformat_error, line_input);
+	    }
+
+	  flow.queue_index = queue_start;
+	  flow.queue_num = queue_end - queue_start + 1;
+
+	  flow.actions |= VNET_FLOW_ACTION_RSS;
+	}
       else if (unformat (line_input, "%U", unformat_vnet_hw_interface, vnm,
 			 &hw_if_index))
 	;
@@ -560,6 +614,22 @@ test_flow (vlib_main_t * vm, unformat_input_t * input,
 	    type = VNET_FLOW_TYPE_IP4_IPSEC_AH;
 	  else if (tcp_udp_port_set)
 	    type = VNET_FLOW_TYPE_IP4_N_TUPLE;
+	  else if (inner_ip4_set)
+	    {
+	      if (inner_port_set)
+		type = VNET_FLOW_TYPE_IP4_IP4_N_TUPLE;
+	      else
+		type = VNET_FLOW_TYPE_IP4_IP4;
+	      protocol.prot = IP_PROTOCOL_IP_IN_IP;
+	    }
+	  else if (inner_ip6_set)
+	    {
+	      if (inner_port_set)
+		type = VNET_FLOW_TYPE_IP4_IP6_N_TUPLE;
+	      else
+		type = VNET_FLOW_TYPE_IP4_IP6;
+	      protocol.prot = IP_PROTOCOL_IPV6;
+	    }
 	  else
 	    type = VNET_FLOW_TYPE_IP4;
 	  break;
@@ -568,11 +638,32 @@ test_flow (vlib_main_t * vm, unformat_input_t * input,
 	    type = VNET_FLOW_TYPE_IP6_N_TUPLE;
 	  else if (vni_set)
 	    type = VNET_FLOW_TYPE_IP6_VXLAN;
+	  else if (inner_ip4_set)
+	    {
+	      if (inner_port_set)
+		type = VNET_FLOW_TYPE_IP6_IP4_N_TUPLE;
+	      else
+		type = VNET_FLOW_TYPE_IP6_IP4;
+	      protocol.prot = IP_PROTOCOL_IP_IN_IP;
+	    }
+	  else if (inner_ip6_set)
+	    {
+	      if (inner_port_set)
+		type = VNET_FLOW_TYPE_IP6_IP6_N_TUPLE;
+	      else
+		type = VNET_FLOW_TYPE_IP6_IP6;
+	      protocol.prot = IP_PROTOCOL_IPV6;
+	    }
 	  else
 	    type = VNET_FLOW_TYPE_IP6;
 	  break;
 
 	default:
+	  if (spec && mask)
+	    {
+	      type = VNET_FLOW_TYPE_GENERIC;
+	      break;
+	    }
 	  return clib_error_return (0,
 				    "Please specify a supported flow type");
 	}
@@ -623,6 +714,30 @@ test_flow (vlib_main_t * vm, unformat_input_t * input,
 	    case IP_PROTOCOL_IPSEC_AH:
 	      flow.ip4_ipsec_esp.spi = spi;
 	      break;
+	    case IP_PROTOCOL_IP_IN_IP:
+	      clib_memcpy (&flow.ip4_ip4.in_src_addr, &in_ip4s,
+			   sizeof (ip4_address_and_mask_t));
+	      clib_memcpy (&flow.ip4_ip4.in_dst_addr, &in_ip4d,
+			   sizeof (ip4_address_and_mask_t));
+	      if (type == VNET_FLOW_TYPE_IP4_IP4_N_TUPLE)
+		{
+		  flow.ip4_ip4.in_protocol.prot = in_proto.prot;
+		  flow.ip4_ip4_n_tuple.in_src_port = in_sport;
+		  flow.ip4_ip4_n_tuple.in_dst_port = in_dport;
+		}
+	      break;
+	    case IP_PROTOCOL_IPV6:
+	      clib_memcpy (&flow.ip4_ip6.in_src_addr, &in_ip6s,
+			   sizeof (ip6_address_and_mask_t));
+	      clib_memcpy (&flow.ip4_ip6.in_dst_addr, &in_ip6d,
+			   sizeof (ip6_address_and_mask_t));
+	      if (type == VNET_FLOW_TYPE_IP4_IP6_N_TUPLE)
+		{
+		  flow.ip4_ip6.in_protocol.prot = in_proto.prot;
+		  flow.ip4_ip6_n_tuple.in_src_port = in_sport;
+		  flow.ip4_ip6_n_tuple.in_dst_port = in_dport;
+		}
+	      break;
 	    default:
 	      break;
 	    }
@@ -656,9 +771,40 @@ test_flow (vlib_main_t * vm, unformat_input_t * input,
 	      if (type == VNET_FLOW_TYPE_IP6_VXLAN)
 		flow.ip6_vxlan.vni = vni;
 	      break;
+	    case IP_PROTOCOL_IP_IN_IP:
+	      clib_memcpy (&flow.ip6_ip4.in_src_addr, &in_ip4s,
+			   sizeof (ip4_address_and_mask_t));
+	      clib_memcpy (&flow.ip6_ip4.in_dst_addr, &in_ip4d,
+			   sizeof (ip4_address_and_mask_t));
+	      if (type == VNET_FLOW_TYPE_IP6_IP4_N_TUPLE)
+		{
+		  flow.ip6_ip4.in_protocol.prot = in_proto.prot;
+		  flow.ip6_ip4_n_tuple.in_src_port = in_sport;
+		  flow.ip6_ip4_n_tuple.in_dst_port = in_dport;
+		}
+	      break;
+	    case IP_PROTOCOL_IPV6:
+	      clib_memcpy (&flow.ip6_ip6.in_src_addr, &in_ip6s,
+			   sizeof (ip6_address_and_mask_t));
+	      clib_memcpy (&flow.ip6_ip6.in_dst_addr, &in_ip6d,
+			   sizeof (ip6_address_and_mask_t));
+	      if (type == VNET_FLOW_TYPE_IP6_IP6_N_TUPLE)
+		{
+		  flow.ip6_ip6.in_protocol.prot = in_proto.prot;
+		  flow.ip6_ip6_n_tuple.in_src_port = in_sport;
+		  flow.ip6_ip6_n_tuple.in_dst_port = in_dport;
+		}
+	      break;
 	    default:
 	      break;
 	    }
+	}
+      if (type == VNET_FLOW_TYPE_GENERIC)
+	{
+	  clib_memcpy (flow.generic.pattern.spec, spec,
+		       sizeof (flow.generic.pattern.spec));
+	  clib_memcpy (flow.generic.pattern.mask, mask,
+		       sizeof (flow.generic.pattern.mask));
 	}
 
       flow.type = type;
@@ -689,18 +835,20 @@ test_flow (vlib_main_t * vm, unformat_input_t * input,
 
 /* *INDENT-OFF* */
 VLIB_CLI_COMMAND (test_flow_command, static) = {
-    .path = "test flow",
-    .short_help = "test flow [add|del|enable|disable] [index <id>] "
-        "[src-ip <ip-addr/mask>] [dst-ip <ip-addr/mask>] "
-        "[ip6-src-ip <ip-addr/mask>] [ip6-dst-ip <ip-addr/mask>] "
-        "[src-port <port/mask>] [dst-port <port/mask>] "
-        "[proto <ip-proto>] "
-        "[gtpc teid <teid>] [gtpu teid <teid>] [vxlan <vni>] "
-        "[session id <session>] [spi <spi>]"
-        "[next-node <node>] [mark <id>] [buffer-advance <len>] "
-        "[redirect-to-queue <queue>] [drop] "
-        "[rss function <name>] [rss types <flow type>]",
-    .function = test_flow,
+  .path = "test flow",
+  .short_help = "test flow [add|del|enable|disable] [index <id>] "
+		"[src-ip <ip-addr/mask>] [dst-ip <ip-addr/mask>] "
+		"[ip6-src-ip <ip-addr/mask>] [ip6-dst-ip <ip-addr/mask>] "
+		"[src-port <port/mask>] [dst-port <port/mask>] "
+		"[proto <ip-proto>] "
+		"[gtpc teid <teid>] [gtpu teid <teid>] [vxlan <vni>] "
+		"[session id <session>] [spi <spi>]"
+		"[spec <spec string>] [mask <mask string>]"
+		"[next-node <node>] [mark <id>] [buffer-advance <len>] "
+		"[redirect-to-queue <queue>] [drop] "
+		"[rss function <name>] [rss types <flow type>]"
+		"[rss queues <queue_start> to <queue_end>]",
+  .function = test_flow,
 };
 /* *INDENT-ON* */
 

@@ -21,6 +21,17 @@
 
 #include <vlibapi/api.h>
 
+typedef struct
+{
+  u16 identifier;
+  u16 sequence;
+} nat_icmp_echo_header_t;
+
+typedef struct
+{
+  u16 src_port, dst_port;
+} nat_tcp_udp_header_t;
+
 /* NAT API Configuration flags */
 #define foreach_nat_config_flag \
   _(0x01, IS_TWICE_NAT)         \
@@ -54,19 +65,6 @@ typedef enum
 #undef _
 } nat_error_t;
 
-#define foreach_nat_protocol   \
-  _ (OTHER, 0, other, "other") \
-  _ (UDP, 1, udp, "udp")       \
-  _ (TCP, 2, tcp, "tcp")       \
-  _ (ICMP, 3, icmp, "icmp")
-
-typedef enum
-{
-#define _(N, i, n, s) NAT_PROTOCOL_##N = i,
-  foreach_nat_protocol
-#undef _
-} nat_protocol_t;
-
 /* default protocol timeouts */
 #define NAT_UDP_TIMEOUT 300
 #define NAT_TCP_TRANSITORY_TIMEOUT 240
@@ -95,7 +93,25 @@ nat_reset_timeouts (nat_timeouts_t * timeouts)
   timeouts->icmp = NAT_ICMP_TIMEOUT;
 }
 
-// TODO: move common formating definitions here
+static_always_inline u32
+nat_calc_bihash_buckets (u32 n_elts)
+{
+  n_elts = n_elts / 2.5;
+  u64 lower_pow2 = 1;
+  while (lower_pow2 * 2 < n_elts)
+    {
+      lower_pow2 = 2 * lower_pow2;
+    }
+  u64 upper_pow2 = 2 * lower_pow2;
+  if ((upper_pow2 - n_elts) < (n_elts - lower_pow2))
+    {
+      if (upper_pow2 <= UINT32_MAX)
+	{
+	  return upper_pow2;
+	}
+    }
+  return lower_pow2;
+}
 
 #endif /* included_nat_lib_h__ */
 /*

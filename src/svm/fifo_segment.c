@@ -105,13 +105,14 @@ fsh_n_active_fifos (fifo_segment_header_t * fsh)
 }
 
 static inline uword
-fsh_virtual_mem (fifo_segment_header_t * fsh)
+fs_virtual_mem (fifo_segment_t *fs)
 {
+  fifo_segment_header_t *fsh = fs->h;
   fifo_segment_slice_t *fss;
   uword total_vm = 0;
   int i;
 
-  for (i = 0; i < fsh->n_slices; i++)
+  for (i = 0; i < fs->n_slices; i++)
     {
       fss = fsh_slice_get (fsh, i);
       total_vm += clib_atomic_load_relax_n (&fss->virtual_mem);
@@ -127,31 +128,22 @@ fsh_virtual_mem_update (fifo_segment_header_t * fsh, u32 slice_index,
   fss->virtual_mem += n_bytes;
 }
 
-static inline void
-fss_chunk_freelist_lock (fifo_segment_slice_t *fss)
-{
-  u32 free = 0;
-  while (!clib_atomic_cmp_and_swap_acq_relax_n (&fss->chunk_lock, &free, 1, 0))
-    {
-      /* atomic load limits number of compare_exchange executions */
-      while (clib_atomic_load_relax_n (&fss->chunk_lock))
-	CLIB_PAUSE ();
-      /* on failure, compare_exchange writes (*p)->lock into free */
-      free = 0;
-    }
-}
-
-static inline void
-fss_chunk_freelist_unlock (fifo_segment_slice_t *fss)
-{
-  /* Make sure all reads/writes are complete before releasing the lock */
-  clib_atomic_release (&fss->chunk_lock);
-}
-
 static inline int
-fss_chunk_fl_index_is_valid (fifo_segment_slice_t * fss, u32 fl_index)
+fss_chunk_fl_index_is_valid (fifo_segment_slice_t *fss, u32 fl_index)
 {
   return (fl_index < FS_CHUNK_VEC_LEN);
+}
+
+#define FS_CL_HEAD_MASK	 0xFFFFFFFFFFFF
+#define FS_CL_HEAD_TMASK 0xFFFF000000000000
+#define FS_CL_HEAD_TINC	 (1ULL << 48)
+
+static svm_fifo_chunk_t *
+fss_chunk_free_list_head (fifo_segment_header_t *fsh,
+			  fifo_segment_slice_t *fss, u32 fl_index)
+{
+  fs_sptr_t headsp = clib_atomic_load_relax_n (&fss->free_chunks[fl_index]);
+  return fs_chunk_ptr (fsh, headsp & FS_CL_HEAD_MASK);
 }
 
 static void
@@ -159,10 +151,20 @@ fss_chunk_free_list_push (fifo_segment_header_t *fsh,
 			  fifo_segment_slice_t *fss, u32 fl_index,
 			  svm_fifo_chunk_t *c)
 {
-  fss_chunk_freelist_lock (fss);
-  c->next = fss->free_chunks[fl_index];
-  fss->free_chunks[fl_index] = fs_chunk_sptr (fsh, c);
-  fss_chunk_freelist_unlock (fss);
+  fs_sptr_t old_head, new_head, csp;
+
+  csp = fs_chunk_sptr (fsh, c);
+  ASSERT (csp <= FS_CL_HEAD_MASK);
+  old_head = clib_atomic_load_acq_n (&fss->free_chunks[fl_index]);
+
+  do
+    {
+      c->next = old_head & FS_CL_HEAD_MASK;
+      new_head = csp + ((old_head + FS_CL_HEAD_TINC) & FS_CL_HEAD_TMASK);
+    }
+  while (!__atomic_compare_exchange (&fss->free_chunks[fl_index], &old_head,
+				     &new_head, 0 /* weak */, __ATOMIC_RELEASE,
+				     __ATOMIC_ACQUIRE));
 }
 
 static void
@@ -170,32 +172,50 @@ fss_chunk_free_list_push_list (fifo_segment_header_t *fsh,
 			       fifo_segment_slice_t *fss, u32 fl_index,
 			       svm_fifo_chunk_t *head, svm_fifo_chunk_t *tail)
 {
-  fss_chunk_freelist_lock (fss);
-  tail->next = fss->free_chunks[fl_index];
-  fss->free_chunks[fl_index] = fs_chunk_sptr (fsh, head);
-  fss_chunk_freelist_unlock (fss);
+  fs_sptr_t old_head, new_head, headsp;
+
+  headsp = fs_chunk_sptr (fsh, head);
+  ASSERT (headsp <= FS_CL_HEAD_MASK);
+  old_head = clib_atomic_load_acq_n (&fss->free_chunks[fl_index]);
+
+  do
+    {
+      tail->next = old_head & FS_CL_HEAD_MASK;
+      new_head = headsp + ((old_head + FS_CL_HEAD_TINC) & FS_CL_HEAD_TMASK);
+    }
+  while (!__atomic_compare_exchange (&fss->free_chunks[fl_index], &old_head,
+				     &new_head, 0 /* weak */, __ATOMIC_RELEASE,
+				     __ATOMIC_ACQUIRE));
 }
 
 static svm_fifo_chunk_t *
 fss_chunk_free_list_pop (fifo_segment_header_t *fsh, fifo_segment_slice_t *fss,
 			 u32 fl_index)
 {
+  fs_sptr_t old_head, new_head;
   svm_fifo_chunk_t *c;
 
   ASSERT (fss_chunk_fl_index_is_valid (fss, fl_index));
 
-  fss_chunk_freelist_lock (fss);
+  old_head = clib_atomic_load_acq_n (&fss->free_chunks[fl_index]);
 
-  if (!fss->free_chunks[fl_index])
+  /* Lock-free stacks are affected by ABA if a side allocates a chunk and
+   * shortly thereafter frees it. To circumvent that, reuse the upper bits
+   * of the head of the list shared pointer, i.e., offset to where the chunk
+   * is, as a tag. The tag is incremented with each push/pop operation and
+   * therefore collisions can only happen if an element is popped and pushed
+   * exactly after a complete wrap of the tag (16 bits). It's unlikely either
+   * of the sides will be descheduled for that long */
+  do
     {
-      fss_chunk_freelist_unlock (fss);
-      return 0;
+      if (!(old_head & FS_CL_HEAD_MASK))
+	return 0;
+      c = fs_chunk_ptr (fsh, old_head & FS_CL_HEAD_MASK);
+      new_head = c->next + ((old_head + FS_CL_HEAD_TINC) & FS_CL_HEAD_TMASK);
     }
-
-  c = fs_chunk_ptr (fsh, fss->free_chunks[fl_index]);
-  fss->free_chunks[fl_index] = c->next;
-
-  fss_chunk_freelist_unlock (fss);
+  while (!__atomic_compare_exchange (&fss->free_chunks[fl_index], &old_head,
+				     &new_head, 0 /* weak */, __ATOMIC_RELEASE,
+				     __ATOMIC_ACQUIRE));
 
   return c;
 }
@@ -275,7 +295,7 @@ fss_fl_chunk_bytes_sub (fifo_segment_slice_t * fss, uword size)
 int
 fifo_segment_init (fifo_segment_t * fs)
 {
-  u32 align = 8, offset = 2 * 4096, slices_sz, i;
+  u32 align = 8, offset = FIFO_SEGMENT_ALLOC_OVERHEAD, slices_sz, i;
   uword max_fifo, seg_start, seg_sz;
   fifo_segment_header_t *fsh;
   ssvm_shared_header_t *sh;
@@ -292,6 +312,7 @@ fifo_segment_init (fifo_segment_t * fs)
 
   seg_start = round_pow2_u64 (pointer_to_uword (seg_data), align);
   fsh = uword_to_pointer (seg_start, void *);
+  clib_mem_unpoison (fsh, seg_sz);
   memset (fsh, 0, sizeof (*fsh) + slices_sz);
 
   fsh->byte_index = sizeof (*fsh) + slices_sz;
@@ -366,6 +387,8 @@ fifo_segment_attach (fifo_segment_main_t * sm, fifo_segment_create_args_t * a)
 
   pool_get_zero (sm->segments, fs);
 
+  fs->fs_index = fs - sm->segments;
+  fs->sm_index = ~0;
   fs->ssvm.ssvm_size = a->segment_size;
   fs->ssvm.my_pid = getpid ();
   fs->ssvm.name = format (0, "%s%c", a->segment_name, 0);
@@ -414,6 +437,14 @@ fifo_segment_index (fifo_segment_main_t * sm, fifo_segment_t * s)
 fifo_segment_t *
 fifo_segment_get_segment (fifo_segment_main_t * sm, u32 segment_index)
 {
+  return pool_elt_at_index (sm->segments, segment_index);
+}
+
+fifo_segment_t *
+fifo_segment_get_segment_if_valid (fifo_segment_main_t *sm, u32 segment_index)
+{
+  if (pool_is_free_index (sm->segments, segment_index))
+    return 0;
   return pool_elt_at_index (sm->segments, segment_index);
 }
 
@@ -669,7 +700,8 @@ free_list:
       if (data_bytes <= fss_fl_chunk_bytes (fss) + n_free)
 	{
 	  u32 min_size = FIFO_SEGMENT_MIN_FIFO_SIZE;
-
+	  if (n_free < min_size)
+	    goto done;
 	  batch = (data_bytes - fss_fl_chunk_bytes (fss)) / min_size;
 	  batch = clib_min (batch + 1, n_free / min_size);
 	  if (fsh_try_alloc_chunk_batch (fsh, fss, 0, batch))
@@ -749,7 +781,7 @@ fsh_slice_collect_chunks (fifo_segment_header_t * fsh,
 
   while (c)
     {
-      CLIB_MEM_UNPOISON (c, sizeof (*c));
+      clib_mem_unpoison (c, sizeof (*c));
       next = fs_chunk_ptr (fsh, c->next);
       fl_index = fs_freelist_for_size (c->length);
       fss_chunk_free_list_push (fsh, fss, fl_index, c);
@@ -782,10 +814,12 @@ fs_fifo_alloc (fifo_segment_t *fs, u32 slice_index)
 }
 
 void
-fs_fifo_free (fifo_segment_t *fs, svm_fifo_t *f)
+fs_fifo_free (fifo_segment_t *fs, svm_fifo_t *f, u32 slice_index)
 {
-  u32 slice_index = f->shr->slice_index;
   fifo_slice_private_t *pfss;
+
+  if (CLIB_DEBUG)
+    clib_memset (f, 0xfc, sizeof (*f));
 
   pfss = &fs->slices[slice_index];
   clib_mem_bulk_free (pfss->fifos, f);
@@ -800,8 +834,10 @@ fifo_segment_cleanup (fifo_segment_t *fs)
   for (slice_index = 0; slice_index < fs->n_slices; slice_index++)
     clib_mem_bulk_destroy (fs->slices[slice_index].fifos);
 
+  vec_free (fs->slices);
+
   vec_foreach (fs->mqs, mq)
-    vec_free (mq->rings);
+    svm_msg_q_cleanup (mq);
 
   vec_free (fs->mqs);
 }
@@ -833,6 +869,9 @@ fifo_segment_alloc_fifo_w_slice (fifo_segment_t * fs, u32 slice_index,
   f->shr = sf;
 
   svm_fifo_init (f, data_bytes);
+
+  f->segment_manager = fs->sm_index;
+  f->segment_index = fs->fs_index;
 
   fss = fsh_slice_get (fsh, slice_index);
   pfss = fs_slice_private_get (fs, slice_index);
@@ -868,6 +907,14 @@ fifo_segment_alloc_fifo_w_offset (fifo_segment_t *fs, uword offset)
   f->segment_index = SVM_FIFO_INVALID_INDEX;
   f->refcnt = 1;
   return f;
+}
+
+svm_fifo_t *
+fifo_segment_duplicate_fifo (fifo_segment_t *fs, svm_fifo_t *f)
+{
+  svm_fifo_t *nf = fs_fifo_alloc (fs, 0);
+  clib_memcpy (nf, f, sizeof (*f));
+  return nf;
 }
 
 /**
@@ -928,9 +975,15 @@ fifo_segment_free_fifo (fifo_segment_t * fs, svm_fifo_t * f)
   f->ooo_enq = f->ooo_deq = 0;
   f->prev = 0;
 
-  fs_fifo_free (fs, f);
+  fs_fifo_free (fs, f, f->shr->slice_index);
 
   fsh_active_fifos_update (fsh, -1);
+}
+
+void
+fifo_segment_free_client_fifo (fifo_segment_t *fs, svm_fifo_t *f)
+{
+  fs_fifo_free (fs, f, 0 /* clients attach fifos in slice 0 */);
 }
 
 void
@@ -938,9 +991,8 @@ fifo_segment_detach_fifo (fifo_segment_t *fs, svm_fifo_t **f)
 {
   fifo_slice_private_t *pfss;
   fifo_segment_slice_t *fss;
-  u32 fl_index, slice_index;
-  svm_fifo_chunk_t **c;
   svm_fifo_t *of = *f;
+  u32 slice_index;
 
   slice_index = of->master_thread_index;
   fss = fsh_slice_get (fs->h, slice_index);
@@ -949,13 +1001,13 @@ fifo_segment_detach_fifo (fifo_segment_t *fs, svm_fifo_t **f)
   if (of->flags & SVM_FIFO_F_LL_TRACKED)
     pfss_fifo_del_active_list (pfss, of);
 
-  /* Update slice counts for chunks that were detached */
-  vec_foreach (c, of->chunks_at_attach)
-    {
-      fl_index = fs_freelist_for_size ((*c)->length);
-      clib_atomic_fetch_sub_rel (&fss->num_chunks[fl_index], 1);
-    }
-  vec_free (of->chunks_at_attach);
+  /* Collect chunks that were provided in return for those detached */
+  fsh_slice_collect_chunks (fs->h, fss, of->chunks_at_attach);
+  of->chunks_at_attach = 0;
+
+  /* Collect hdr that was provided in return for the detached */
+  fss_fifo_free_list_push (fs->h, fss, of->hdr_at_attach);
+  of->hdr_at_attach = 0;
 
   clib_mem_bulk_free (pfss->fifos, *f);
   *f = 0;
@@ -964,11 +1016,10 @@ fifo_segment_detach_fifo (fifo_segment_t *fs, svm_fifo_t **f)
 void
 fifo_segment_attach_fifo (fifo_segment_t *fs, svm_fifo_t **f, u32 slice_index)
 {
+  svm_fifo_chunk_t *c, *nc, *pc = 0;
   fifo_slice_private_t *pfss;
   fifo_segment_slice_t *fss;
-  svm_fifo_chunk_t *c;
   svm_fifo_t *nf, *of;
-  u32 fl_index;
 
   nf = fs_fifo_alloc (fs, slice_index);
   clib_memcpy_fast (nf, *f, sizeof (*nf));
@@ -976,21 +1027,23 @@ fifo_segment_attach_fifo (fifo_segment_t *fs, svm_fifo_t **f, u32 slice_index)
   fss = fsh_slice_get (fs->h, slice_index);
   pfss = fs_slice_private_get (fs, slice_index);
   fss->virtual_mem += svm_fifo_size (nf);
+  nf->next = nf->prev = 0;
   if (nf->flags & SVM_FIFO_F_LL_TRACKED)
     pfss_fifo_add_active_list (pfss, nf);
 
-  /* Update allocated chunks for fifo segment and build list
-   * of chunks to be freed at detach */
+  /* Allocate shared hdr and chunks to be collected at detach in return
+   * for those that are being attached now */
   of = *f;
-  of->chunks_at_attach = 0;
+  of->hdr_at_attach = fsh_try_alloc_fifo_hdr (fs->h, fss);
 
   c = fs_chunk_ptr (fs->h, nf->shr->start_chunk);
-  while (c)
+  of->chunks_at_attach = pc = fsh_try_alloc_chunk (fs->h, fss, c->length);
+
+  while ((c = fs_chunk_ptr (fs->h, c->next)))
     {
-      fl_index = fs_freelist_for_size (c->length);
-      clib_atomic_fetch_add_rel (&fss->num_chunks[fl_index], 1);
-      vec_add1 (of->chunks_at_attach, c);
-      c = fs_chunk_ptr (fs->h, c->next);
+      nc = fsh_try_alloc_chunk (fs->h, fss, c->length);
+      pc->next = fs_chunk_sptr (fs->h, nc);
+      pc = nc;
     }
 
   nf->shr->slice_index = slice_index;
@@ -1001,6 +1054,30 @@ uword
 fifo_segment_fifo_offset (svm_fifo_t *f)
 {
   return (u8 *) f->shr - (u8 *) f->fs_hdr;
+}
+
+svm_fifo_chunk_t *
+fifo_segment_alloc_chunk_w_slice (fifo_segment_t *fs, u32 slice_index,
+				  u32 chunk_size)
+{
+  fifo_segment_header_t *fsh = fs->h;
+  fifo_segment_slice_t *fss;
+
+  fss = fsh_slice_get (fsh, slice_index);
+  return fsh_try_alloc_chunk (fsh, fss, chunk_size);
+}
+
+void
+fifo_segment_collect_chunk (fifo_segment_t *fs, u32 slice_index,
+			    svm_fifo_chunk_t *c)
+{
+  fsh_collect_chunks (fs->h, slice_index, c);
+}
+
+uword
+fifo_segment_chunk_offset (fifo_segment_t *fs, svm_fifo_chunk_t *c)
+{
+  return (u8 *) c - (u8 *) fs->h;
 }
 
 svm_msg_q_t *
@@ -1021,6 +1098,9 @@ fifo_segment_msg_q_alloc (fifo_segment_t *fs, u32 mq_index,
 
   size = svm_msg_q_size_to_alloc (cfg);
   base = fsh_alloc_aligned (fsh, size, 8);
+  if (!base)
+    return 0;
+
   fsh->n_reserved_bytes += size;
 
   smq = svm_msg_q_init (base, cfg);
@@ -1252,7 +1332,7 @@ fs_slice_num_free_chunks (fifo_segment_header_t *fsh,
     {
       for (i = 0; i < FS_CHUNK_VEC_LEN; i++)
 	{
-	  c = fs_chunk_ptr (fsh, fss->free_chunks[i]);
+	  c = fss_chunk_free_list_head (fsh, fss, i);
 	  if (c == 0)
 	    continue;
 
@@ -1271,7 +1351,7 @@ fs_slice_num_free_chunks (fifo_segment_header_t *fsh,
   if (fl_index >= FS_CHUNK_VEC_LEN)
     return 0;
 
-  c = fs_chunk_ptr (fsh, fss->free_chunks[fl_index]);
+  c = fss_chunk_free_list_head (fsh, fss, fl_index);
   if (c == 0)
     return 0;
 
@@ -1305,16 +1385,16 @@ fifo_segment_size (fifo_segment_t * fs)
   return fs->h->max_byte_index - fs->h->n_reserved_bytes;
 }
 
-u8
-fsh_has_reached_mem_limit (fifo_segment_header_t * fsh)
+static u8
+fs_has_reached_mem_limit (fifo_segment_t *fs)
 {
-  return (fsh->flags & FIFO_SEGMENT_F_MEM_LIMIT) ? 1 : 0;
+  return (fs->flags & FIFO_SEGMENT_F_MEM_LIMIT) ? 1 : 0;
 }
 
-void
-fsh_reset_mem_limit (fifo_segment_header_t * fsh)
+static void
+fs_reset_mem_limit (fifo_segment_t *fs)
 {
-  fsh->flags &= ~FIFO_SEGMENT_F_MEM_LIMIT;
+  fs->flags &= ~FIFO_SEGMENT_F_MEM_LIMIT;
 }
 
 void *
@@ -1389,26 +1469,26 @@ fifo_segment_get_mem_usage (fifo_segment_t * fs)
 }
 
 fifo_segment_mem_status_t
-fifo_segment_determine_status (fifo_segment_header_t * fsh, u8 usage)
+fifo_segment_determine_status (fifo_segment_t *fs, u8 usage)
 {
-  if (!fsh->high_watermark || !fsh->low_watermark)
+  if (!fs->high_watermark || !fs->low_watermark)
     return MEMORY_PRESSURE_NO_PRESSURE;
 
   /* once the no-memory is detected, the status continues
    * until memory usage gets below the high watermark
    */
-  if (fsh_has_reached_mem_limit (fsh))
+  if (fs_has_reached_mem_limit (fs))
     {
-      if (usage >= fsh->high_watermark)
+      if (usage >= fs->high_watermark)
 	return MEMORY_PRESSURE_NO_MEMORY;
       else
-	fsh_reset_mem_limit (fsh);
+	fs_reset_mem_limit (fs);
     }
 
-  if (usage >= fsh->high_watermark)
+  if (usage >= fs->high_watermark)
     return MEMORY_PRESSURE_HIGH_PRESSURE;
 
-  else if (usage >= fsh->low_watermark)
+  else if (usage >= fs->low_watermark)
     return MEMORY_PRESSURE_LOW_PRESSURE;
 
   return MEMORY_PRESSURE_NO_PRESSURE;
@@ -1417,10 +1497,9 @@ fifo_segment_determine_status (fifo_segment_header_t * fsh, u8 usage)
 fifo_segment_mem_status_t
 fifo_segment_get_mem_status (fifo_segment_t * fs)
 {
-  fifo_segment_header_t *fsh = fs->h;
   u8 usage = fifo_segment_get_mem_usage (fs);
 
-  return fifo_segment_determine_status (fsh, usage);
+  return fifo_segment_determine_status (fs, usage);
 }
 
 u8 *
@@ -1465,22 +1544,15 @@ format_fifo_segment (u8 * s, va_list * args)
   f64 usage;
   fifo_segment_mem_status_t mem_st;
 
-  indent = format_get_indent (s) + 2;
-
-  if (fs == 0)
-    {
-      s = format (s, "%-20s%10s%15s%15s%15s%15s", "Name", "Type",
-		  "HeapSize (M)", "ActiveFifos", "FreeFifos", "Address");
-      return s;
-    }
+  indent = format_get_indent (s);
 
   fifo_segment_info (fs, &address, &size);
   active_fifos = fifo_segment_num_fifos (fs);
   free_fifos = fifo_segment_num_free_fifos (fs);
 
-  s = format (s, "%-20v%10U%15llu%15u%15u%15llx", ssvm_name (&fs->ssvm),
-	      format_fifo_segment_type, fs, size >> 20ULL, active_fifos,
-	      free_fifos, address);
+  s = format (s, "%U%v type: %U size: %U active fifos: %u", format_white_space,
+	      2, ssvm_name (&fs->ssvm), format_fifo_segment_type, fs,
+	      format_memory_size, size, active_fifos);
 
   if (!verbose)
     return s;
@@ -1489,9 +1561,8 @@ format_fifo_segment (u8 * s, va_list * args)
 
   free_chunks = fifo_segment_num_free_chunks (fs, ~0);
   if (free_chunks)
-    s =
-      format (s, "\n\n%UFree/Allocated chunks by size:\n", format_white_space,
-	      indent + 2);
+    s = format (s, "\n\n%UFree/Allocated chunks by size:\n",
+		format_white_space, indent + 2);
   else
     s = format (s, "\n");
 
@@ -1500,7 +1571,7 @@ format_fifo_segment (u8 * s, va_list * args)
       fss = fsh_slice_get (fsh, slice_index);
       for (i = 0; i < FS_CHUNK_VEC_LEN; i++)
 	{
-	  c = fs_chunk_ptr (fsh, fss->free_chunks[i]);
+	  c = fss_chunk_free_list_head (fsh, fss, i);
 	  if (c == 0 && fss->num_chunks[i] == 0)
 	    continue;
 	  count = 0;
@@ -1527,7 +1598,7 @@ format_fifo_segment (u8 * s, va_list * args)
   in_use = fifo_segment_size (fs) - est_free_seg_bytes - tracked_cached_bytes;
   usage = (100.0 * in_use) / allocated;
   mem_st = fifo_segment_get_mem_status (fs);
-  virt = fsh_virtual_mem (fsh);
+  virt = fs_virtual_mem (fs);
   reserved = fsh->n_reserved_bytes;
 
   s = format (s, "\n%Useg free bytes: %U (%lu) estimated: %U (%lu) reserved:"
@@ -1540,8 +1611,8 @@ format_fifo_segment (u8 * s, va_list * args)
 	      format_memory_size, chunk_bytes, chunk_bytes,
 	      format_memory_size, est_chunk_bytes, est_chunk_bytes,
 	      format_memory_size, tracked_cached_bytes, tracked_cached_bytes);
-  s = format (s, "%Ufifo active: %u hdr free bytes: %U (%u) \n",
-	      format_white_space, indent + 2, fsh->n_active_fifos,
+  s = format (s, "%Ufifo active: %u hdr free: %u bytes: %U (%u) \n",
+	      format_white_space, indent + 2, fsh->n_active_fifos, free_fifos,
 	      format_memory_size, fifo_hdr, fifo_hdr);
   s = format (s, "%Usegment usage: %.2f%% (%U / %U) virt: %U status: %s\n",
 	      format_white_space, indent + 2, usage, format_memory_size,

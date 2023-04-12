@@ -20,12 +20,16 @@ typedef struct udp4_encap_trace_t_
 {
   udp_header_t udp;
   ip4_header_t ip;
+  u32 flow_hash;
+  udp_encap_fixup_flags_t flags;
 } udp4_encap_trace_t;
 
 typedef struct udp6_encap_trace_t_
 {
   udp_header_t udp;
   ip6_header_t ip;
+  u32 flow_hash;
+  udp_encap_fixup_flags_t flags;
 } udp6_encap_trace_t;
 
 extern vlib_combined_counter_main_t udp_encap_counters;
@@ -35,13 +39,16 @@ format_udp4_encap_trace (u8 * s, va_list * args)
 {
   CLIB_UNUSED (vlib_main_t * vm) = va_arg (*args, vlib_main_t *);
   CLIB_UNUSED (vlib_node_t * node) = va_arg (*args, vlib_node_t *);
+  u32 indent = format_get_indent (s);
   udp4_encap_trace_t *t;
 
   t = va_arg (*args, udp4_encap_trace_t *);
 
-  s = format (s, "%U\n  %U",
-	      format_ip4_header, &t->ip, sizeof (t->ip),
-	      format_udp_header, &t->udp, sizeof (t->udp));
+  s = format (s, "flags: %U, flow hash: 0x%08x\n%U%U\n%U%U",
+	      format_udp_encap_fixup_flags, t->flags, t->flow_hash,
+	      format_white_space, indent, format_ip4_header, &t->ip,
+	      sizeof (t->ip), format_white_space, indent, format_udp_header,
+	      &t->udp, sizeof (t->udp));
   return (s);
 }
 
@@ -50,20 +57,23 @@ format_udp6_encap_trace (u8 * s, va_list * args)
 {
   CLIB_UNUSED (vlib_main_t * vm) = va_arg (*args, vlib_main_t *);
   CLIB_UNUSED (vlib_node_t * node) = va_arg (*args, vlib_node_t *);
+  u32 indent = format_get_indent (s);
   udp6_encap_trace_t *t;
 
   t = va_arg (*args, udp6_encap_trace_t *);
 
-  s = format (s, "%U\n  %U",
-	      format_ip6_header, &t->ip, sizeof (t->ip),
-	      format_udp_header, &t->udp, sizeof (t->udp));
+  s = format (s, "flags: %U, flow hash: 0x%08x\n%U%U\n%U%U",
+	      format_udp_encap_fixup_flags, t->flags, t->flow_hash,
+	      format_white_space, indent, format_ip6_header, &t->ip,
+	      sizeof (t->ip), format_white_space, indent, format_udp_header,
+	      &t->udp, sizeof (t->udp));
   return (s);
 }
 
 always_inline uword
-udp_encap_inline (vlib_main_t * vm,
-		  vlib_node_runtime_t * node,
-		  vlib_frame_t * frame, int is_encap_v6)
+udp_encap_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
+		  vlib_frame_t *frame, ip_address_family_t encap_family,
+		  ip_address_family_t payload_family)
 {
   vlib_combined_counter_main_t *cm = &udp_encap_counters;
   u32 *from = vlib_frame_vector_args (frame);
@@ -121,18 +131,22 @@ udp_encap_inline (vlib_main_t * vm,
 	  ue1 = udp_encap_get (uei1);
 
 	  /* Paint */
-	  if (is_encap_v6)
+	  if (encap_family == AF_IP6)
 	    {
 	      const u8 n_bytes =
 		sizeof (udp_header_t) + sizeof (ip6_header_t);
-	      ip_udp_encap_two (vm, b0, b1, (u8 *) & ue0->ue_hdrs,
-				(u8 *) & ue1->ue_hdrs, n_bytes, 0);
+	      ip_udp_encap_two (vm, b0, b1, (u8 *) &ue0->ue_hdrs,
+				(u8 *) &ue1->ue_hdrs, n_bytes, encap_family,
+				payload_family, ue0->ue_flags, ue1->ue_flags);
+
 	      if (PREDICT_FALSE (b0->flags & VLIB_BUFFER_IS_TRACED))
 		{
 		  udp6_encap_trace_t *tr =
 		    vlib_add_trace (vm, node, b0, sizeof (*tr));
 		  tr->udp = ue0->ue_hdrs.ip6.ue_udp;
 		  tr->ip = ue0->ue_hdrs.ip6.ue_ip6;
+		  tr->flags = ue0->ue_flags;
+		  tr->flow_hash = vnet_buffer (b0)->ip.flow_hash;
 		}
 	      if (PREDICT_FALSE (b1->flags & VLIB_BUFFER_IS_TRACED))
 		{
@@ -140,6 +154,8 @@ udp_encap_inline (vlib_main_t * vm,
 		    vlib_add_trace (vm, node, b1, sizeof (*tr));
 		  tr->udp = ue1->ue_hdrs.ip6.ue_udp;
 		  tr->ip = ue1->ue_hdrs.ip6.ue_ip6;
+		  tr->flags = ue1->ue_flags;
+		  tr->flow_hash = vnet_buffer (b1)->ip.flow_hash;
 		}
 	    }
 	  else
@@ -147,9 +163,9 @@ udp_encap_inline (vlib_main_t * vm,
 	      const u8 n_bytes =
 		sizeof (udp_header_t) + sizeof (ip4_header_t);
 
-	      ip_udp_encap_two (vm, b0, b1,
-				(u8 *) & ue0->ue_hdrs,
-				(u8 *) & ue1->ue_hdrs, n_bytes, 1);
+	      ip_udp_encap_two (vm, b0, b1, (u8 *) &ue0->ue_hdrs,
+				(u8 *) &ue1->ue_hdrs, n_bytes, encap_family,
+				payload_family, ue0->ue_flags, ue1->ue_flags);
 
 	      if (PREDICT_FALSE (b0->flags & VLIB_BUFFER_IS_TRACED))
 		{
@@ -157,6 +173,8 @@ udp_encap_inline (vlib_main_t * vm,
 		    vlib_add_trace (vm, node, b0, sizeof (*tr));
 		  tr->udp = ue0->ue_hdrs.ip4.ue_udp;
 		  tr->ip = ue0->ue_hdrs.ip4.ue_ip4;
+		  tr->flags = ue0->ue_flags;
+		  tr->flow_hash = vnet_buffer (b0)->ip.flow_hash;
 		}
 	      if (PREDICT_FALSE (b1->flags & VLIB_BUFFER_IS_TRACED))
 		{
@@ -164,6 +182,8 @@ udp_encap_inline (vlib_main_t * vm,
 		    vlib_add_trace (vm, node, b1, sizeof (*tr));
 		  tr->udp = ue1->ue_hdrs.ip4.ue_udp;
 		  tr->ip = ue1->ue_hdrs.ip4.ue_ip4;
+		  tr->flags = ue1->ue_flags;
+		  tr->flow_hash = vnet_buffer (b1)->ip.flow_hash;
 		}
 	    }
 
@@ -202,12 +222,12 @@ udp_encap_inline (vlib_main_t * vm,
 									b0));
 
 	  /* Paint */
-	  if (is_encap_v6)
+	  if (encap_family == AF_IP6)
 	    {
 	      const u8 n_bytes =
 		sizeof (udp_header_t) + sizeof (ip6_header_t);
-	      ip_udp_encap_one (vm, b0, (u8 *) & ue0->ue_hdrs.ip6, n_bytes,
-				0);
+	      ip_udp_encap_one (vm, b0, (u8 *) &ue0->ue_hdrs.ip6, n_bytes,
+				encap_family, payload_family, ue0->ue_flags);
 
 	      if (PREDICT_FALSE (b0->flags & VLIB_BUFFER_IS_TRACED))
 		{
@@ -215,6 +235,8 @@ udp_encap_inline (vlib_main_t * vm,
 		    vlib_add_trace (vm, node, b0, sizeof (*tr));
 		  tr->udp = ue0->ue_hdrs.ip6.ue_udp;
 		  tr->ip = ue0->ue_hdrs.ip6.ue_ip6;
+		  tr->flags = ue0->ue_flags;
+		  tr->flow_hash = vnet_buffer (b0)->ip.flow_hash;
 		}
 	    }
 	  else
@@ -222,8 +244,8 @@ udp_encap_inline (vlib_main_t * vm,
 	      const u8 n_bytes =
 		sizeof (udp_header_t) + sizeof (ip4_header_t);
 
-	      ip_udp_encap_one (vm, b0, (u8 *) & ue0->ue_hdrs.ip4, n_bytes,
-				1);
+	      ip_udp_encap_one (vm, b0, (u8 *) &ue0->ue_hdrs.ip4, n_bytes,
+				encap_family, payload_family, ue0->ue_flags);
 
 	      if (PREDICT_FALSE (b0->flags & VLIB_BUFFER_IS_TRACED))
 		{
@@ -231,6 +253,8 @@ udp_encap_inline (vlib_main_t * vm,
 		    vlib_add_trace (vm, node, b0, sizeof (*tr));
 		  tr->udp = ue0->ue_hdrs.ip4.ue_udp;
 		  tr->ip = ue0->ue_hdrs.ip4.ue_ip4;
+		  tr->flags = ue0->ue_flags;
+		  tr->flow_hash = vnet_buffer (b0)->ip.flow_hash;
 		}
 	    }
 
@@ -248,37 +272,87 @@ udp_encap_inline (vlib_main_t * vm,
   return frame->n_vectors;
 }
 
-VLIB_NODE_FN (udp4_encap_node) (vlib_main_t * vm,
-				vlib_node_runtime_t * node,
-				vlib_frame_t * frame)
+VLIB_NODE_FN (udp4o4_encap_node)
+(vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
-  return udp_encap_inline (vm, node, frame, 0);
+  return udp_encap_inline (vm, node, frame, AF_IP4, AF_IP4);
 }
 
-VLIB_NODE_FN (udp6_encap_node) (vlib_main_t * vm,
-				vlib_node_runtime_t * node,
-				vlib_frame_t * frame)
+VLIB_NODE_FN (udp6o4_encap_node)
+(vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
-  return udp_encap_inline (vm, node, frame, 1);
+  return udp_encap_inline (vm, node, frame, AF_IP4, AF_IP6);
+}
+
+VLIB_NODE_FN (udp4_encap_node)
+(vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
+{
+  return udp_encap_inline (vm, node, frame, AF_IP4, N_AF);
+}
+
+VLIB_NODE_FN (udp6o6_encap_node)
+(vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
+{
+  return udp_encap_inline (vm, node, frame, AF_IP6, AF_IP6);
+}
+
+VLIB_NODE_FN (udp4o6_encap_node)
+(vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
+{
+  return udp_encap_inline (vm, node, frame, AF_IP6, AF_IP4);
+}
+
+VLIB_NODE_FN (udp6_encap_node)
+(vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
+{
+  return udp_encap_inline (vm, node, frame, AF_IP6, N_AF);
 }
 
 /* *INDENT-OFF* */
+VLIB_REGISTER_NODE (udp4o4_encap_node) = {
+  .name = "udp4o4-encap",
+  .vector_size = sizeof (u32),
+  .format_trace = format_udp4_encap_trace,
+  .n_next_nodes = 0,
+};
+
+VLIB_REGISTER_NODE (udp6o4_encap_node) = {
+  .name = "udp6o4-encap",
+  .vector_size = sizeof (u32),
+  .format_trace = format_udp6_encap_trace,
+  .n_next_nodes = 0,
+  .sibling_of = "udp4o4-encap",
+};
+
 VLIB_REGISTER_NODE (udp4_encap_node) = {
   .name = "udp4-encap",
   .vector_size = sizeof (u32),
-
   .format_trace = format_udp4_encap_trace,
-
   .n_next_nodes = 0,
+  .sibling_of = "udp4o4-encap",
+};
+
+VLIB_REGISTER_NODE (udp6o6_encap_node) = {
+  .name = "udp6o6-encap",
+  .vector_size = sizeof (u32),
+  .format_trace = format_udp6_encap_trace,
+  .n_next_nodes = 0,
+};
+
+VLIB_REGISTER_NODE (udp4o6_encap_node) = {
+  .name = "udp4o6-encap",
+  .vector_size = sizeof (u32),
+  .format_trace = format_udp4_encap_trace,
+  .n_next_nodes = 0,
+  .sibling_of = "udp6o6-encap",
 };
 
 VLIB_REGISTER_NODE (udp6_encap_node) = {
   .name = "udp6-encap",
   .vector_size = sizeof (u32),
-
   .format_trace = format_udp6_encap_trace,
-
   .n_next_nodes = 0,
+  .sibling_of = "udp6o6-encap",
 };
 /* *INDENT-ON* */
 

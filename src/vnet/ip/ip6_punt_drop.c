@@ -146,15 +146,11 @@ VLIB_REGISTER_NODE (ip6_drop_node) =
   },
 };
 
-VLIB_REGISTER_NODE (ip6_not_enabled_node) =
-{
+VLIB_REGISTER_NODE (ip6_not_enabled_node) = {
   .name = "ip6-not-enabled",
   .vector_size = sizeof (u32),
   .format_trace = format_ip6_forward_next_trace,
-  .n_next_nodes = 1,
-  .next_nodes = {
-    [0] = "error-drop",
-  },
+  .sibling_of = "ip6-drop",
 };
 
 VLIB_REGISTER_NODE (ip6_punt_node) =
@@ -305,40 +301,26 @@ VNET_FEATURE_INIT (ip6_punt_redirect_node, static) = {
 
 #ifndef CLIB_MARCH_VARIANT
 
-void
-ip6_punt_redirect_add (u32 rx_sw_if_index,
-		       u32 tx_sw_if_index, ip46_address_t * nh)
-{
-  /* *INDENT-OFF* */
-  fib_route_path_t *rpaths = NULL, rpath = {
-    .frp_proto = DPO_PROTO_IP6,
-    .frp_addr = *nh,
-    .frp_sw_if_index = tx_sw_if_index,
-    .frp_weight = 1,
-    .frp_fib_index = ~0,
-  };
-  /* *INDENT-ON* */
-  vec_add1 (rpaths, rpath);
-
-  ip6_punt_redirect_add_paths (rx_sw_if_index, rpaths);
-
-  vec_free (rpaths);
-}
+static u32 ip6_punt_redirect_enable_counts;
 
 void
-ip6_punt_redirect_add_paths (u32 rx_sw_if_index, fib_route_path_t * rpaths)
+ip6_punt_redirect_add_paths (u32 rx_sw_if_index,
+			     const fib_route_path_t *rpaths)
 {
   ip_punt_redirect_add (FIB_PROTOCOL_IP6,
 			rx_sw_if_index,
 			FIB_FORW_CHAIN_TYPE_UNICAST_IP6, rpaths);
 
-  vnet_feature_enable_disable ("ip6-punt", "ip6-punt-redirect", 0, 1, 0, 0);
+  if (1 == ++ip6_punt_redirect_enable_counts)
+    vnet_feature_enable_disable ("ip6-punt", "ip6-punt-redirect", 0, 1, 0, 0);
 }
 
 void
 ip6_punt_redirect_del (u32 rx_sw_if_index)
 {
-  vnet_feature_enable_disable ("ip6-punt", "ip6-punt-redirect", 0, 0, 0, 0);
+  ASSERT (ip6_punt_redirect_enable_counts);
+  if (0 == --ip6_punt_redirect_enable_counts)
+    vnet_feature_enable_disable ("ip6-punt", "ip6-punt-redirect", 0, 0, 0, 0);
 
   ip_punt_redirect_del (FIB_PROTOCOL_IP6, rx_sw_if_index);
 }
@@ -351,7 +333,7 @@ ip6_punt_redirect_cmd (vlib_main_t * vm,
 {
   unformat_input_t _line_input, *line_input = &_line_input;
   fib_route_path_t *rpaths = NULL, rpath;
-  dpo_proto_t payload_proto;
+  dpo_proto_t payload_proto = DPO_PROTO_IP6;
   clib_error_t *error = 0;
   u32 rx_sw_if_index = ~0;
   vnet_main_t *vnm;
@@ -370,7 +352,7 @@ ip6_punt_redirect_cmd (vlib_main_t * vm,
       else if (unformat (line_input, "add"))
 	is_add = 1;
       else if (unformat (line_input, "rx all"))
-	rx_sw_if_index = ~0;
+	rx_sw_if_index = 0;
       else if (unformat (line_input, "rx %U",
 			 unformat_vnet_sw_interface, vnm, &rx_sw_if_index))
 	;
@@ -401,6 +383,7 @@ ip6_punt_redirect_cmd (vlib_main_t * vm,
     }
 
 done:
+  vec_free (rpaths);
   unformat_free (line_input);
   return (error);
 }

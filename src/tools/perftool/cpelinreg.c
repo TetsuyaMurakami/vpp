@@ -27,7 +27,6 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <sys/fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <ctype.h>
@@ -617,12 +616,12 @@ int event_pass (cpel_section_header_t *sh, int verbose, FILE *ofp)
             } else {
                 dup_events++;
             }
-            _vec_len(tp->start_datum) = sp;
-            _vec_len(tp->start_time) = sp;
-            _vec_len(tp->dup_event) = sp;
-        }
+	    vec_set_len (tp->start_datum, sp);
+	    vec_set_len (tp->start_time, sp);
+	    vec_set_len (tp->dup_event, sp);
+	}
 
-        ep++;
+	ep++;
     }
     last_end_time = now;
 

@@ -18,6 +18,7 @@
 #include <vnet/ip/ip.h>
 #include <vnet/crypto/crypto.h>
 #include <vnet/ipsec/ipsec.h>
+#include <vnet/ipsec/ipsec.api_enum.h>
 
 typedef struct
 {
@@ -85,9 +86,6 @@ typedef struct esp_aead_t_
 } __clib_packed esp_aead_t;
 
 #define ESP_SEQ_MAX		(4294967295UL)
-#define ESP_MAX_BLOCK_SIZE	(16)
-#define ESP_MAX_IV_SIZE		(16)
-#define ESP_MAX_ICV_SIZE	(32)
 
 u8 *format_esp_header (u8 * s, va_list * args);
 
@@ -118,7 +116,8 @@ esp_seq_advance (ipsec_sa_t * sa)
 }
 
 always_inline u16
-esp_aad_fill (u8 * data, const esp_header_t * esp, const ipsec_sa_t * sa)
+esp_aad_fill (u8 *data, const esp_header_t *esp, const ipsec_sa_t *sa,
+	      u32 seq_hi)
 {
   esp_aead_t *aad;
 
@@ -128,7 +127,7 @@ esp_aad_fill (u8 * data, const esp_header_t * esp, const ipsec_sa_t * sa)
   if (ipsec_sa_is_set_USE_ESN (sa))
     {
       /* SPI, seq-hi, seq-low */
-      aad->data[1] = (u32) clib_host_to_net_u32 (sa->seq_hi);
+      aad->data[1] = (u32) clib_host_to_net_u32 (seq_hi);
       aad->data[2] = esp->seq;
       return 12;
     }
@@ -140,44 +139,101 @@ esp_aad_fill (u8 * data, const esp_header_t * esp, const ipsec_sa_t * sa)
     }
 }
 
-/* Special case to drop or hand off packets for sync/async modes.
- *
- * Different than sync mode, async mode only enqueue drop or hand-off packets
- * to next nodes.
- */
-always_inline void
-esp_set_next_index (int is_async, u32 * from, u16 * nexts, u32 bi,
-		    u16 * drop_index, u16 drop_next, u16 * next)
+always_inline u32
+esp_encrypt_err_to_sa_err (u32 err)
 {
-  if (is_async)
+  switch (err)
     {
-      from[*drop_index] = bi;
-      nexts[*drop_index] = drop_next;
-      *drop_index += 1;
+    case ESP_ENCRYPT_ERROR_HANDOFF:
+      return IPSEC_SA_ERROR_HANDOFF;
+    case ESP_ENCRYPT_ERROR_SEQ_CYCLED:
+      return IPSEC_SA_ERROR_SEQ_CYCLED;
+    case ESP_ENCRYPT_ERROR_CRYPTO_ENGINE_ERROR:
+      return IPSEC_SA_ERROR_CRYPTO_ENGINE_ERROR;
+    case ESP_ENCRYPT_ERROR_CRYPTO_QUEUE_FULL:
+      return IPSEC_SA_ERROR_CRYPTO_QUEUE_FULL;
+    case ESP_ENCRYPT_ERROR_NO_BUFFERS:
+      return IPSEC_SA_ERROR_NO_BUFFERS;
+    case ESP_ENCRYPT_ERROR_NO_ENCRYPTION:
+      return IPSEC_SA_ERROR_NO_ENCRYPTION;
     }
-  else
-    next[0] = drop_next;
+  return ~0;
+}
+
+always_inline u32
+esp_decrypt_err_to_sa_err (u32 err)
+{
+  switch (err)
+    {
+    case ESP_DECRYPT_ERROR_HANDOFF:
+      return IPSEC_SA_ERROR_HANDOFF;
+    case ESP_DECRYPT_ERROR_DECRYPTION_FAILED:
+      return IPSEC_SA_ERROR_DECRYPTION_FAILED;
+    case ESP_DECRYPT_ERROR_INTEG_ERROR:
+      return IPSEC_SA_ERROR_INTEG_ERROR;
+    case ESP_DECRYPT_ERROR_CRYPTO_ENGINE_ERROR:
+      return IPSEC_SA_ERROR_CRYPTO_ENGINE_ERROR;
+    case ESP_DECRYPT_ERROR_REPLAY:
+      return IPSEC_SA_ERROR_REPLAY;
+    case ESP_DECRYPT_ERROR_RUNT:
+      return IPSEC_SA_ERROR_RUNT;
+    case ESP_DECRYPT_ERROR_NO_BUFFERS:
+      return IPSEC_SA_ERROR_NO_BUFFERS;
+    case ESP_DECRYPT_ERROR_OVERSIZED_HEADER:
+      return IPSEC_SA_ERROR_OVERSIZED_HEADER;
+    case ESP_DECRYPT_ERROR_NO_TAIL_SPACE:
+      return IPSEC_SA_ERROR_NO_TAIL_SPACE;
+    case ESP_DECRYPT_ERROR_TUN_NO_PROTO:
+      return IPSEC_SA_ERROR_TUN_NO_PROTO;
+    case ESP_DECRYPT_ERROR_UNSUP_PAYLOAD:
+      return IPSEC_SA_ERROR_UNSUP_PAYLOAD;
+    }
+  return ~0;
+}
+
+always_inline void
+esp_encrypt_set_next_index (vlib_buffer_t *b, vlib_node_runtime_t *node,
+			    u32 thread_index, u32 err, u16 index, u16 *nexts,
+			    u16 drop_next, u32 sa_index)
+{
+  ipsec_set_next_index (b, node, thread_index, err,
+			esp_encrypt_err_to_sa_err (err), index, nexts,
+			drop_next, sa_index);
+}
+
+always_inline void
+esp_decrypt_set_next_index (vlib_buffer_t *b, vlib_node_runtime_t *node,
+			    u32 thread_index, u32 err, u16 index, u16 *nexts,
+			    u16 drop_next, u32 sa_index)
+{
+  ipsec_set_next_index (b, node, thread_index, err,
+			esp_decrypt_err_to_sa_err (err), index, nexts,
+			drop_next, sa_index);
 }
 
 /* when submitting a frame is failed, drop all buffers in the frame */
-always_inline void
-esp_async_recycle_failed_submit (vnet_crypto_async_frame_t * f,
-				 vlib_buffer_t ** b, u32 * from, u16 * nexts,
-				 u16 * n_dropped, u16 drop_next_index,
-				 vlib_error_t err)
+always_inline u32
+esp_async_recycle_failed_submit (vlib_main_t *vm, vnet_crypto_async_frame_t *f,
+				 vlib_node_runtime_t *node, u32 err,
+				 u32 ipsec_sa_err, u16 index, u32 *from,
+				 u16 *nexts, u16 drop_next_index)
 {
+  vlib_buffer_t *b;
   u32 n_drop = f->n_elts;
   u32 *bi = f->buffer_indices;
-  b -= n_drop;
+
   while (n_drop--)
     {
-      b[0]->error = err;
-      esp_set_next_index (1, from, nexts, bi[0], n_dropped, drop_next_index,
-			  NULL);
+      from[index] = bi[0];
+      b = vlib_get_buffer (vm, bi[0]);
+      ipsec_set_next_index (b, node, vm->thread_index, err, ipsec_sa_err,
+			    index, nexts, drop_next_index,
+			    vnet_buffer (b)->ipsec.sad_index);
       bi++;
-      b++;
+      index++;
     }
-  vnet_crypto_async_reset_frame (f);
+
+  return (f->n_elts);
 }
 
 /**
@@ -204,7 +260,7 @@ typedef struct
   i16 current_length;
   u16 hdr_sz;
   u16 is_chain;
-  u32 protect_index;
+  u32 seq_hi;
 } esp_decrypt_packet_data_t;
 
 STATIC_ASSERT_SIZEOF (esp_decrypt_packet_data_t, 3 * sizeof (u64));

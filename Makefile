@@ -1,4 +1,4 @@
-# Copyright (c) 2016 Cisco and/or its affiliates.
+# Copyright (c) 2021 Cisco and/or its affiliates.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at:
@@ -56,66 +56,73 @@ endif
 
 ifeq ($(filter ubuntu debian,$(OS_ID)),$(OS_ID))
 PKG=deb
-else ifeq ($(filter rhel centos fedora,$(OS_ID)),$(OS_ID))
+else ifeq ($(filter rhel centos fedora opensuse-leap rocky,$(OS_ID)),$(OS_ID))
 PKG=rpm
 endif
 
 # +libganglia1-dev if building the gmond plugin
 
 DEB_DEPENDS  = curl build-essential autoconf automake ccache
-DEB_DEPENDS += debhelper dkms git libtool libapr1-dev dh-systemd dh-python
+DEB_DEPENDS += debhelper dkms git libtool libapr1-dev dh-python
 DEB_DEPENDS += libconfuse-dev git-review exuberant-ctags cscope pkg-config
 DEB_DEPENDS += lcov chrpath autoconf libnuma-dev
 DEB_DEPENDS += python3-all python3-setuptools check
-DEB_DEPENDS += libffi-dev python3-ply libmbedtls-dev
+DEB_DEPENDS += libffi-dev python3-ply
 DEB_DEPENDS += cmake ninja-build uuid-dev python3-jsonschema python3-yaml
 DEB_DEPENDS += python3-venv  # ensurepip
-DEB_DEPENDS += python3-dev   # needed for python3 -m pip install psutil
-DEB_DEPENDS += libnl-3-dev libnl-route-3-dev
-# python3.6 on 16.04 requires python36-dev
+DEB_DEPENDS += python3-dev python3-pip
+DEB_DEPENDS += libnl-3-dev libnl-route-3-dev libmnl-dev
+# DEB_DEPENDS += enchant  # for docs
+DEB_DEPENDS += python3-virtualenv
+DEB_DEPENDS += libssl-dev
+DEB_DEPENDS += libelf-dev libpcap-dev # for libxdp (af_xdp)
+DEB_DEPENDS += iperf3 # for 'make test TEST=vcl'
+DEB_DEPENDS += nasm
+DEB_DEPENDS += iperf ethtool  # for 'make test TEST=vm_vpp_interfaces'
 
 LIBFFI=libffi6 # works on all but 20.04 and debian-testing
 
-ifeq ($(OS_VERSION_ID),18.04)
-	DEB_DEPENDS += python-dev python-all python-pip python-virtualenv
+ifeq ($(OS_VERSION_ID),22.04)
+	DEB_DEPENDS += python3-virtualenv
 	DEB_DEPENDS += libssl-dev
-	DEB_DEPENDS += clang-9 clang-format-10
+	DEB_DEPENDS += clang clang-format-11
+	LIBFFI=libffi7
+	DEB_DEPENDS += enchant-2  # for docs
 else ifeq ($(OS_VERSION_ID),20.04)
 	DEB_DEPENDS += python3-virtualenv
 	DEB_DEPENDS += libssl-dev
-	DEB_DEPENDS += libelf-dev # for libbpf (af_xdp)
-	DEB_DEPENDS += clang-format-10
+	DEB_DEPENDS += clang clang-format-11
 	LIBFFI=libffi7
+	DEB_DEPENDS += enchant-2  # for docs
 else ifeq ($(OS_VERSION_ID),20.10)
-        DEB_DEPENDS += python3-virtualenv
-        DEB_DEPENDS += libssl-dev
-        DEB_DEPENDS += libelf-dev # for libbpf (af_xdp)
-        DEB_DEPENDS += clang-format-10
-        LIBFFI=libffi8ubuntu1
+	DEB_DEPENDS += clang clang-format-11
+	LIBFFI=libffi8ubuntu1
 else ifeq ($(OS_ID)-$(OS_VERSION_ID),debian-10)
-	DEB_DEPENDS += python3-virtualenv virtualenv
-	DEB_DEPENDS += libssl-dev
-	DEB_DEPENDS += libelf-dev # for libbpf (af_xdp)
-else
-	DEB_DEPENDS += libssl-dev
-	DEB_DEPENDS += libelf-dev # for libbpf (af_xdp)
+	DEB_DEPENDS += virtualenv
+else ifeq ($(OS_ID)-$(OS_VERSION_ID),debian-11)
+	DEB_DEPENDS += virtualenv
+	DEB_DEPENDS += clang clang-format-11
 	LIBFFI=libffi7
+else
+	DEB_DEPENDS += clang-11 clang-format-11
+	LIBFFI=libffi7
+	DEB_DEPENDS += enchant-2  # for docs
 endif
 
 DEB_DEPENDS += $(LIBFFI)
 
-RPM_DEPENDS  = redhat-lsb glibc-static
+RPM_DEPENDS  = glibc-static
 RPM_DEPENDS += apr-devel
 RPM_DEPENDS += numactl-devel
 RPM_DEPENDS += check check-devel
 RPM_DEPENDS += selinux-policy selinux-policy-devel
 RPM_DEPENDS += ninja-build
 RPM_DEPENDS += libuuid-devel
-RPM_DEPENDS += mbedtls-devel
 RPM_DEPENDS += ccache
 RPM_DEPENDS += xmlto
-RPM_DEPENDS += elfutils-libelf-devel
-RPM_DEPENDS += libnl3-devel
+RPM_DEPENDS += elfutils-libelf-devel libpcap-devel
+RPM_DEPENDS += libnl3-devel libmnl-devel
+RPM_DEPENDS += nasm
 
 ifeq ($(OS_ID),fedora)
 	RPM_DEPENDS += dnf-utils
@@ -126,12 +133,23 @@ ifeq ($(OS_ID),fedora)
 	RPM_DEPENDS += python3-virtualenv python3-jsonschema
 	RPM_DEPENDS += cmake
 	RPM_DEPENDS_GROUPS = 'C Development Tools and Libraries'
+else ifeq ($(OS_ID),rocky)
+	RPM_DEPENDS += yum-utils
+	RPM_DEPENDS += subunit subunit-devel
+	RPM_DEPENDS += openssl-devel
+	RPM_DEPENDS += python3-devel  # needed for python3 -m pip install psutil
+	RPM_DEPENDS += python3-ply  # for vppapigen
+	RPM_DEPENDS += python3-virtualenv python3-jsonschema
+	RPM_DEPENDS += infiniband-diags llvm clang cmake
+	RPM_DEPENDS_GROUPS = 'Development Tools'
 else ifeq ($(OS_ID)-$(OS_VERSION_ID),centos-8)
 	RPM_DEPENDS += yum-utils
 	RPM_DEPENDS += compat-openssl10 openssl-devel
 	RPM_DEPENDS += python2-devel python36-devel python3-ply
 	RPM_DEPENDS += python3-virtualenv python3-jsonschema
-	RPM_DEPENDS += cmake
+	RPM_DEPENDS += libarchive cmake
+	RPM_DEPENDS += infiniband-diags libibumad
+	RPM_DEPENDS += libpcap-devel llvm-toolset
 	RPM_DEPENDS_GROUPS = 'Development Tools'
 else
 	RPM_DEPENDS += yum-utils
@@ -153,13 +171,32 @@ RPM_DEPENDS_DEBUG += krb5-debuginfo openssl-debuginfo
 RPM_DEPENDS_DEBUG += zlib-debuginfo nss-softokn-debuginfo
 RPM_DEPENDS_DEBUG += yum-plugin-auto-update-debug-info
 
+RPM_SUSE_BUILDTOOLS_DEPS = autoconf automake ccache check-devel chrpath
+RPM_SUSE_BUILDTOOLS_DEPS += clang cmake indent libtool make ninja python3-ply
+
+RPM_SUSE_DEVEL_DEPS = glibc-devel-static libnuma-devel libelf-devel
+RPM_SUSE_DEVEL_DEPS += libopenssl-devel libuuid-devel lsb-release
+RPM_SUSE_DEVEL_DEPS += curl libstdc++-devel bison gcc-c++ zlib-devel
+
+RPM_SUSE_PYTHON_DEPS = python3-devel python3-pip python3-rpm-macros
+
+RPM_SUSE_PLATFORM_DEPS = shadow rpm-build
+
+ifeq ($(OS_ID),opensuse-leap)
+	RPM_SUSE_DEVEL_DEPS += xmlto openssl-devel asciidoc git nasm
+	RPM_SUSE_PYTHON_DEPS += python3 python3-ply python3-virtualenv
+	RPM_SUSE_PLATFORM_DEPS += distribution-release
+endif
+
+RPM_SUSE_DEPENDS += $(RPM_SUSE_BUILDTOOLS_DEPS) $(RPM_SUSE_DEVEL_DEPS) $(RPM_SUSE_PYTHON_DEPS) $(RPM_SUSE_PLATFORM_DEPS)
+
 ifneq ($(wildcard $(STARTUP_DIR)/startup.conf),)
         STARTUP_CONF ?= $(STARTUP_DIR)/startup.conf
 endif
 
 ifeq ($(findstring y,$(UNATTENDED)),y)
 CONFIRM=-y
-FORCE=--force-yes
+FORCE=--allow-downgrades --allow-remove-essential --allow-change-held-packages
 endif
 
 TARGETS = vpp
@@ -205,19 +242,22 @@ help:
 	@echo " compdb               - (re)generate compile_commands.json"
 	@echo " checkstyle           - check coding style"
 	@echo " checkstyle-commit    - check commit message format"
-	@echo " checkstyle-test      - check test framework coding style"
+	@echo " checkstyle-python    - check python coding style using 'black' formatter"
 	@echo " checkstyle-api       - check api for incompatible changes"
 	@echo " fixstyle             - fix coding style"
-	@echo " doxygen              - (re)generate documentation"
-	@echo " bootstrap-doxygen    - setup Doxygen dependencies"
-	@echo " wipe-doxygen         - wipe all generated documentation"
+	@echo " fixstyle-python      - fix python coding style using 'black' formatter"
+	@echo " doxygen              - DEPRECATED - use 'make docs'"
+	@echo " bootstrap-doxygen    - DEPRECATED"
+	@echo " wipe-doxygen         - DEPRECATED"
 	@echo " checkfeaturelist     - check FEATURE.yaml according to schema"
 	@echo " featurelist          - dump feature list in markdown"
 	@echo " json-api-files       - (re)-generate json api files"
 	@echo " json-api-files-debug - (re)-generate json api files for debug target"
+	@echo " go-api-files         - (re)-generate golang api files"
 	@echo " docs                 - Build the Sphinx documentation"
 	@echo " docs-venv            - Build the virtual environment for the Sphinx docs"
 	@echo " docs-clean           - Remove the generated files from the Sphinx docs"
+	@echo " docs-rebuild         - Rebuild all of the Sphinx documentation"
 	@echo ""
 	@echo "Make Arguments:"
 	@echo " V=[0|1]                  - set build verbosity level"
@@ -228,7 +268,6 @@ help:
 	@echo "                            startup.conf file is present"
 	@echo " GDB=<path>               - gdb binary to use for debugging"
 	@echo " PLATFORM=<name>          - target platform. default is vpp"
-	@echo " TEST=<filter>            - apply filter to test set, see test-help"
 	@echo " DPDK_CONFIG=<conf>       - add specified dpdk config commands to"
 	@echo "                            autogenerated startup.conf"
 	@echo "                            (e.g. \"no-pci\" )"
@@ -287,13 +326,19 @@ ifeq ($(OS_ID),rhel)
 	@sudo -E yum-config-manager --enable rhel-server-rhscl-7-rpms
 	@sudo -E yum groupinstall $(CONFIRM) $(RPM_DEPENDS_GROUPS)
 	@sudo -E yum install $(CONFIRM) $(RPM_DEPENDS)
-	@sudo -E debuginfo-install $(CONFIRM) glibc openssl-libs mbedtls-devel zlib
+	@sudo -E debuginfo-install $(CONFIRM) glibc openssl-libs zlib
+else ifeq ($(OS_ID),rocky)
+	@sudo -E dnf install $(CONFIRM) dnf-plugins-core epel-release
+	@sudo -E dnf config-manager --set-enabled \
+          $(shell dnf repolist all 2>/dev/null|grep -i crb|cut -d' ' -f1|grep -v source)
+	@sudo -E dnf groupinstall $(CONFIRM) $(RPM_DEPENDS_GROUPS)
+	@sudo -E dnf install $(CONFIRM) $(RPM_DEPENDS)
 else ifeq ($(OS_ID)-$(OS_VERSION_ID),centos-8)
 	@sudo -E dnf install $(CONFIRM) dnf-plugins-core epel-release
 	@sudo -E dnf config-manager --set-enabled \
-          $(shell dnf repolist all 2>/dev/null|grep -i powertools|cut -d' ' -f1)
+          $(shell dnf repolist all 2>/dev/null|grep -i powertools|cut -d' ' -f1|grep -v source)
 	@sudo -E dnf groupinstall $(CONFIRM) $(RPM_DEPENDS_GROUPS)
-	@sudo -E dnf install $(CONFIRM) $(RPM_DEPENDS)
+	@sudo -E dnf install --skip-broken $(CONFIRM) $(RPM_DEPENDS)
 else ifeq ($(OS_ID),centos)
 	@sudo -E yum install $(CONFIRM) centos-release-scl-rh epel-release
 	@sudo -E yum groupinstall $(CONFIRM) $(RPM_DEPENDS_GROUPS)
@@ -302,10 +347,13 @@ else ifeq ($(OS_ID),centos)
 else ifeq ($(OS_ID),fedora)
 	@sudo -E dnf groupinstall $(CONFIRM) $(RPM_DEPENDS_GROUPS)
 	@sudo -E dnf install $(CONFIRM) $(RPM_DEPENDS)
-	@sudo -E debuginfo-install $(CONFIRM) glibc openssl-libs mbedtls-devel zlib
+	@sudo -E debuginfo-install $(CONFIRM) glibc openssl-libs zlib
 endif
+else ifeq ($(filter opensuse-leap-15.3 opensuse-leap-15.4 ,$(OS_ID)-$(OS_VERSION_ID)),$(OS_ID)-$(OS_VERSION_ID))
+	@sudo -E zypper refresh
+	@sudo -E zypper install  -y $(RPM_SUSE_DEPENDS)
 else
-	$(error "This option currently works only on Ubuntu, Debian, RHEL, or CentOS systems")
+	$(error "This option currently works only on Ubuntu, Debian, RHEL, CentOS or openSUSE-leap systems")
 endif
 	git config commit.template .git_commit_template.txt
 
@@ -334,7 +382,7 @@ dist:
 	      --format=tar \
 	      -o $(DIST_FILE) \
 	    HEAD ; \
-	    git describe > $(BR)/.version ; \
+	    git describe --long > $(BR)/.version ; \
 	else \
 	    (cd .. ; tar -cf $(DIST_FILE) $(DIST_SUBDIR) --exclude=*.tar) ; \
 	    src/scripts/version > $(BR)/.version ; \
@@ -359,7 +407,7 @@ wipedist:
 .PHONY: wipe
 wipe: wipedist test-wipe $(BR)/.deps.ok
 	$(call make,$(PLATFORM)_debug,$(addsuffix -wipe,$(TARGETS)))
-	@find . -type f -name "*.api.json" ! -path "./test/*" -exec rm {} \;
+	@find . -type f -name "*.api.json" ! -path "./src/*" -exec rm {} \;
 
 .PHONY: rebuild
 rebuild: wipe build
@@ -375,50 +423,45 @@ wipe-release: test-wipe $(BR)/.deps.ok
 .PHONY: rebuild-release
 rebuild-release: wipe-release build-release
 
-libexpand = $(subst $(subst ,, ),:,$(foreach lib,$(1),$(BR)/install-$(2)-native/vpp/$(lib)/$(3)))
-
 export TEST_DIR ?= $(WS_ROOT)/test
-export RND_SEED ?= $(shell python3 -c 'import time; print(time.time())')
 
 define test
-	$(if $(filter-out $(3),retest),make -C $(BR) PLATFORM=$(1) TAG=$(2) vpp-install,)
+	$(if $(filter-out $(2),retest),make -C $(BR) PLATFORM=vpp TAG=$(1) vpp-install,)
 	$(eval libs:=lib lib64)
 	make -C test \
-	  VPP_BUILD_DIR=$(BR)/build-$(2)-native \
-	  VPP_BIN=$(BR)/install-$(2)-native/vpp/bin/vpp \
-	  VPP_PLUGIN_PATH=$(call libexpand,$(libs),$(2),vpp_plugins) \
-	  VPP_TEST_PLUGIN_PATH=$(call libexpand,$(libs),$(2),vpp_api_test_plugins) \
-	  VPP_INSTALL_PATH=$(BR)/install-$(2)-native/ \
-	  LD_LIBRARY_PATH=$(call libexpand,$(libs),$(2),) \
+	  VPP_BUILD_DIR=$(BR)/build-$(1)-native/vpp \
+	  VPP_BIN=$(BR)/install-$(1)-native/vpp/bin/vpp \
+	  VPP_INSTALL_PATH=$(BR)/install-$(1)-native/ \
 	  EXTENDED_TESTS=$(EXTENDED_TESTS) \
 	  PYTHON=$(PYTHON) \
 	  OS_ID=$(OS_ID) \
 	  RND_SEED=$(RND_SEED) \
 	  CACHE_OUTPUT=$(CACHE_OUTPUT) \
-	  $(3)
+	  TAG=$(1) \
+	  $(2)
 endef
 
 .PHONY: test
 test:
-	$(call test,vpp,vpp,test)
+	$(call test,vpp,test)
 
 .PHONY: test-debug
 test-debug:
-	$(call test,vpp,vpp_debug,test)
+	$(call test,vpp_debug,test)
 
 .PHONY: test-gcov
 test-gcov:
-	$(call test,vpp,vpp_gcov,test)
+	$(call test,vpp_gcov,test)
 
 .PHONY: test-all
 test-all:
-	$(eval EXTENDED_TESTS=yes)
-	$(call test,vpp,vpp,test)
+	$(eval EXTENDED_TESTS=1)
+	$(call test,vpp,test)
 
 .PHONY: test-all-debug
 test-all-debug:
-	$(eval EXTENDED_TESTS=yes)
-	$(call test,vpp,vpp_debug,test)
+	$(eval EXTENDED_TESTS=1)
+	$(call test,vpp_debug,test)
 
 .PHONY: papi-wipe
 papi-wipe: test-wipe-papi
@@ -438,15 +481,15 @@ test-wipe:
 
 .PHONY: test-shell
 test-shell:
-	$(call test,vpp,vpp,shell)
+	$(call test,vpp,shell)
 
 .PHONY: test-shell-debug
 test-shell-debug:
-	$(call test,vpp,vpp_debug,shell)
+	$(call test,vpp_debug,shell)
 
 .PHONY: test-shell-gcov
 test-shell-gcov:
-	$(call test,vpp,vpp_gcov,shell)
+	$(call test,vpp_gcov,shell)
 
 .PHONY: test-dep
 test-dep:
@@ -454,16 +497,18 @@ test-dep:
 
 .PHONY: test-doc
 test-doc:
-	@make -C test doc
+	@echo "make test-doc is DEPRECATED: use 'make docs'"
+	sleep 300
 
 .PHONY: test-wipe-doc
 test-wipe-doc:
-	@make -C test wipe-doc
+	@echo "make test-wipe-doc is DEPRECATED"
+	sleep 300
 
 .PHONY: test-cov
 test-cov:
-	$(eval EXTENDED_TESTS=yes)
-	$(call test,vpp,vpp_gcov,cov)
+	$(eval EXTENDED_TESTS=1)
+	$(call test,vpp_gcov,cov)
 
 .PHONY: test-wipe-cov
 test-wipe-cov:
@@ -473,9 +518,17 @@ test-wipe-cov:
 test-wipe-all:
 	@make -C test wipe-all
 
+# Note: All python venv consolidated in test/Makefile, test/requirements*.txt
 .PHONY: test-checkstyle
 test-checkstyle:
-	@make -C test checkstyle
+	$(warning test-checkstyle is deprecated. Running checkstyle-python.")
+	@make -C test checkstyle-python-all
+
+# Note: All python venv consolidated in test/Makefile, test/requirements*.txt
+.PHONY: test-checkstyle-diff
+test-checkstyle-diff:
+	$(warning test-checkstyle-diff is deprecated. Running checkstyle-python.")
+	@make -C test checkstyle-python-all
 
 .PHONY: test-refresh-deps
 test-refresh-deps:
@@ -483,21 +536,29 @@ test-refresh-deps:
 
 .PHONY: retest
 retest:
-	$(call test,vpp,vpp,retest)
+	$(call test,vpp,retest)
 
 .PHONY: retest-debug
 retest-debug:
-	$(call test,vpp,vpp_debug,retest)
+	$(call test,vpp_debug,retest)
 
 .PHONY: retest-all
 retest-all:
-	$(eval EXTENDED_TESTS=yes)
-	$(call test,vpp,vpp,retest)
+	$(eval EXTENDED_TESTS=1)
+	$(call test,vpp,retest)
 
 .PHONY: retest-all-debug
 retest-all-debug:
-	$(eval EXTENDED_TESTS=yes)
-	$(call test,vpp,vpp_debug,retest)
+	$(eval EXTENDED_TESTS=1)
+	$(call test,vpp_debug,retest)
+
+.PHONY: test-start-vpp-in-gdb
+test-start-vpp-in-gdb:
+	$(call test,vpp,start-gdb)
+
+.PHONY: test-start-vpp-debug-in-gdb
+test-start-vpp-debug-in-gdb:
+	$(call test,vpp_debug,start-gdb)
 
 ifeq ("$(wildcard $(STARTUP_CONF))","")
 define run
@@ -514,9 +575,7 @@ endef
 endif
 
 %.files: .FORCE
-	@find . \( -name '*\.[chyS]' -o -name '*\.java' -o -name '*\.lex' -o -name '*\.py' \) -and \
-		\( -not -path './build-root*' -o -path \
-		'./build-root/build-vpp_debug-native/dpdk*' \) > $@
+	@find src -name '*.[chS]' > $@
 
 .FORCE:
 
@@ -535,6 +594,7 @@ debug:
 .PHONY: build-coverity
 build-coverity:
 	$(call make,$(PLATFORM)_coverity,install-packages)
+	@make -C build-root PLATFORM=vpp TAG=vpp_coverity libmemif-install
 
 .PHONY: debug-release
 debug-release:
@@ -578,11 +638,6 @@ pkg-rpm: dist
 pkg-srpm: dist
 	make -C extras/rpm srpm
 
-.PHONY: dpdk-install-dev
-dpdk-install-dev:
-	$(call banner,"This command is deprecated. Please use 'make install-ext-deps'")
-	make -C build/external install-$(PKG)
-
 .PHONY: install-ext-deps
 install-ext-deps:
 	make -C build/external install-$(PKG)
@@ -597,6 +652,10 @@ json-api-files:
 .PHONY: json-api-files-debug
 json-api-files-debug:
 	$(WS_ROOT)/src/tools/vppapigen/generate_json.py --debug-target
+
+.PHONY: go-api-files
+go-api-files: json-api-files
+	$(WS_ROOT)/src/tools/vppapigen/generate_go.py $(ARGS)
 
 .PHONY: ctags
 ctags: ctags.files
@@ -615,13 +674,10 @@ cscope: cscope.files
 compdb:
 	@ninja -C build-root/build-vpp_debug-native/vpp build.ninja
 	@ninja -C build-root/build-vpp_debug-native/vpp -t compdb | \
-	  extras/scripts/compdb_cleanup.py > compile_commands.json
+	  src/scripts/compdb_cleanup.py > compile_commands.json
 
 .PHONY: checkstyle
 checkstyle: checkfeaturelist
-ifeq ($(shell which clang-format-10),)
-	@sudo apt-get install -y clang-format-10
-endif
 	@extras/scripts/checkstyle.sh
 
 .PHONY: checkstyle-commit
@@ -629,18 +685,30 @@ checkstyle-commit:
 	@extras/scripts/check_commit_msg.sh
 
 .PHONY: checkstyle-test
-checkstyle-test: test-checkstyle
+checkstyle-test:
+	$(warning test-checkstyle is deprecated. Running checkstyle-python.")
+	@make -C test checkstyle-python-all
+
+# Note: All python venv consolidated in test/Makefile, test/requirements*.txt
+.PHONY: checkstyle-python
+checkstyle-python:
+	@make -C test checkstyle-python-all
 
 .PHONY: checkstyle-all
-checkstyle-all: checkstyle-commit checkstyle checkstyle-test
+checkstyle-all: checkstyle-commit checkstyle checkstyle-python docs-spell
 
 .PHONY: fixstyle
 fixstyle:
 	@extras/scripts/checkstyle.sh --fix
 
+# Note: All python venv consolidated in test/Makefile, test/requirements*.txt
+.PHONY: fixstyle-python
+fixstyle-python:
+	@make -C test fixstyle-python-all
+
 .PHONY: checkstyle-api
 checkstyle-api:
-	@extras/scripts/crcchecker.py --check-patch
+	@extras/scripts/crcchecker.py --check-patchset
 
 # necessary because Bug 1696324 - Update to python3.6 breaks PyYAML dependencies
 # Status:	CLOSED CANTFIX
@@ -653,56 +721,42 @@ endif
 
 .PHONY: featurelist
 featurelist: centos-pyyaml
-	@build-root/scripts/fts.py --all --markdown
+	@extras/scripts/fts.py --all --markdown
 
 .PHONY: checkfeaturelist
 checkfeaturelist: centos-pyyaml
-	@build-root/scripts/fts.py --validate --all
+	@extras/scripts/fts.py --validate --all
 
 #
 # Build the documentation
 #
 
-# Doxygen configuration and our utility scripts
-export DOXY_DIR ?= $(WS_ROOT)/doxygen
-
-define make-doxy
-	@OS_ID="$(OS_ID)" make -C $(DOXY_DIR) $@
-endef
-
 .PHONY: bootstrap-doxygen
 bootstrap-doxygen:
-	$(call make-doxy)
+	@echo "make bootstrap-doxygen is DEPRECATED"
+	sleep 300
 
 .PHONY: doxygen
-doxygen: bootstrap-doxygen
-	$(call make-doxy)
+doxygen: docs
+	@echo "make doxygen is DEPRECATED: use 'make docs'"
+	sleep 300
 
 .PHONY: wipe-doxygen
 wipe-doxygen:
-	$(call make-doxy)
+	@echo "make wipe-doxygen is DEPRECATED"
+	sleep 300
 
-# Sphinx Documents
-export DOCS_DIR = $(WS_ROOT)/docs
-export VENV_DIR = $(WS_ROOT)/sphinx_venv
-export SPHINX_SCRIPTS_DIR = $(WS_ROOT)/docs/scripts
-
-.PHONY: docs-venv
-docs-venv:
-	@($(SPHINX_SCRIPTS_DIR)/sphinx-make.sh venv)
+.PHONY: docs-%
+docs-%:
+	@make -C $(WS_ROOT)/docs $*
 
 .PHONY: docs
-docs: $(DOCS_DIR)
-	@($(SPHINX_SCRIPTS_DIR)/sphinx-make.sh html)
-
-.PHONY: docs-clean
-docs-clean:
-	@rm -rf $(DOCS_DIR)/_build
-	@rm -rf $(VENV_DIR)
+docs:
+	@make -C $(WS_ROOT)/docs docs
 
 .PHONY: pkg-verify
 pkg-verify: install-dep $(BR)/.deps.ok install-ext-deps
-	$(call banner,"Building for PLATFORM=vpp using gcc")
+	$(call banner,"Building for PLATFORM=vpp")
 	@make -C build-root PLATFORM=vpp TAG=vpp wipe-all install-packages
 	$(call banner,"Building sample-plugin")
 	@make -C build-root PLATFORM=vpp TAG=vpp sample-plugin-install
@@ -711,7 +765,8 @@ pkg-verify: install-dep $(BR)/.deps.ok install-ext-deps
 	$(call banner,"Building $(PKG) packages")
 	@make pkg-$(PKG)
 
-MAKE_VERIFY_GATE_OS ?= ubuntu-18.04
+# Note: 'make verify' target is not used by ci-management scripts
+MAKE_VERIFY_GATE_OS ?= ubuntu-22.04
 .PHONY: verify
 verify: pkg-verify
 ifeq ($(OS_ID)-$(OS_VERSION_ID),$(MAKE_VERIFY_GATE_OS))
@@ -722,3 +777,7 @@ ifeq ($(OS_ID)-$(OS_VERSION_ID),$(MAKE_VERIFY_GATE_OS))
 else
 	$(call banner,"Skipping tests. Tests under 'make verify' supported on $(MAKE_VERIFY_GATE_OS)")
 endif
+
+.PHONY: check-dpdk-mlx
+check-dpdk-mlx:
+	@[ $$(make -sC build/external dpdk-show-DPDK_MLX_DEFAULT) = y ]

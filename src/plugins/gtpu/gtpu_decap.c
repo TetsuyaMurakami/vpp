@@ -804,10 +804,6 @@ ip_gtpu_bypass_inline (vlib_main_t * vm,
   vtep6_key_t last_vtep6;	/* last IPv6 address / fib index
 				   matching a local VTEP address */
   vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b = bufs;
-#ifdef CLIB_HAVE_VEC512
-  vtep4_cache_t vtep4_u512;
-  clib_memset (&vtep4_u512, 0, sizeof (vtep4_u512));
-#endif
 
   from = vlib_frame_vector_args (frame);
   n_left_from = frame->n_vectors;
@@ -901,8 +897,8 @@ ip_gtpu_bypass_inline (vlib_main_t * vm,
 	  if (is_ip4)
 	    {
 #ifdef CLIB_HAVE_VEC512
-             if (!vtep4_check_vector
-                 (&gtm->vtep_table, b0, ip40, &last_vtep4, &vtep4_u512))
+	      if (!vtep4_check_vector (&gtm->vtep_table, b0, ip40, &last_vtep4,
+				       &gtm->vtep4_u512))
 #else
 	      if (!vtep4_check (&gtm->vtep_table, b0, ip40, &last_vtep4))
 #endif
@@ -980,8 +976,8 @@ ip_gtpu_bypass_inline (vlib_main_t * vm,
 	  if (is_ip4)
 	    {
 #ifdef CLIB_HAVE_VEC512
-             if (!vtep4_check_vector
-                 (&gtm->vtep_table, b1, ip41, &last_vtep4, &vtep4_u512))
+	      if (!vtep4_check_vector (&gtm->vtep_table, b1, ip41, &last_vtep4,
+				       &gtm->vtep4_u512))
 #else
               if (!vtep4_check (&gtm->vtep_table, b1, ip41, &last_vtep4))
 #endif
@@ -1096,8 +1092,8 @@ ip_gtpu_bypass_inline (vlib_main_t * vm,
 	  if (is_ip4)
 	    {
 #ifdef CLIB_HAVE_VEC512
-             if (!vtep4_check_vector
-                 (&gtm->vtep_table, b0, ip40, &last_vtep4, &vtep4_u512))
+	      if (!vtep4_check_vector (&gtm->vtep_table, b0, ip40, &last_vtep4,
+				       &gtm->vtep4_u512))
 #else
               if (!vtep4_check (&gtm->vtep_table, b0, ip40, &last_vtep4))
 #endif
@@ -1260,12 +1256,12 @@ static char *gtpu_flow_error_strings[] = {
 #define gtpu_local_need_csum_check(_b)                                        \
   (!(_b->flags & VNET_BUFFER_F_L4_CHECKSUM_COMPUTED ||                        \
      (_b->flags & VNET_BUFFER_F_OFFLOAD &&                                    \
-      vnet_buffer2 (_b)->oflags & VNET_BUFFER_OFFLOAD_F_UDP_CKSUM)))
+      vnet_buffer (_b)->oflags & VNET_BUFFER_OFFLOAD_F_UDP_CKSUM)))
 
 #define gtpu_local_csum_is_valid(_b)                                          \
   ((_b->flags & VNET_BUFFER_F_L4_CHECKSUM_CORRECT ||                          \
     (_b->flags & VNET_BUFFER_F_OFFLOAD &&                                     \
-     vnet_buffer2 (_b)->oflags & VNET_BUFFER_OFFLOAD_F_UDP_CKSUM)) != 0)
+     vnet_buffer (_b)->oflags & VNET_BUFFER_OFFLOAD_F_UDP_CKSUM)) != 0)
 
 static_always_inline u8
 gtpu_validate_udp_csum (vlib_main_t * vm, vlib_buffer_t *b)

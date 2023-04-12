@@ -26,8 +26,8 @@
 #include <vnet/udp/udp_packet.h>
 #include <vnet/session/session.h>
 
-static char *udp_error_strings[] = {
-#define udp_error(n,s) s,
+static vlib_error_desc_t udp_error_counters[] = {
+#define udp_error(f, n, s, d) { #n, d, VL_COUNTER_SEVERITY_##s },
 #include "udp_error.def"
 #undef udp_error
 };
@@ -115,6 +115,7 @@ udp_connection_accept (udp_connection_t * listener, session_dgram_hdr_t * hdr,
   uc->c_fib_index = listener->c_fib_index;
   uc->mss = listener->mss;
   uc->flags |= UDP_CONN_F_CONNECTED;
+  uc->cfg_flags = listener->cfg_flags;
 
   if (session_dgram_accept (&uc->connection, listener->c_s_index,
 			    listener->c_thread_index))
@@ -122,8 +123,8 @@ udp_connection_accept (udp_connection_t * listener, session_dgram_hdr_t * hdr,
       udp_connection_free (uc);
       return 0;
     }
-  udp_connection_share_port (clib_net_to_host_u16
-			     (uc->c_lcl_port), uc->c_is_ip4);
+  transport_share_local_endpoint (TRANSPORT_PROTO_UDP, &uc->c_lcl_ip,
+				  uc->c_lcl_port);
   return uc;
 }
 
@@ -134,7 +135,8 @@ udp_connection_enqueue (udp_connection_t * uc0, session_t * s0,
 {
   int wrote0;
 
-  clib_spinlock_lock (&uc0->rx_lock);
+  if (!(uc0->flags & UDP_CONN_F_CONNECTED))
+    clib_spinlock_lock (&uc0->rx_lock);
 
   if (svm_fifo_max_enqueue_prod (s0->rx_fifo)
       < hdr0->data_length + sizeof (session_dgram_hdr_t))
@@ -159,11 +161,16 @@ udp_connection_enqueue (udp_connection_t * uc0, session_t * s0,
 						 TRANSPORT_PROTO_UDP,
 						 queue_event);
     }
-  ASSERT (wrote0 > 0);
+
+  /* In some rare cases, session_enqueue_dgram_connection can fail because a
+   * chunk cannot be allocated in the RX FIFO */
+  if (PREDICT_FALSE (wrote0 == 0))
+    *error0 = UDP_ERROR_FIFO_NOMEM;
 
 unlock_rx_lock:
 
-  clib_spinlock_unlock (&uc0->rx_lock);
+  if (!(uc0->flags & UDP_CONN_F_CONNECTED))
+    clib_spinlock_unlock (&uc0->rx_lock);
 }
 
 always_inline session_t *
@@ -182,6 +189,7 @@ udp_parse_and_lookup_buffer (vlib_buffer_t * b, session_dgram_hdr_t * hdr,
   hdr->lcl_port = udp->dst_port;
   hdr->rmt_port = udp->src_port;
   hdr->is_ip4 = is_ip4;
+  hdr->gso_size = 0;
 
   if (is_ip4)
     {
@@ -249,15 +257,11 @@ udp46_input_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  goto done;
 	}
 
-      /*
-       * If session exists pool peeker lock is taken at this point unless
-       * the session is already on the right thread or is a listener
-       */
-
       if (s0->session_state == SESSION_STATE_OPENED)
 	{
 	  u8 queue_event = 1;
 	  uc0 = udp_connection_from_transport (session_get_transport (s0));
+	  uc0->sw_if_index = vnet_buffer (b[0])->sw_if_index[VLIB_RX];
 	  if (uc0->flags & UDP_CONN_F_CONNECTED)
 	    {
 	      if (s0->thread_index != thread_index)
@@ -271,10 +275,8 @@ udp46_input_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 		  ASSERT (s0->session_index == uc0->c_s_index);
 
 		  /*
-		   * Drop the peeker lock on pool resize and ask session
-		   * layer for a new session.
+		   * Ask session layer for a new session.
 		   */
-		  session_pool_remove_peeker (s0->thread_index);
 		  session_dgram_connect_notify (&uc0->connection,
 						s0->thread_index, &s0);
 		  queue_event = 0;
@@ -284,7 +286,6 @@ udp46_input_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 	    }
 	  udp_connection_enqueue (uc0, s0, &hdr0, thread_index, b[0],
 				  queue_event, &error0);
-	  session_pool_remove_peeker (s0->thread_index);
 	}
       else if (s0->session_state == SESSION_STATE_READY)
 	{
@@ -304,6 +305,7 @@ udp46_input_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 		  goto done;
 		}
 	      s0 = session_get (uc0->c_s_index, uc0->c_thread_index);
+	      uc0->sw_if_index = vnet_buffer (b[0])->sw_if_index[VLIB_RX];
 	      error0 = UDP_ERROR_ACCEPT;
 	    }
 	  udp_connection_enqueue (uc0, s0, &hdr0, thread_index, b[0], 1,
@@ -312,7 +314,6 @@ udp46_input_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
       else
 	{
 	  error0 = UDP_ERROR_NOT_READY;
-	  session_pool_remove_peeker (s0->thread_index);
 	}
 
     done:
@@ -348,8 +349,8 @@ VLIB_REGISTER_NODE (udp4_input_node) =
   .vector_size = sizeof (u32),
   .format_trace = format_udp_input_trace,
   .type = VLIB_NODE_TYPE_INTERNAL,
-  .n_errors = ARRAY_LEN (udp_error_strings),
-  .error_strings = udp_error_strings,
+  .n_errors = UDP_N_ERROR,
+  .error_counters = udp_error_counters,
   .n_next_nodes = UDP_INPUT_N_NEXT,
   .next_nodes = {
 #define _(s, n) [UDP_INPUT_NEXT_##s] = n,
@@ -374,8 +375,8 @@ VLIB_REGISTER_NODE (udp6_input_node) =
   .vector_size = sizeof (u32),
   .format_trace = format_udp_input_trace,
   .type = VLIB_NODE_TYPE_INTERNAL,
-  .n_errors = ARRAY_LEN (udp_error_strings),
-  .error_strings = udp_error_strings,
+  .n_errors = UDP_N_ERROR,
+  .error_counters = udp_error_counters,
   .n_next_nodes = UDP_INPUT_N_NEXT,
   .next_nodes = {
 #define _(s, n) [UDP_INPUT_NEXT_##s] = n,

@@ -31,14 +31,11 @@
 #include <lacp/lacp.api_enum.h>
 #include <lacp/lacp.api_types.h>
 
-#define vl_print(handle, ...) vlib_cli_output (handle, __VA_ARGS__)
-
-/* Macro to finish up custom dump fns */
-#define FINISH                                  \
-    vec_add1 (s, 0);                            \
-    vl_print (handle, (char *)s);               \
-    vec_free (s);                               \
-    return handle;
+#define FINISH                                                                \
+  vec_add1 (s, 0);                                                            \
+  vlib_cli_output (handle, (char *) s);                                       \
+  vec_free (s);                                                               \
+  return handle;
 
 #define REPLY_MSG_ID_BASE lm->msg_id_base
 #include <vlibapi/api_helper_macros.h>
@@ -125,8 +122,8 @@ lacp_plugin_api_hookup (vlib_main_t * vm)
   lm->msg_id_base = setup_message_id_table ();
 
   /* Mark these APIs as mp safe */
-  am->is_mp_safe[VL_API_SW_INTERFACE_LACP_DUMP] = 1;
-  am->is_mp_safe[VL_API_SW_INTERFACE_LACP_DETAILS] = 1;
+  vl_api_set_msg_thread_safe (
+    am, lm->msg_id_base + VL_API_SW_INTERFACE_LACP_DUMP, 1);
 
   return 0;
 }

@@ -27,18 +27,14 @@
 #include <vnet/l2/l2_fib.h>
 #include <vnet/l2/l2_learn.h>
 #include <vnet/l2/l2_bd.h>
-
 #include <vppinfra/bihash_template.c>
-
 #include <vlibmemory/api.h>
-#include <vnet/vnet_msg_enum.h>
 
-#define vl_typedefs		/* define message structures */
-#include <vnet/vnet_all_api_h.h>
-#undef vl_typedefs
+#include <vnet/l2/l2.api_enum.h>
+#include <vnet/l2/l2.api_types.h>
 
-#define vl_endianfun		/* define message structures */
-#include <vnet/vnet_all_api_h.h>
+#define vl_endianfun
+#include <vnet/l2/l2.api.h>
 #undef vl_endianfun
 
 /**
@@ -610,7 +606,7 @@ static clib_error_t *
 l2fib_test_command_fn (vlib_main_t * vm,
 		       unformat_input_t * input, vlib_cli_command_t * cmd)
 {
-  u8 mac[6], save_mac[6];
+  u8 mac[8], save_mac[6];
   u32 bd_index = 0;
   u32 sw_if_index = 8;
   u32 is_add = 0;
@@ -1078,7 +1074,7 @@ allocate_mac_evt_buf (u32 client, u32 client_index)
   l2fib_main_t *fm = &l2fib_main;
   vl_api_l2_macs_event_t *mp = vl_msg_api_alloc
     (sizeof (*mp) + (fm->max_macs_in_event * sizeof (vl_api_mac_entry_t)));
-  mp->_vl_msg_id = htons (VL_API_L2_MACS_EVENT);
+  mp->_vl_msg_id = htons (l2input_main.msg_id_base + VL_API_L2_MACS_EVENT);
   mp->pid = htonl (client);
   mp->client_index = client_index;
   return mp;
@@ -1135,13 +1131,13 @@ l2fib_scan (vlib_main_t * vm, f64 start_time, u8 event_only)
 	{
 	  BVT (clib_bihash_bucket) * b =
 	    BV (clib_bihash_get_bucket) (h, i + 3);
-	  CLIB_PREFETCH (b, CLIB_CACHE_LINE_BYTES, LOAD);
+	  clib_prefetch_load (b);
 	  b = BV (clib_bihash_get_bucket) (h, i + 1);
 	  if (!BV (clib_bihash_bucket_is_empty) (b))
 	    {
 	      BVT (clib_bihash_value) * v =
 		BV (clib_bihash_get_value) (h, b->offset);
-	      CLIB_PREFETCH (v, CLIB_CACHE_LINE_BYTES, LOAD);
+	      clib_prefetch_load (v);
 	    }
 	}
 
@@ -1153,7 +1149,7 @@ l2fib_scan (vlib_main_t * vm, f64 start_time, u8 event_only)
 	{
 	  for (k = 0; k < BIHASH_KVP_PER_PAGE; k++)
 	    {
-	      if (v->kvp[k].key == ~0ULL && v->kvp[k].value == ~0ULL)
+	      if (BV (clib_bihash_is_free) (&v->kvp[k]))
 		continue;
 
 	      l2fib_entry_key_t key = {.raw = v->kvp[k].key };

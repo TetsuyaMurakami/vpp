@@ -21,8 +21,10 @@
 #include <vnet/ip/ip6_packet.h>
 #include <vnet/udp/udp_local.h>
 #include <vnet/udp/udp_packet.h>
+#include <vnet/tcp/tcp_packet.h>
 #include <vnet/vnet.h>
-#include <vnet/vxlan/vxlan_packet.h>
+
+#define VXLAN_HEADER_SIZE 8
 
 #define foreach_gho_flag        \
   _( 0, IP4)                    \
@@ -155,8 +157,6 @@ vnet_geneve_inner_header_parser_inline (vlib_buffer_t * b0,
   /* not supported yet */
   if ((gho->gho_flags & GHO_F_GENEVE_TUNNEL) == 0)
     return;
-
-  ASSERT (0);
 }
 
 static_always_inline void
@@ -166,8 +166,6 @@ vnet_gre_inner_header_parser_inline (vlib_buffer_t * b0,
   /* not supported yet */
   if ((gho->gho_flags & GHO_F_GRE_TUNNEL) == 0)
     return;
-
-  ASSERT (0);
 }
 
 static_always_inline void
@@ -440,7 +438,7 @@ vnet_generic_outer_header_parser_inline (vlib_buffer_t * b0,
       if (UDP_DST_PORT_vxlan == clib_net_to_host_u16 (udp->dst_port))
 	{
 	  gho->gho_flags |= GHO_F_VXLAN_TUNNEL;
-	  gho->hdr_sz += sizeof (vxlan_header_t);
+	  gho->hdr_sz += VXLAN_HEADER_SIZE;
 	}
       else if (UDP_DST_PORT_geneve == clib_net_to_host_u16 (udp->dst_port))
 	{

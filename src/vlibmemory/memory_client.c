@@ -39,8 +39,11 @@
 #include <vlibmemory/vl_memory_api_h.h>
 #undef vl_endianfun
 
+#define vl_calcsizefun
+#include <vlibmemory/vl_memory_api_h.h>
+#undef vl_calcsizefun
+
 /* instantiate all the print functions we know about */
-#define vl_print(handle, ...) clib_warning (__VA_ARGS__)
 #define vl_printfun
 #include <vlibmemory/vl_memory_api_h.h>
 #undef vl_printfun
@@ -110,11 +113,11 @@ vl_api_name_and_crc_free (void)
   hash_free (am->msg_index_by_name_and_crc);
 }
 
-CLIB_NOSANITIZE_ADDR static void
+__clib_nosanitize_addr static void
 VL_API_VEC_UNPOISON (const void *v)
 {
   const vec_header_t *vh = &((vec_header_t *) v)[-1];
-  CLIB_MEM_UNPOISON (vh, sizeof (*vh) + vec_len (v));
+  clib_mem_unpoison (vh, sizeof (*vh) + vec_len (v));
 }
 
 static void
@@ -151,11 +154,6 @@ vl_api_memclnt_create_reply_t_handler (vl_api_memclnt_create_reply_t * mp)
     }
 }
 
-static void
-noop_handler (void *notused)
-{
-}
-
 void vl_msg_api_send_shmem (svm_queue_t * q, u8 * elem);
 int
 vl_client_connect (const char *name, int ctx_quota, int input_queue_size)
@@ -188,7 +186,7 @@ vl_client_connect (const char *name, int ctx_quota, int input_queue_size)
       return -1;
     }
 
-  CLIB_MEM_UNPOISON (shmem_hdr, sizeof (*shmem_hdr));
+  clib_mem_unpoison (shmem_hdr, sizeof (*shmem_hdr));
   VL_MSG_API_SVM_QUEUE_UNPOISON (shmem_hdr->vl_input_queue);
 
   oldheap = vl_msg_push_heap ();
@@ -240,7 +238,8 @@ vl_client_connect (const char *name, int ctx_quota, int input_queue_size)
 	}
       rv = clib_net_to_host_u32 (rp->response);
 
-      vl_msg_api_handler ((void *) rp);
+      msgbuf_t *msgbuf = (msgbuf_t *) ((u8 *) rp - offsetof (msgbuf_t, data));
+      vl_msg_api_handler ((void *) rp, ntohl (msgbuf->data_len));
       break;
     }
   return (rv);
@@ -289,6 +288,7 @@ vl_client_disconnect (void)
   svm_queue_t *vl_input_queue;
   api_main_t *am = vlibapi_get_main ();
   time_t begin;
+  msgbuf_t *msgbuf;
 
   vl_input_queue = am->vl_input_queue;
   vl_client_send_disconnect (0 /* wait for reply */ );
@@ -321,10 +321,12 @@ vl_client_disconnect (void)
       if (ntohs (rp->_vl_msg_id) != VL_API_MEMCLNT_DELETE_REPLY)
 	{
 	  clib_warning ("queue drain: %d", ntohs (rp->_vl_msg_id));
-	  vl_msg_api_handler ((void *) rp);
+	  msgbuf = (msgbuf_t *) ((u8 *) rp - offsetof (msgbuf_t, data));
+	  vl_msg_api_handler ((void *) rp, ntohl (msgbuf->data_len));
 	  continue;
 	}
-      vl_msg_api_handler ((void *) rp);
+      msgbuf = (msgbuf_t *) ((u8 *) rp - offsetof (msgbuf_t, data));
+      vl_msg_api_handler ((void *) rp, ntohl (msgbuf->data_len));
       break;
     }
 
@@ -362,14 +364,21 @@ _(MEMCLNT_KEEPALIVE, memclnt_keepalive)
 void
 vl_client_install_client_message_handlers (void)
 {
-
-#define _(N,n)                                                  \
-    vl_msg_api_set_handlers(VL_API_##N, #n,                     \
-                            vl_api_##n##_t_handler,             \
-                            noop_handler,                       \
-                            vl_api_##n##_t_endian,              \
-                            vl_api_##n##_t_print,               \
-                            sizeof(vl_api_##n##_t), 1);
+  api_main_t *am = vlibapi_get_main ();
+#define _(N, n)                                                               \
+  vl_msg_api_config (&(vl_msg_api_msg_config_t){                              \
+    .id = VL_API_##N,                                                         \
+    .name = #n,                                                               \
+    .handler = vl_api_##n##_t_handler,                                        \
+    .endian = vl_api_##n##_t_endian,                                          \
+    .format_fn = vl_api_##n##_t_format,                                       \
+    .size = sizeof (vl_api_##n##_t),                                          \
+    .traced = 0,                                                              \
+    .tojson = vl_api_##n##_t_tojson,                                          \
+    .fromjson = vl_api_##n##_t_fromjson,                                      \
+    .calc_size = vl_api_##n##_t_calc_size,                                    \
+  });                                                                         \
+  am->msg_data[VL_API_##N].replay_allowed = 0;
   foreach_api_msg;
 #undef _
 }
@@ -501,6 +510,14 @@ vl_client_connect_to_vlib_thread_fn (const char *svm_name,
 				   thread_fn, arg, 1 /* do map */ );
 }
 
+void
+vl_client_stop_rx_thread (svm_queue_t *vl_input_queue)
+{
+  vl_api_rx_thread_exit_t *ep;
+  ep = vl_msg_api_alloc (sizeof (*ep));
+  ep->_vl_msg_id = ntohs (VL_API_RX_THREAD_EXIT);
+  vl_msg_api_send_shmem (vl_input_queue, (u8 *) &ep);
+}
 
 static void
 disconnect_from_vlib_internal (u8 do_unmap)
@@ -511,10 +528,7 @@ disconnect_from_vlib_internal (u8 do_unmap)
 
   if (mm->rx_thread_jmpbuf_valid)
     {
-      vl_api_rx_thread_exit_t *ep;
-      ep = vl_msg_api_alloc (sizeof (*ep));
-      ep->_vl_msg_id = ntohs (VL_API_RX_THREAD_EXIT);
-      vl_msg_api_send_shmem (am->vl_input_queue, (u8 *) & ep);
+      vl_client_stop_rx_thread (am->vl_input_queue);
       pthread_join (mm->rx_thread_handle, (void **) &junk);
     }
   if (mm->connected_to_vlib)
@@ -554,6 +568,8 @@ vl_client_get_first_plugin_msg_id (const char *plugin_name)
   vl_api_get_first_msg_id_t *mp;
   api_main_t *am = vlibapi_get_main ();
   memory_client_main_t *mm = vlibapi_get_memory_client_main ();
+  vl_api_msg_data_t *m =
+    vl_api_get_msg_data (am, VL_API_GET_FIRST_MSG_ID_REPLY);
   f64 timeout;
   void *old_handler;
   clib_time_t clib_time;
@@ -566,9 +582,13 @@ vl_client_get_first_plugin_msg_id (const char *plugin_name)
   clib_time_init (&clib_time);
 
   /* Push this plugin's first_msg_id_reply handler */
-  old_handler = am->msg_handlers[VL_API_GET_FIRST_MSG_ID_REPLY];
-  am->msg_handlers[VL_API_GET_FIRST_MSG_ID_REPLY] = (void *)
-    vl_api_get_first_msg_id_reply_t_handler;
+  old_handler = m->handler;
+  m->handler = (void *) vl_api_get_first_msg_id_reply_t_handler;
+  if (!m->calc_size_func)
+    {
+      m->calc_size_func =
+	(uword (*) (void *)) vl_api_get_first_msg_id_reply_t_calc_size;
+    }
 
   /* Ask the data-plane for the message-ID base of the indicated plugin */
   mm->first_msg_id_reply_ready = 0;
@@ -595,7 +615,7 @@ vl_client_get_first_plugin_msg_id (const char *plugin_name)
 
     sock_err:
       /* Restore old handler */
-      am->msg_handlers[VL_API_GET_FIRST_MSG_ID_REPLY] = old_handler;
+      m->handler = old_handler;
 
       return -1;
     }
@@ -620,7 +640,7 @@ vl_client_get_first_plugin_msg_id (const char *plugin_name)
 	    }
 	}
       /* Restore old handler */
-      am->msg_handlers[VL_API_GET_FIRST_MSG_ID_REPLY] = old_handler;
+      m->handler = old_handler;
 
       return rv;
     }
@@ -628,7 +648,7 @@ vl_client_get_first_plugin_msg_id (const char *plugin_name)
 result:
 
   /* Restore the old handler */
-  am->msg_handlers[VL_API_GET_FIRST_MSG_ID_REPLY] = old_handler;
+  m->handler = old_handler;
 
   if (rv == (u16) ~ 0)
     clib_warning ("plugin '%s' not registered", plugin_name);

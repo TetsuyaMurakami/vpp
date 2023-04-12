@@ -16,9 +16,8 @@
 #include <vnet/vnet.h>
 #include <vnet/udp/udp_local.h>
 #include <vnet/plugin/plugin.h>
-#include <vnet/fib/fib_table.h>
 #include <dns/dns.h>
-
+#include <vnet/ip/ip_sas.h>
 #include <vlibapi/api.h>
 #include <vlibmemory/api.h>
 #include <vpp/app/version.h>
@@ -31,15 +30,26 @@
 #define REPLY_MSG_ID_BASE dm->msg_id_base
 #include <vlibapi/api_helper_macros.h>
 
-/* Macro to finish up custom dump fns */
-#define vl_print(handle, ...) vlib_cli_output (handle, __VA_ARGS__)
-#define FINISH                                  \
-    vec_add1 (s, 0);                            \
-    vl_print (handle, (char *)s);               \
-    vec_free (s);                               \
-    return handle;
+#define FINISH                                                                \
+  vec_add1 (s, 0);                                                            \
+  vlib_cli_output (handle, (char *) s);                                       \
+  vec_free (s);                                                               \
+  return handle;
 
 dns_main_t dns_main;
+
+/* the cache hashtable expects a NULL-terminated C-string but everywhere else
+ * expects a non-NULL terminated vector... The pattern of adding \0 but hiding
+ * it away drives AddressSanitizer crazy, this helper tries to bring some of
+ * its sanity back
+ */
+static_always_inline void
+dns_terminate_c_string (u8 **v)
+{
+  vec_add1 (*v, 0);
+  vec_dec_len (*v, 1);
+  clib_mem_unpoison (vec_end (*v), 1);
+}
 
 static int
 dns_cache_clear (dns_main_t * dm)
@@ -225,66 +235,16 @@ vnet_dns_send_dns4_request (vlib_main_t * vm, dns_main_t * dm,
   u32 bi;
   vlib_buffer_t *b;
   ip4_header_t *ip;
-  fib_prefix_t prefix;
-  fib_node_index_t fei;
-  u32 sw_if_index, fib_index;
   udp_header_t *udp;
-  ip4_main_t *im4 = &ip4_main;
-  ip_lookup_main_t *lm4 = &im4->lookup_main;
-  ip_interface_address_t *ia = 0;
-  ip4_address_t *src_address;
+  ip4_address_t src_address;
   u8 *dns_request;
   vlib_frame_t *f;
   u32 *to_next;
 
   ASSERT (ep->dns_request);
 
-  /* Find a FIB path to the server */
-  clib_memcpy (&prefix.fp_addr.ip4, server, sizeof (*server));
-  prefix.fp_proto = FIB_PROTOCOL_IP4;
-  prefix.fp_len = 32;
-
-  fib_index = fib_table_find (prefix.fp_proto, 0 /* default VRF for now */ );
-  if (fib_index == (u32) ~ 0)
-    {
-      if (0)
-	clib_warning ("no fib table");
-      return;
-    }
-
-  fei = fib_table_lookup (fib_index, &prefix);
-
-  /* Couldn't find route to destination. Bail out. */
-  if (fei == FIB_NODE_INDEX_INVALID)
-    {
-      if (0)
-	clib_warning ("no route to DNS server");
-      return;
-    }
-
-  sw_if_index = fib_entry_get_resolving_interface (fei);
-
-  if (sw_if_index == ~0)
-    {
-      if (0)
-	clib_warning
-	  ("route to %U exists, fei %d, get_resolving_interface returned"
-	   " ~0", format_ip4_address, &prefix.fp_addr, fei);
-      return;
-    }
-
-  /* *INDENT-OFF* */
-  foreach_ip_interface_address(lm4, ia, sw_if_index, 1 /* honor unnumbered */,
-  ({
-    src_address = ip_interface_address_get_address (lm4, ia);
-    goto found_src_address;
-  }));
-  /* *INDENT-ON* */
-
-  clib_warning ("FIB BUG");
-  return;
-
-found_src_address:
+  if (!ip4_sas (0 /* default VRF for now */, ~0, server, &src_address))
+    return;
 
   /* Go get a buffer */
   if (vlib_buffer_alloc (vm, &bi, 1) != 1)
@@ -311,7 +271,7 @@ found_src_address:
   ip->length = clib_host_to_net_u16 (vlib_buffer_length_in_chain (vm, b));
   ip->ttl = 255;
   ip->protocol = IP_PROTOCOL_UDP;
-  ip->src_address.as_u32 = src_address->as_u32;
+  ip->src_address.as_u32 = src_address.as_u32;
   ip->dst_address.as_u32 = server->as_u32;
   ip->checksum = ip4_header_checksum (ip);
 
@@ -343,14 +303,8 @@ vnet_dns_send_dns6_request (vlib_main_t * vm, dns_main_t * dm,
   u32 bi;
   vlib_buffer_t *b;
   ip6_header_t *ip;
-  fib_prefix_t prefix;
-  fib_node_index_t fei;
-  u32 sw_if_index, fib_index;
   udp_header_t *udp;
-  ip6_main_t *im6 = &ip6_main;
-  ip_lookup_main_t *lm6 = &im6->lookup_main;
-  ip_interface_address_t *ia = 0;
-  ip6_address_t *src_address;
+  ip6_address_t src_address;
   u8 *dns_request;
   vlib_frame_t *f;
   u32 *to_next;
@@ -358,41 +312,8 @@ vnet_dns_send_dns6_request (vlib_main_t * vm, dns_main_t * dm,
 
   ASSERT (ep->dns_request);
 
-  /* Find a FIB path to the server */
-  clib_memcpy (&prefix.fp_addr, server, sizeof (*server));
-  prefix.fp_proto = FIB_PROTOCOL_IP6;
-  prefix.fp_len = 32;
-
-  fib_index = fib_table_find (prefix.fp_proto, 0 /* default VRF for now */ );
-  if (fib_index == (u32) ~ 0)
-    {
-      if (0)
-	clib_warning ("no fib table");
-      return;
-    }
-
-  fei = fib_table_lookup (fib_index, &prefix);
-
-  /* Couldn't find route to destination. Bail out. */
-  if (fei == FIB_NODE_INDEX_INVALID)
-    {
-      clib_warning ("no route to DNS server");
-    }
-
-  sw_if_index = fib_entry_get_resolving_interface (fei);
-
-  /* *INDENT-OFF* */
-  foreach_ip_interface_address(lm6, ia, sw_if_index, 1 /* honor unnumbered */,
-  ({
-    src_address = ip_interface_address_get_address (lm6, ia);
-    goto found_src_address;
-  }));
-  /* *INDENT-ON* */
-
-  clib_warning ("FIB BUG");
-  return;
-
-found_src_address:
+  if (!ip6_sas (0 /* default VRF for now */, ~0, server, &src_address))
+    return;
 
   /* Go get a buffer */
   if (vlib_buffer_alloc (vm, &bi, 1) != 1)
@@ -421,7 +342,7 @@ found_src_address:
 			  - sizeof (ip6_header_t));
   ip->hop_limit = 255;
   ip->protocol = IP_PROTOCOL_UDP;
-  clib_memcpy (&ip->src_address, src_address, sizeof (ip6_address_t));
+  ip6_address_copy (&ip->src_address, &src_address);
   clib_memcpy (&ip->dst_address, server, sizeof (ip6_address_t));
 
   /* UDP header */
@@ -918,8 +839,8 @@ re_resolve:
   pool_get (dm->entries, ep);
   clib_memset (ep, 0, sizeof (*ep));
 
-  ep->name = format (0, "%s%c", name, 0);
-  _vec_len (ep->name) = vec_len (ep->name) - 1;
+  ep->name = format (0, "%s", name);
+  dns_terminate_c_string (&ep->name);
 
   hash_set_mem (dm->cache_entry_by_name, ep->name, ep - dm->entries);
 
@@ -1077,8 +998,7 @@ found_last_request:
   now = vlib_time_now (vm);
   cname = vnet_dns_labels_to_name (rr->rdata, reply, &pos2);
   /* Save the cname */
-  vec_add1 (cname, 0);
-  _vec_len (cname) -= 1;
+  dns_terminate_c_string (&cname);
   ep = pool_elt_at_index (dm->entries, ep_index);
   ep->cname = cname;
   ep->flags |= (DNS_CACHE_ENTRY_FLAG_CNAME | DNS_CACHE_ENTRY_FLAG_VALID);
@@ -1096,8 +1016,7 @@ found_last_request:
 
   clib_memset (next_ep, 0, sizeof (*next_ep));
   next_ep->name = vec_dup (cname);
-  vec_add1 (next_ep->name, 0);
-  _vec_len (next_ep->name) -= 1;
+  dns_terminate_c_string (&next_ep->name);
 
   hash_set_mem (dm->cache_entry_by_name, next_ep->name,
 		next_ep - dm->entries);
@@ -1159,9 +1078,8 @@ found_last_request:
 }
 
 int
-vnet_dns_response_to_reply (u8 * response,
-			    vl_api_dns_resolve_name_reply_t * rmp,
-			    u32 * min_ttlp)
+vnet_dns_response_to_reply (u8 *response, dns_resolve_name_t *rn,
+			    u32 *min_ttlp)
 {
   dns_header_t *h;
   dns_query_t *qp;
@@ -1172,7 +1090,7 @@ vnet_dns_response_to_reply (u8 * response,
   u16 flags;
   u16 rcode;
   u32 ttl;
-  int pointer_chase;
+  int pointer_chase, addr_set = 0;
 
   h = (dns_header_t *) response;
   flags = clib_net_to_host_u16 (h->flags);
@@ -1269,32 +1187,32 @@ vnet_dns_response_to_reply (u8 * response,
 	{
 	case DNS_TYPE_A:
 	  /* Collect an ip4 address. Do not pass go. Do not collect $200 */
-	  memcpy (rmp->ip4_address, rr->rdata, sizeof (ip4_address_t));
-	  rmp->ip4_set = 1;
+	  ip_address_set (&rn->address, rr->rdata, AF_IP4);
 	  ttl = clib_net_to_host_u32 (rr->ttl);
+	  addr_set += 1;
 	  if (min_ttlp && *min_ttlp > ttl)
 	    *min_ttlp = ttl;
 	  break;
 	case DNS_TYPE_AAAA:
 	  /* Collect an ip6 address. Do not pass go. Do not collect $200 */
-	  memcpy (rmp->ip6_address, rr->rdata, sizeof (ip6_address_t));
+	  ip_address_set (&rn->address, rr->rdata, AF_IP6);
 	  ttl = clib_net_to_host_u32 (rr->ttl);
 	  if (min_ttlp && *min_ttlp > ttl)
 	    *min_ttlp = ttl;
-	  rmp->ip6_set = 1;
+	  addr_set += 1;
 	  break;
 
 	default:
 	  break;
 	}
       /* Might as well stop ASAP */
-      if (rmp->ip4_set && rmp->ip6_set)
+      if (addr_set > 1)
 	break;
       pos += sizeof (*rr) + clib_net_to_host_u16 (rr->rdlength);
       curpos = pos;
     }
 
-  if ((rmp->ip4_set + rmp->ip6_set) == 0)
+  if (addr_set == 0)
     return VNET_API_ERROR_NAME_SERVER_NO_ADDRESSES;
   return 0;
 }
@@ -1435,15 +1353,35 @@ vnet_dns_response_to_name (u8 * response,
   return 0;
 }
 
+__clib_export int
+dns_resolve_name (u8 *name, dns_cache_entry_t **ep, dns_pending_request_t *t0,
+		  dns_resolve_name_t *rn)
+{
+  dns_main_t *dm = &dns_main;
+  vlib_main_t *vm = vlib_get_main ();
+
+  int rv = vnet_dns_resolve_name (vm, dm, name, t0, ep);
+
+  /* Error, e.g. not enabled? Tell the user */
+  if (rv < 0)
+    return rv;
+
+  /* Resolution pending? Don't reply... */
+  if (ep[0] == 0)
+    return 0;
+
+  return vnet_dns_response_to_reply (ep[0]->dns_response, rn, 0 /* ttl-ptr */);
+}
+
 static void
 vl_api_dns_resolve_name_t_handler (vl_api_dns_resolve_name_t * mp)
 {
-  vlib_main_t *vm = vlib_get_main ();
   dns_main_t *dm = &dns_main;
   vl_api_dns_resolve_name_reply_t *rmp;
-  dns_cache_entry_t *ep;
-  dns_pending_request_t _t0, *t0 = &_t0;
+  dns_cache_entry_t *ep = 0;
+  dns_pending_request_t _t0 = { 0 }, *t0 = &_t0;
   int rv;
+  dns_resolve_name_t rn;
 
   /* Sanitize the name slightly */
   mp->name[ARRAY_LEN (mp->name) - 1] = 0;
@@ -1452,7 +1390,7 @@ vl_api_dns_resolve_name_t_handler (vl_api_dns_resolve_name_t * mp)
   t0->client_index = mp->client_index;
   t0->client_context = mp->context;
 
-  rv = vnet_dns_resolve_name (vm, dm, mp->name, t0, &ep);
+  rv = dns_resolve_name (mp->name, &ep, t0, &rn);
 
   /* Error, e.g. not enabled? Tell the user */
   if (rv < 0)
@@ -1466,11 +1404,13 @@ vl_api_dns_resolve_name_t_handler (vl_api_dns_resolve_name_t * mp)
     return;
 
   /* *INDENT-OFF* */
-  REPLY_MACRO2(VL_API_DNS_RESOLVE_NAME_REPLY,
-  ({
-    rv = vnet_dns_response_to_reply (ep->dns_response, rmp, 0 /* ttl-ptr */);
-    rmp->retval = clib_host_to_net_u32 (rv);
-  }));
+  REPLY_MACRO2 (VL_API_DNS_RESOLVE_NAME_REPLY, ({
+		  ip_address_copy_addr (rmp->ip4_address, &rn.address);
+		  if (ip_addr_version (&rn.address) == AF_IP4)
+		    rmp->ip4_set = 1;
+		  else
+		    rmp->ip6_set = 1;
+		}));
   /* *INDENT-ON* */
 }
 
@@ -1485,7 +1425,7 @@ vl_api_dns_resolve_ip_t_handler (vl_api_dns_resolve_ip_t * mp)
   int i, len;
   u8 *lookup_name = 0;
   u8 digit, nybble;
-  dns_pending_request_t _t0, *t0 = &_t0;
+  dns_pending_request_t _t0 = { 0 }, *t0 = &_t0;
 
   if (mp->is_ip6)
     {
@@ -2568,6 +2508,7 @@ static clib_error_t *
 test_dns_fmt_command_fn (vlib_main_t * vm,
 			 unformat_input_t * input, vlib_cli_command_t * cmd)
 {
+  dns_resolve_name_t _rn, *rn = &_rn;
   u8 *dns_reply_data = 0;
   int verbose = 0;
   int rv;
@@ -2593,7 +2534,7 @@ test_dns_fmt_command_fn (vlib_main_t * vm,
 
   clib_memset (rmp, 0, sizeof (*rmp));
 
-  rv = vnet_dns_response_to_reply (dns_reply_data, rmp, 0 /* ttl-ptr */ );
+  rv = vnet_dns_response_to_reply (dns_reply_data, rn, 0 /* ttl-ptr */);
 
   switch (rv)
     {
@@ -2606,12 +2547,7 @@ test_dns_fmt_command_fn (vlib_main_t * vm,
       break;
 
     case 0:
-      if (rmp->ip4_set)
-	vlib_cli_output (vm, "ip4 address: %U", format_ip4_address,
-			 (ip4_address_t *) rmp->ip4_address);
-      if (rmp->ip6_set)
-	vlib_cli_output (vm, "ip6 address: %U", format_ip6_address,
-			 (ip6_address_t *) rmp->ip6_address);
+      vlib_cli_output (vm, "ip address: %U", format_ip_address, &rn->address);
       break;
     }
 
@@ -2682,10 +2618,7 @@ test_dns_expire_command_fn (vlib_main_t * vm,
   dns_cache_entry_t *ep;
 
   if (unformat (input, "%v", &name))
-    {
-      vec_add1 (name, 0);
-      _vec_len (name) -= 1;
-    }
+    dns_terminate_c_string (&name);
   else
     return clib_error_return (0, "no name provided");
 
@@ -2732,13 +2665,7 @@ vnet_send_dns4_reply (vlib_main_t * vm, dns_main_t * dm,
 		      vlib_buffer_t * b0)
 {
   u32 bi = 0;
-  fib_prefix_t prefix;
-  fib_node_index_t fei;
-  u32 sw_if_index, fib_index;
-  ip4_main_t *im4 = &ip4_main;
-  ip_lookup_main_t *lm4 = &im4->lookup_main;
-  ip_interface_address_t *ia = 0;
-  ip4_address_t *src_address;
+  ip4_address_t src_address;
   ip4_header_t *ip;
   udp_header_t *udp;
   dns_header_t *dh;
@@ -2746,7 +2673,8 @@ vnet_send_dns4_reply (vlib_main_t * vm, dns_main_t * dm,
   u32 *to_next;
   u8 *dns_response;
   u8 *reply;
-  vl_api_dns_resolve_name_reply_t _rnr, *rnr = &_rnr;
+  /* vl_api_dns_resolve_name_reply_t _rnr, *rnr = &_rnr; */
+  dns_resolve_name_t _rn, *rn = &_rn;
   vl_api_dns_resolve_ip_reply_t _rir, *rir = &_rir;
   u32 ttl = 64, tmp;
   u32 qp_offset;
@@ -2761,13 +2689,13 @@ vnet_send_dns4_reply (vlib_main_t * vm, dns_main_t * dm,
   if (pr->request_type == DNS_PEER_PENDING_NAME_TO_IP)
     {
       /* Quick and dirty way to dig up the A-record address. $$ FIXME */
-      clib_memset (rnr, 0, sizeof (*rnr));
-      if (vnet_dns_response_to_reply (ep->dns_response, rnr, &ttl))
+      clib_memset (rn, 0, sizeof (*rn));
+      if (vnet_dns_response_to_reply (ep->dns_response, rn, &ttl))
 	{
 	  /* clib_warning ("response_to_reply failed..."); */
 	  is_fail = 1;
 	}
-      if (rnr->ip4_set == 0)
+      else if (ip_addr_version (&rn->address) != AF_IP4)
 	{
 	  /* clib_warning ("No A-record..."); */
 	  is_fail = 1;
@@ -2821,49 +2749,9 @@ vnet_send_dns4_reply (vlib_main_t * vm, dns_main_t * dm,
   vnet_buffer (b0)->sw_if_index[VLIB_RX] = 0;	/* "local0" */
   vnet_buffer (b0)->sw_if_index[VLIB_TX] = 0;	/* default VRF for now */
 
-  /* Find a FIB path to the peer we're trying to answer */
-  clib_memcpy (&prefix.fp_addr.ip4, pr->dst_address, sizeof (ip4_address_t));
-  prefix.fp_proto = FIB_PROTOCOL_IP4;
-  prefix.fp_len = 32;
-
-  fib_index = fib_table_find (prefix.fp_proto, 0 /* default VRF for now */ );
-  if (fib_index == (u32) ~ 0)
-    {
-      clib_warning ("no fib table");
-      return;
-    }
-
-  fei = fib_table_lookup (fib_index, &prefix);
-
-  /* Couldn't find route to destination. Bail out. */
-  if (fei == FIB_NODE_INDEX_INVALID)
-    {
-      clib_warning ("no route to DNS server");
-      return;
-    }
-
-  sw_if_index = fib_entry_get_resolving_interface (fei);
-
-  if (sw_if_index == ~0)
-    {
-      clib_warning
-	("route to %U exists, fei %d, get_resolving_interface returned"
-	 " ~0", fei, format_ip4_address, &prefix.fp_addr);
-      return;
-    }
-
-  /* *INDENT-OFF* */
-  foreach_ip_interface_address(lm4, ia, sw_if_index, 1 /* honor unnumbered */,
-  ({
-    src_address = ip_interface_address_get_address (lm4, ia);
-    goto found_src_address;
-  }));
-  /* *INDENT-ON* */
-
-  clib_warning ("FIB BUG");
-  return;
-
-found_src_address:
+  if (!ip4_sas (0 /* default VRF for now */, ~0,
+		(const ip4_address_t *) &pr->dst_address, &src_address))
+    return;
 
   ip = vlib_buffer_get_current (b0);
   udp = (udp_header_t *) (ip + 1);
@@ -2927,7 +2815,7 @@ found_src_address:
 	  rr->class = clib_host_to_net_u16 (1 /* internet */ );
 	  rr->ttl = clib_host_to_net_u32 (ttl);
 	  rr->rdlength = clib_host_to_net_u16 (sizeof (ip4_address_t));
-	  clib_memcpy (rr->rdata, rnr->ip4_address, sizeof (ip4_address_t));
+	  ip_address_copy_addr (rr->rdata, &rn->address);
 	}
       else
 	{
@@ -2956,7 +2844,7 @@ found_src_address:
   ip->length = clib_host_to_net_u16 (vlib_buffer_length_in_chain (vm, b0));
   ip->ttl = 255;
   ip->protocol = IP_PROTOCOL_UDP;
-  ip->src_address.as_u32 = src_address->as_u32;
+  ip->src_address.as_u32 = src_address.as_u32;
   clib_memcpy (ip->dst_address.as_u8, pr->dst_address,
 	       sizeof (ip4_address_t));
   ip->checksum = ip4_header_checksum (ip);
@@ -3001,9 +2889,11 @@ dns_init (vlib_main_t * vm)
   return 0;
 }
 
-VLIB_INIT_FUNCTION (dns_init);
-
 /* *INDENT-OFF* */
+VLIB_INIT_FUNCTION (dns_init) = {
+  .init_order = VLIB_INITS ("flow_classify_init", "dns_init"),
+};
+
 VLIB_PLUGIN_REGISTER () =
 {
   .version = VPP_BUILD_VER,

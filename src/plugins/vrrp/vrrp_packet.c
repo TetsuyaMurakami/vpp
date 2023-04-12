@@ -102,13 +102,24 @@ vrrp_adv_l3_build (vrrp_vr_t * vr, vlib_buffer_t * b,
   if (!vrrp_vr_is_ipv6 (vr))	/* IPv4 */
     {
       ip4_header_t *ip4 = vlib_buffer_get_current (b);
+      ip4_address_t *src4;
 
       clib_memset (ip4, 0, sizeof (*ip4));
       ip4->ip_version_and_header_length = 0x45;
       ip4->ttl = 255;
       ip4->protocol = IP_PROTOCOL_VRRP;
       clib_memcpy (&ip4->dst_address, &dst->ip4, sizeof (dst->ip4));
-      fib_sas4_get (vr->config.sw_if_index, NULL, &ip4->src_address);
+
+      /* RFC 5798 Section 5.1.1.1 - Source Address "is the primary IPv4
+       * address of the interface the packet is being sent from". Assume
+       * this is the first address on the interface.
+       */
+      src4 = ip_interface_get_first_ip (vr->config.sw_if_index, 1);
+      if (!src4)
+	{
+	  return -1;
+	}
+      ip4->src_address.as_u32 = src4->as_u32;
       ip4->length = clib_host_to_net_u16 (sizeof (*ip4) +
 					  vrrp_adv_payload_len (vr));
       ip4->checksum = ip4_header_checksum (ip4);
@@ -313,7 +324,6 @@ vrrp_adv_send (vrrp_vr_t * vr, int shutdown)
       bi0 = vec_elt (bi, i);
       b = vlib_get_buffer (vm, bi0);
 
-      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b);
       b->flags |= VNET_BUFFER_F_LOCALLY_ORIGINATED;
       vnet_buffer (b)->sw_if_index[VLIB_RX] = 0;
       vnet_buffer (b)->sw_if_index[VLIB_TX] = vr->config.sw_if_index;
@@ -326,7 +336,12 @@ vrrp_adv_send (vrrp_vr_t * vr, int shutdown)
       else
 	vrrp_adv_l2_build_multicast (vr, b);
 
-      vrrp_adv_l3_build (vr, b, dst);
+      if (-1 == vrrp_adv_l3_build (vr, b, dst))
+	{
+	  vlib_frame_free (vm, to_frame);
+	  vlib_buffer_free (vm, bi, n_buffers);
+	  return -1;
+	}
       vrrp_adv_payload_build (vr, b, shutdown);
 
       vlib_buffer_reset (b);
@@ -337,6 +352,12 @@ vrrp_adv_send (vrrp_vr_t * vr, int shutdown)
   to_frame->n_vectors = n_buffers;
 
   vlib_put_frame_to_node (vm, node_index, to_frame);
+
+  vrrp_incr_stat_counter (VRRP_STAT_COUNTER_ADV_SENT, vr->stat_index);
+  if (shutdown)
+    {
+      vrrp_incr_stat_counter (VRRP_STAT_COUNTER_PRIO0_SENT, vr->stat_index);
+    }
 
   vec_free (bi);
 
@@ -500,7 +521,6 @@ vrrp_garp_or_na_send (vrrp_vr_t * vr)
       addr = vec_elt_at_index (vr->config.vr_addrs, i);
       b = vlib_get_buffer (vm, bi[i]);
 
-      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b);
       b->flags |= VNET_BUFFER_F_LOCALLY_ORIGINATED;
       vnet_buffer (b)->sw_if_index[VLIB_RX] = 0;
       vnet_buffer (b)->sw_if_index[VLIB_TX] = vr->config.sw_if_index;
@@ -531,17 +551,25 @@ static const ip4_header_t igmp_ip4_mcast = {
   .dst_address = {.as_u8 = IGMP4_MCAST_ADDR_AS_U8,},
 };
 
-static void
-vrrp_igmp_pkt_build (vrrp_vr_t * vr, vlib_buffer_t * b)
+static int
+vrrp_igmp_pkt_build (vrrp_vr_t *vr, vlib_buffer_t *b)
 {
   ip4_header_t *ip4;
   u8 *ip4_options;
   igmp_membership_report_v3_t *report;
   igmp_membership_group_v3_t *group;
+  ip4_address_t *src4;
 
   ip4 = vlib_buffer_get_current (b);
   clib_memcpy (ip4, &igmp_ip4_mcast, sizeof (*ip4));
-  fib_sas4_get (vr->config.sw_if_index, NULL, &ip4->src_address);
+
+  /* Use the source address advertisements will use to join mcast group */
+  src4 = ip_interface_get_first_ip (vr->config.sw_if_index, 1);
+  if (!src4)
+    {
+      return -1;
+    }
+  ip4->src_address.as_u32 = src4->as_u32;
 
   vlib_buffer_chain_increase_length (b, b, sizeof (*ip4));
   vlib_buffer_advance (b, sizeof (*ip4));
@@ -583,6 +611,7 @@ vrrp_igmp_pkt_build (vrrp_vr_t * vr, vlib_buffer_t * b)
     ~ip_csum_fold (ip_incremental_checksum (0, report, payload_len));
 
   vlib_buffer_reset (b);
+  return 0;
 }
 
 /* multicast listener report packet format for ethernet. */
@@ -693,6 +722,11 @@ vrrp_vr_multicast_group_join (vrrp_vr_t * vr)
   if (!vnet_sw_interface_is_up (vnm, vr->config.sw_if_index))
     return 0;
 
+  is_ipv6 = vrrp_vr_is_ipv6 (vr);
+
+  if (is_ipv6 && ip6_link_is_enabled (vr->config.sw_if_index) == 0)
+    return 0;
+
   if (vlib_buffer_alloc (vm, &bi, n_buffers) != n_buffers)
     {
       clib_warning ("Buffer allocation failed for %U", format_vrrp_vr_key,
@@ -700,11 +734,8 @@ vrrp_vr_multicast_group_join (vrrp_vr_t * vr)
       return -1;
     }
 
-  is_ipv6 = vrrp_vr_is_ipv6 (vr);
-
   b = vlib_get_buffer (vm, bi);
 
-  VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b);
   b->flags |= VNET_BUFFER_F_LOCALLY_ORIGINATED;
 
   vnet_buffer (b)->sw_if_index[VLIB_RX] = 0;
@@ -720,7 +751,13 @@ vrrp_vr_multicast_group_join (vrrp_vr_t * vr)
     }
   else
     {
-      vrrp_igmp_pkt_build (vr, b);
+      if (-1 == vrrp_igmp_pkt_build (vr, b))
+	{
+	  clib_warning ("IGMP packet build failed for %U", format_vrrp_vr_key,
+			vr);
+	  vlib_buffer_free (vm, &bi, 1);
+	  return -1;
+	}
       node_index = ip4_rewrite_mcast_node.index;
     }
 

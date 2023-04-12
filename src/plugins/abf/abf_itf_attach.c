@@ -567,10 +567,11 @@ abf_input_inline (vlib_main_t * vm,
 					 (FIB_PROTOCOL_IP6 == fproto), 1, 0,
 					 &fa_5tuple0);
 
-	  if (acl_plugin_match_5tuple_inline
-	      (acl_plugin.p_acl_main, lc_index, &fa_5tuple0,
-	       (FIB_PROTOCOL_IP6 == fproto), &action, &match_acl_pos,
-	       &match_acl_index, &match_rule_index, &trace_bitmap))
+	  if (acl_plugin_match_5tuple_inline (
+		acl_plugin.p_acl_main, lc_index, &fa_5tuple0,
+		(FIB_PROTOCOL_IP6 == fproto), &action, &match_acl_pos,
+		&match_acl_index, &match_rule_index, &trace_bitmap) &&
+	      action > 0)
 	    {
 	      /*
 	       * match:
@@ -760,7 +761,7 @@ static clib_error_t *
 abf_itf_bond_init (vlib_main_t * vm)
 {
   abf_itf_attach_fib_node_type =
-    fib_node_register_new_type (&abf_itf_attach_vft);
+    fib_node_register_new_type ("abf-attach", &abf_itf_attach_vft);
   clib_error_t *acl_init_res = acl_plugin_exports_init (&acl_plugin);
   if (acl_init_res)
     return (acl_init_res);

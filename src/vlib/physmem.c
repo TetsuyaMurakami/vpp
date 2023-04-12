@@ -17,11 +17,11 @@
 #include <sys/types.h>
 #include <sys/mount.h>
 #include <sys/mman.h>
-#include <sys/fcntl.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <vppinfra/linux/syscall.h>
+#include <vppinfra/clib.h>
 #include <vppinfra/linux/sysfs.h>
 #include <vlib/vlib.h>
 #include <vlib/physmem.h>

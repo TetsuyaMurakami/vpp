@@ -36,8 +36,8 @@ typedef CLIB_PACKED ( struct {
 }) vl_api_trace_file_header_t;
 /* *INDENT-ON* */
 
-int vl_msg_api_trace_save (api_main_t * am,
-			   vl_api_trace_which_t which, FILE * fp);
+int vl_msg_api_trace_save (api_main_t *am, vl_api_trace_which_t which,
+			   FILE *fp, u8 is_json);
 
 #define VLIB_API_INIT_FUNCTION(x) VLIB_DECLARE_INIT_FUNCTION(x,api_init)
 
@@ -105,10 +105,6 @@ int vl_msg_api_trace_onoff (api_main_t * am, vl_api_trace_which_t which,
 int vl_msg_api_trace_free (api_main_t * am, vl_api_trace_which_t which);
 int vl_msg_api_trace_configure (api_main_t * am, vl_api_trace_which_t which,
 				u32 nitems);
-void vl_msg_api_handler_with_vm_node (api_main_t * am, svm_region_t * vlib_rp,
-				      void *the_msg, vlib_main_t * vm,
-				      vlib_node_runtime_t * node,
-				      u8 is_private);
 u32 vl_msg_api_max_length (void *mp);
 vl_api_trace_t *vl_msg_api_trace_get (api_main_t * am,
 				      vl_api_trace_which_t which);
@@ -122,6 +118,38 @@ u8 *vlib_node_serialize (vlib_main_t * vm, vlib_node_t *** node_dups,
 vlib_node_t ***vlib_node_unserialize (u8 * vector);
 
 u32 vl_msg_api_get_msg_length (void *msg_arg);
+
+typedef int (*vl_msg_traverse_trace_fn) (u8 *, void *);
+
+int vl_msg_traverse_trace (vl_api_trace_t *tp, vl_msg_traverse_trace_fn fn,
+			   void *ctx);
+
+always_inline void
+vl_api_increase_msg_trace_size (api_main_t *am, u32 msg_id, u32 inc)
+{
+  am->msg_data[msg_id].trace_size += inc;
+}
+
+always_inline void
+vl_api_set_msg_thread_safe (api_main_t *am, u32 msg_id, int v)
+{
+  am->msg_data[msg_id].is_mp_safe = v != 0;
+}
+
+always_inline void
+vl_api_set_msg_autoendian (api_main_t *am, u32 msg_id, int v)
+{
+  am->msg_data[msg_id].is_autoendian = v != 0;
+}
+
+always_inline void
+vl_api_allow_msg_replay (api_main_t *am, u32 msg_id, int v)
+{
+  am->msg_data[msg_id].replay_allowed = v != 0;
+}
+
+format_function_t format_vl_api_msg_text;
+format_function_t format_vl_api_msg_json;
 
 #endif /* included_api_h */
 /*

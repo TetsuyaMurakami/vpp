@@ -24,9 +24,9 @@
 #include <vnet/interface/rx_queue_funcs.h>
 #include "af_xdp.h"
 
-#define foreach_af_xdp_input_error \
-  _(POLL_REQUIRED, "poll required") \
-  _(POLL_FAILURES, "poll failures")
+#define foreach_af_xdp_input_error                                            \
+  _ (SYSCALL_REQUIRED, "syscall required")                                    \
+  _ (SYSCALL_FAILURES, "syscall failures")
 
 typedef enum
 {
@@ -77,32 +77,36 @@ af_xdp_device_input_refill_db (vlib_main_t * vm,
 			       af_xdp_device_t * ad, af_xdp_rxq_t * rxq,
 			       const u32 n_alloc)
 {
-  int ret;
-
   xsk_ring_prod__submit (&rxq->fq, n_alloc);
 
-  if (!xsk_ring_prod__needs_wakeup (&rxq->fq))
+  if (AF_XDP_RXQ_MODE_INTERRUPT == rxq->mode ||
+      !xsk_ring_prod__needs_wakeup (&rxq->fq))
     return;
 
-  vlib_error_count (vm, node->node_index, AF_XDP_INPUT_ERROR_POLL_REQUIRED,
-		    1);
+  if (node)
+    vlib_error_count (vm, node->node_index,
+		      AF_XDP_INPUT_ERROR_SYSCALL_REQUIRED, 1);
 
-  struct pollfd fd = {.fd = rxq->xsk_fd,.events = POLLIN };
-  ret = poll (&fd, 1, 0);
-  if (PREDICT_TRUE (ret >= 0))
-    return;
-
-  /* something bad is happening */
-  vlib_error_count (vm, node->node_index, AF_XDP_INPUT_ERROR_POLL_FAILURES,
-		    1);
-  af_xdp_device_error (ad, "poll() failed");
+  if (clib_spinlock_trylock_if_init (&rxq->syscall_lock))
+    {
+      struct pollfd fd = { .fd = rxq->xsk_fd, .events = POLLIN | POLLOUT };
+      int ret = poll (&fd, 1, 0);
+      clib_spinlock_unlock_if_init (&rxq->syscall_lock);
+      if (PREDICT_FALSE (ret < 0))
+	{
+	  /* something bad is happening */
+	  if (node)
+	    vlib_error_count (vm, node->node_index,
+			      AF_XDP_INPUT_ERROR_SYSCALL_FAILURES, 1);
+	  af_xdp_device_error (ad, "rx poll() failed");
+	}
+    }
 }
 
 static_always_inline void
-af_xdp_device_input_refill (vlib_main_t * vm,
-			    const vlib_node_runtime_t * node,
-			    af_xdp_device_t * ad, af_xdp_rxq_t * rxq,
-			    const int copy)
+af_xdp_device_input_refill_inline (vlib_main_t *vm,
+				   const vlib_node_runtime_t *node,
+				   af_xdp_device_t *ad, af_xdp_rxq_t *rxq)
 {
   __u64 *fill;
   const u32 size = rxq->fq.size;
@@ -128,19 +132,7 @@ af_xdp_device_input_refill (vlib_main_t * vm,
   n = clib_min (n_alloc, size - (idx & mask));
   n_wrap = n_alloc - n;
 
-  /*
-   * Note about headroom: for some reasons, there seem to be a discrepency
-   * between 0-copy and copy mode:
-   *   - 0-copy: XDP_PACKET_HEADROOM will be added to the user headroom
-   *   - copy: nothing is added to the user headroom
-   * We privileged 0-copy and set headroom to 0. As XDP_PACKET_HEADROOM ==
-   * sizeof(vlib_buffer_t), data will correctly point to vlib_buffer_t->data.
-   * In copy mode, we have to add sizeof(vlib_buffer_t) to desc offset during
-   * refill.
-   */
-  STATIC_ASSERT (sizeof (vlib_buffer_t) == XDP_PACKET_HEADROOM, "wrong size");
-#define bi2addr(bi) \
-  (((bi) << CLIB_LOG2_CACHE_LINE_BYTES) + (copy ? sizeof(vlib_buffer_t) : 0))
+#define bi2addr(bi) ((bi) << CLIB_LOG2_CACHE_LINE_BYTES)
 
 wrap_around:
 
@@ -209,27 +201,30 @@ af_xdp_device_input_ethernet (vlib_main_t * vm, vlib_node_runtime_t * node,
 }
 
 static_always_inline u32
-af_xdp_device_input_bufs (vlib_main_t * vm, const af_xdp_device_t * ad,
-			  af_xdp_rxq_t * rxq, u32 * bis, const u32 n_rx,
-			  vlib_buffer_t * bt, u32 idx, const int copy)
+af_xdp_device_input_bufs (vlib_main_t *vm, const af_xdp_device_t *ad,
+			  af_xdp_rxq_t *rxq, u32 *bis, const u32 n_rx,
+			  vlib_buffer_t *bt, u32 idx)
 {
   vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b = bufs;
+  u16 offs[VLIB_FRAME_SIZE], *off = offs;
   u16 lens[VLIB_FRAME_SIZE], *len = lens;
   const u32 mask = rxq->rx.mask;
   u32 n = n_rx, *bi = bis, bytes = 0;
 
-#define addr2bi(addr) \
-  (((addr) - (copy ? sizeof(vlib_buffer_t) : 0)) >> CLIB_LOG2_CACHE_LINE_BYTES)
+#define addr2bi(addr) ((addr) >> CLIB_LOG2_CACHE_LINE_BYTES)
 
   while (n >= 1)
     {
       const struct xdp_desc *desc = xsk_ring_cons__rx_desc (&rxq->rx, idx);
-      bi[0] = addr2bi (xsk_umem__extract_addr (desc->addr));
+      const u64 addr = desc->addr;
+      bi[0] = addr2bi (xsk_umem__extract_addr (addr));
       ASSERT (vlib_buffer_is_known (vm, bi[0]) ==
 	      VLIB_BUFFER_KNOWN_ALLOCATED);
+      off[0] = xsk_umem__extract_offset (addr) - sizeof (vlib_buffer_t);
       len[0] = desc->len;
       idx = (idx + 1) & mask;
       bi += 1;
+      off += 1;
       len += 1;
       n -= 1;
     }
@@ -237,27 +232,33 @@ af_xdp_device_input_bufs (vlib_main_t * vm, const af_xdp_device_t * ad,
   vlib_get_buffers (vm, bis, bufs, n_rx);
 
   n = n_rx;
+  off = offs;
   len = lens;
 
   while (n >= 8)
     {
       vlib_prefetch_buffer_header (b[4], LOAD);
       vlib_buffer_copy_template (b[0], bt);
+      b[0]->current_data = off[0];
       bytes += b[0]->current_length = len[0];
 
       vlib_prefetch_buffer_header (b[5], LOAD);
       vlib_buffer_copy_template (b[1], bt);
+      b[1]->current_data = off[1];
       bytes += b[1]->current_length = len[1];
 
       vlib_prefetch_buffer_header (b[6], LOAD);
       vlib_buffer_copy_template (b[2], bt);
+      b[2]->current_data = off[2];
       bytes += b[2]->current_length = len[2];
 
       vlib_prefetch_buffer_header (b[7], LOAD);
       vlib_buffer_copy_template (b[3], bt);
+      b[3]->current_data = off[3];
       bytes += b[3]->current_length = len[3];
 
       b += 4;
+      off += 4;
       len += 4;
       n -= 4;
     }
@@ -265,8 +266,10 @@ af_xdp_device_input_bufs (vlib_main_t * vm, const af_xdp_device_t * ad,
   while (n >= 1)
     {
       vlib_buffer_copy_template (b[0], bt);
+      b[0]->current_data = off[0];
       bytes += b[0]->current_length = len[0];
       b += 1;
+      off += 1;
       len += 1;
       n -= 1;
     }
@@ -276,9 +279,8 @@ af_xdp_device_input_bufs (vlib_main_t * vm, const af_xdp_device_t * ad,
 }
 
 static_always_inline uword
-af_xdp_device_input_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
-			    vlib_frame_t * frame, af_xdp_device_t * ad,
-			    u16 qid, const int copy)
+af_xdp_device_input_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
+			    vlib_frame_t *frame, af_xdp_device_t *ad, u16 qid)
 {
   vnet_main_t *vnm = vnet_get_main ();
   af_xdp_rxq_t *rxq = vec_elt_at_index (ad->rxqs, qid);
@@ -300,8 +302,7 @@ af_xdp_device_input_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
   vlib_get_new_next_frame (vm, node, next_index, to_next, n_left_to_next);
 
   n_rx_bytes =
-    af_xdp_device_input_bufs (vm, ad, rxq, to_next, n_rx_packets, &bt, idx,
-			      copy);
+    af_xdp_device_input_bufs (vm, ad, rxq, to_next, n_rx_packets, &bt, idx);
   af_xdp_device_input_ethernet (vm, node, next_index, ad->sw_if_index,
 				ad->hw_if_index);
 
@@ -316,7 +317,7 @@ af_xdp_device_input_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
      ad->hw_if_index, n_rx_packets, n_rx_bytes);
 
 refill:
-  af_xdp_device_input_refill (vm, node, ad, rxq, copy);
+  af_xdp_device_input_refill_inline (vm, node, ad, rxq);
 
   return n_rx_packets;
 }
@@ -335,16 +336,22 @@ VLIB_NODE_FN (af_xdp_input_node) (vlib_main_t * vm,
       af_xdp_device_t *ad = vec_elt_at_index (am->devices, p->dev_instance);
       if ((ad->flags & AF_XDP_DEVICE_F_ADMIN_UP) == 0)
 	continue;
-      if (PREDICT_TRUE (ad->flags & AF_XDP_DEVICE_F_ZEROCOPY))
-	n_rx += af_xdp_device_input_inline (vm, node, frame, ad, p->queue_id,
-					    /* copy */ 0);
-      else
-	n_rx += af_xdp_device_input_inline (vm, node, frame, ad, p->queue_id,
-					    /* copy */ 1);
+      n_rx += af_xdp_device_input_inline (vm, node, frame, ad, p->queue_id);
     }
 
   return n_rx;
 }
+
+#ifndef CLIB_MARCH_VARIANT
+void
+af_xdp_device_input_refill (af_xdp_device_t *ad)
+{
+  vlib_main_t *vm = vlib_get_main ();
+  af_xdp_rxq_t *rxq;
+  vec_foreach (rxq, ad->rxqs)
+    af_xdp_device_input_refill_inline (vm, 0, ad, rxq);
+}
+#endif /* CLIB_MARCH_VARIANT */
 
 /* *INDENT-OFF* */
 VLIB_REGISTER_NODE (af_xdp_input_node) = {

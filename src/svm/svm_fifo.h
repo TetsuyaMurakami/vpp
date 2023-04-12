@@ -34,7 +34,7 @@ typedef enum svm_fifo_deq_ntf_
   SVM_FIFO_NO_DEQ_NOTIF = 0,		/**< No notification requested */
   SVM_FIFO_WANT_DEQ_NOTIF = 1,		/**< Notify on dequeue */
   SVM_FIFO_WANT_DEQ_NOTIF_IF_FULL = 2,	/**< Notify on transition from full */
-  SVM_FIFO_WANT_DEQ_NOTIF_IF_EMPTY = 4,	/**< Notify on transition to empty */
+  SVM_FIFO_WANT_DEQ_NOTIF_IF_EMPTY = 4, /**< Notify on transition to empty */
 } svm_fifo_deq_ntf_t;
 
 typedef enum svm_fifo_flag_
@@ -431,8 +431,8 @@ void svm_fifo_dequeue_drop_all (svm_fifo_t * f);
  * @param max_bytes	max bytes to be mapped to fifo segments
  * @return 		number of bytes in fifo segments or SVM_FIFO_EEMPTY
  */
-int svm_fifo_segments (svm_fifo_t * f, u32 offset, svm_fifo_seg_t * fs,
-		       u32 n_segs, u32 max_bytes);
+int svm_fifo_segments (svm_fifo_t *f, u32 offset, svm_fifo_seg_t *fs,
+		       u32 *n_segs, u32 max_bytes);
 /**
  * Add io events subscriber to list
  *
@@ -640,63 +640,6 @@ u32 svm_fifo_max_read_chunk (svm_fifo_t * f);
 u32 svm_fifo_max_write_chunk (svm_fifo_t * f);
 
 /**
- * Fifo head chunk getter
- *
- * @param f	fifo
- * @return	head chunk pointer
- */
-static inline svm_fifo_chunk_t *
-svm_fifo_head_chunk (svm_fifo_t * f)
-{
-  return f_head_cptr (f);
-}
-
-/**
- * Fifo head pointer getter
- *
- * @param f	fifo
- * @return	head pointer
- */
-static inline u8 *
-svm_fifo_head (svm_fifo_t * f)
-{
-  svm_fifo_chunk_t *head_chunk;
-  if (!f->shr->head_chunk)
-    return 0;
-  /* load-relaxed: consumer owned index */
-  head_chunk = f_head_cptr (f);
-  return (head_chunk->data + (f->shr->head - head_chunk->start_byte));
-}
-
-/**
- * Fifo tail chunk getter
- *
- * @param f	fifo
- * @return	tail chunk pointer
- */
-static inline svm_fifo_chunk_t *
-svm_fifo_tail_chunk (svm_fifo_t * f)
-{
-  return f_tail_cptr (f);
-}
-
-/**
- * Fifo tail pointer getter
- *
- * @param f	fifo
- * @return	tail pointer
- */
-static inline u8 *
-svm_fifo_tail (svm_fifo_t * f)
-{
-  svm_fifo_chunk_t *tail_chunk;
-
-  /* load-relaxed: producer owned index */
-  tail_chunk = f_tail_cptr (f);
-  return (tail_chunk->data + (f->shr->tail - tail_chunk->start_byte));
-}
-
-/**
  * Fifo number of subscribers getter
  *
  * @param f	fifo
@@ -886,7 +829,7 @@ svm_fifo_needs_deq_ntf (svm_fifo_t * f, u32 n_last_deq)
   if (PREDICT_TRUE (want_ntf == SVM_FIFO_NO_DEQ_NOTIF))
     return 0;
   else if (want_ntf & SVM_FIFO_WANT_DEQ_NOTIF)
-    return 1;
+    return (svm_fifo_max_enqueue (f) >= f->shr->deq_thresh);
   if (want_ntf & SVM_FIFO_WANT_DEQ_NOTIF_IF_FULL)
     {
       u32 max_deq = svm_fifo_max_dequeue_cons (f);
@@ -901,6 +844,18 @@ svm_fifo_needs_deq_ntf (svm_fifo_t * f, u32 n_last_deq)
 	return 1;
     }
   return 0;
+}
+
+/**
+ * Set the fifo dequeue threshold which will be used for notifications.
+ *
+ * Note: If not set, by default threshold is zero, equivalent to
+ * generating notification on each dequeue event.
+ */
+static inline void
+svm_fifo_set_deq_thresh (svm_fifo_t *f, u32 thresh)
+{
+  f->shr->deq_thresh = thresh;
 }
 
 #endif /* __included_ssvm_fifo_h__ */

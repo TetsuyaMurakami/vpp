@@ -235,23 +235,31 @@ api_trace_clear_capture (vat_main_t * vam)
 
 
 
-#define vl_print(handle, ...) vlib_cli_output (handle, __VA_ARGS__)
 #define vl_endianfun
 #include <tracedump/tracedump.api.h>
 #undef vl_endianfun
 #define vl_printfun
 #include <tracedump/tracedump.api.h>
 #undef vl_printfun
+#define vl_calcsizefun
+#include <tracedump/tracedump.api.h>
+#undef vl_calcsizefun
 
 void
 manual_setup_message_id_table (vat_main_t * vam)
 {
-  vl_msg_api_set_handlers (VL_API_TRACE_DETAILS
-			   + tracedump_test_main.msg_id_base, "trace_details",
-			   vl_api_trace_details_t_handler, vl_noop_handler,
-			   vl_api_trace_details_t_endian,
-			   vl_api_trace_details_t_print,
-			   sizeof (vl_api_trace_details_t), 1);
+  vl_msg_api_config (&(vl_msg_api_msg_config_t){
+    .id = VL_API_TRACE_DETAILS + tracedump_test_main.msg_id_base,
+    .name = "trace_details",
+    .handler = vl_api_trace_details_t_handler,
+    .endian = vl_api_trace_details_t_endian,
+    .format_fn = vl_api_trace_details_t_format,
+    .size = sizeof (vl_api_trace_details_t),
+    .traced = 1,
+    .tojson = vl_api_trace_details_t_tojson,
+    .fromjson = vl_api_trace_details_t_fromjson,
+    .calc_size = vl_api_trace_details_t_calc_size,
+  });
 }
 
 #define VL_API_LOCAL_SETUP_MESSAGE_ID_TABLE manual_setup_message_id_table

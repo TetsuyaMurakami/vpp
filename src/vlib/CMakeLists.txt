@@ -37,11 +37,11 @@ set(VLIB_PROCESS_LOG2_STACK_SIZE
 
 configure_file(
   ${CMAKE_SOURCE_DIR}/vlib/config.h.in
-  ${CMAKE_BINARY_DIR}/vlib/config.h
+  ${CMAKE_CURRENT_BINARY_DIR}/config.h
 )
 install(
-  FILES ${CMAKE_BINARY_DIR}/vlib/config.h
-  DESTINATION include/vlib
+  FILES ${CMAKE_CURRENT_BINARY_DIR}/config.h
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/vlib
   COMPONENT vpp-dev
 )
 
@@ -49,8 +49,8 @@ install(
 # Find lib and include files
 ##############################################################################
 message(STATUS "Looking for libuuid")
-find_path(UUID_INCLUDE_DIR NAMES uuid/uuid.h)
-find_library(UUID_LIB NAMES uuid)
+vpp_find_path(UUID_INCLUDE_DIR NAMES uuid/uuid.h)
+vpp_find_library(UUID_LIB NAMES uuid)
 
 if(UUID_INCLUDE_DIR AND UUID_LIB)
   include_directories(${UUID_INCLUDE_DIR})
@@ -67,6 +67,7 @@ endif()
 add_vpp_library(vlib
   SOURCES
   buffer.c
+  buffer_funcs.c
   cli.c
   counter.c
   drop.c
@@ -87,8 +88,15 @@ add_vpp_library(vlib
   physmem.c
   punt.c
   punt_node.c
+  stats/cli.c
+  stats/collector.c
+  stats/format.c
+  stats/init.c
+  stats/provider_mem.c
+  stats/stats.c
   threads.c
   threads_cli.c
+  time.c
   trace.c
   unix/cli.c
   unix/input.c
@@ -97,8 +105,11 @@ add_vpp_library(vlib
   unix/util.c
   vmbus/vmbus.c
   ${VMBUS_SOURCE}
+  dma/dma.c
+  dma/cli.c
 
   MULTIARCH_SOURCES
+  buffer_funcs.c
   drop.c
   punt_node.c
   node_init.c
@@ -111,6 +122,7 @@ add_vpp_library(vlib
   counter.h
   counter_types.h
   defs.h
+  dma/dma.h
   error_funcs.h
   error.h
   format_funcs.h
@@ -127,7 +139,10 @@ add_vpp_library(vlib
   physmem_funcs.h
   physmem.h
   punt.h
+  stats/shared.h
+  stats/stats.h
   threads.h
+  time.h
   trace_funcs.h
   trace.h
   unix/mc_socket.h

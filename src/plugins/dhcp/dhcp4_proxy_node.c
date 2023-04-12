@@ -370,7 +370,6 @@ dhcp_proxy_to_server_input (vlib_main_t * vm,
 			 DHCP_PROXY_ERROR_ALLOC_FAIL, 1);
 		      continue;
 		    }
-		  VLIB_BUFFER_TRACE_TRAJECTORY_INIT (c0);
 		  ci0 = vlib_get_buffer_index (vm, c0);
 		  server = &proxy->dhcp_servers[ii];
 
@@ -981,16 +980,14 @@ format_dhcp4_proxy_server (u8 * s, va_list * args)
 
   rx_fib = ip4_fib_get (proxy->rx_fib_index);
 
-  s = format (s, "%=14u%=16U",
-	      rx_fib->table_id,
-	      format_ip46_address, &proxy->dhcp_src_address, IP46_TYPE_ANY);
+  s = format (s, "%=14u%=16U", rx_fib->hash.table_id, format_ip46_address,
+	      &proxy->dhcp_src_address, IP46_TYPE_ANY);
 
   vec_foreach (server, proxy->dhcp_servers)
   {
     server_fib = ip4_fib_get (server->server_fib_index);
-    s = format (s, "%u,%U  ",
-		server_fib->table_id,
-		format_ip46_address, &server->dhcp_server, IP46_TYPE_ANY);
+    s = format (s, "%u,%U  ", server_fib->hash.table_id, format_ip46_address,
+		&server->dhcp_server, IP46_TYPE_ANY);
   }
   return s;
 }

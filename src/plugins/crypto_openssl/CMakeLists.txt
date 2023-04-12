@@ -16,11 +16,12 @@ if(NOT OPENSSL_FOUND)
 endif()
 
 include_directories(${OPENSSL_INCLUDE_DIR})
+add_compile_definitions(OPENSSL_SUPPRESS_DEPRECATED)
 
 add_vpp_plugin(crypto_openssl
   SOURCES
   main.c
 
   LINK_LIBRARIES
-  ${OPENSSL_LIBRARIES}
+  ${OPENSSL_CRYPTO_LIBRARIES}
 )

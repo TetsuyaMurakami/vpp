@@ -32,7 +32,6 @@ add_vpp_executable(vpp_api_test ENABLE_EXPORTS
   ip_types_api.c
   ip_types.c
   protocols.def
-  ../vnet/arp/arp_test.c
 
   DEPENDS api_headers
 
@@ -42,7 +41,7 @@ add_vpp_executable(vpp_api_test ENABLE_EXPORTS
   vatplugin
   vppinfra
   Threads::Threads
-  rt m dl crypto
+  dl
 )
 
 ##############################################################################
@@ -58,7 +57,7 @@ add_vpp_executable(vpp_json_test ENABLE_EXPORTS NO_INSTALL
 ##############################################################################
 install(
   FILES vat.h json_format.h
-  DESTINATION include/vat
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/vat
   COMPONENT vpp-dev
 )
 

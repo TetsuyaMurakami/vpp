@@ -47,12 +47,16 @@
 
 #include <vppinfra/os.h>
 #include <vppinfra/string.h>	/* memcpy, clib_memset */
-#include <vppinfra/sanitizer.h>
+#ifdef CLIB_SANITIZE_ADDR
+#include <sanitizer/asan_interface.h>
+#endif
 
 #define CLIB_MAX_MHEAPS 256
 #define CLIB_MAX_NUMAS 16
 #define CLIB_MEM_VM_MAP_FAILED ((void *) ~0)
 #define CLIB_MEM_ERROR (-1)
+#define CLIB_MEM_LOG2_MIN_ALIGN (3)
+#define CLIB_MEM_MIN_ALIGN	(1 << CLIB_MEM_LOG2_MIN_ALIGN)
 
 typedef enum
 {
@@ -93,9 +97,10 @@ typedef struct _clib_mem_vm_map_hdr
   struct _clib_mem_vm_map_hdr *prev, *next;
 } clib_mem_vm_map_hdr_t;
 
-#define foreach_clib_mem_heap_flag \
-  _(0, LOCKED, "locked") \
-  _(1, UNMAP_ON_DESTROY, "unmap-on-destroy")
+#define foreach_clib_mem_heap_flag                                            \
+  _ (0, LOCKED, "locked")                                                     \
+  _ (1, UNMAP_ON_DESTROY, "unmap-on-destroy")                                 \
+  _ (2, TRACED, "traced")
 
 typedef enum
 {
@@ -130,8 +135,11 @@ typedef struct
   /* log2 system page size */
   clib_mem_page_sz_t log2_page_sz;
 
-  /* log2 system default hugepage size */
+  /* log2 default hugepage size */
   clib_mem_page_sz_t log2_default_hugepage_sz;
+
+  /* log2 system default hugepage size */
+  clib_mem_page_sz_t log2_sys_default_hugepage_sz;
 
   /* bitmap of available numa nodes */
   u32 numa_node_bitmap;
@@ -156,6 +164,22 @@ extern clib_mem_main_t clib_mem_main;
 
 /* Unspecified NUMA socket */
 #define VEC_NUMA_UNSPECIFIED (0xFF)
+
+static_always_inline void
+clib_mem_poison (const void volatile *p, uword s)
+{
+#ifdef CLIB_SANITIZE_ADDR
+  ASAN_POISON_MEMORY_REGION (p, s);
+#endif
+}
+
+static_always_inline void
+clib_mem_unpoison (const void volatile *p, uword s)
+{
+#ifdef CLIB_SANITIZE_ADDR
+  ASAN_UNPOISON_MEMORY_REGION (p, s);
+#endif
+}
 
 always_inline clib_mem_heap_t *
 clib_mem_get_per_cpu_heap (void)
@@ -210,77 +234,29 @@ clib_mem_set_thread_index (void)
   ASSERT (__os_thread_index > 0);
 }
 
-always_inline uword
-clib_mem_size_nocheck (void *p)
-{
-  size_t mspace_usable_size_with_delta (const void *p);
-  return mspace_usable_size_with_delta (p);
-}
-
-/* Memory allocator which may call os_out_of_memory() if it fails */
-always_inline void *
-clib_mem_alloc_aligned_at_offset (uword size, uword align, uword align_offset,
-				  int os_out_of_memory_on_failure)
-{
-  void *mspace_get_aligned (void *msp, unsigned long n_user_data_bytes,
-			    unsigned long align, unsigned long align_offset);
-  clib_mem_heap_t *h = clib_mem_get_per_cpu_heap ();
-  void *p;
-
-  if (align_offset > align)
-    {
-      if (align > 0)
-	align_offset %= align;
-      else
-	align_offset = align;
-    }
-
-  p = mspace_get_aligned (h->mspace, size, align, align_offset);
-
-  if (PREDICT_FALSE (0 == p))
-    {
-      if (os_out_of_memory_on_failure)
-	os_out_of_memory ();
-      return 0;
-    }
-
-  CLIB_MEM_UNPOISON (p, size);
-  return p;
-}
-
 /* Memory allocator which calls os_out_of_memory() when it fails */
-always_inline void *
-clib_mem_alloc (uword size)
-{
-  return clib_mem_alloc_aligned_at_offset (size, /* align */ 1,
-					   /* align_offset */ 0,
-					   /* os_out_of_memory */ 1);
-}
+void *clib_mem_alloc (uword size);
+void *clib_mem_alloc_aligned (uword size, uword align);
+void *clib_mem_alloc_or_null (uword size);
+void *clib_mem_alloc_aligned_or_null (uword size, uword align);
+void *clib_mem_realloc (void *p, uword new_size);
+void *clib_mem_realloc_aligned (void *p, uword new_size, uword align);
+uword clib_mem_is_heap_object (void *p);
+void clib_mem_free (void *p);
 
-always_inline void *
-clib_mem_alloc_aligned (uword size, uword align)
-{
-  return clib_mem_alloc_aligned_at_offset (size, align, /* align_offset */ 0,
-					   /* os_out_of_memory */ 1);
-}
+void *clib_mem_heap_alloc (void *heap, uword size);
+void *clib_mem_heap_alloc_aligned (void *heap, uword size, uword align);
+void *clib_mem_heap_alloc_or_null (void *heap, uword size);
+void *clib_mem_heap_alloc_aligned_or_null (void *heap, uword size,
+					   uword align);
+void *clib_mem_heap_realloc (void *heap, void *p, uword new_size);
+void *clib_mem_heap_realloc_aligned (void *heap, void *p, uword new_size,
+				     uword align);
+uword clib_mem_heap_is_heap_object (void *heap, void *p);
+void clib_mem_heap_free (void *heap, void *p);
 
-/* Memory allocator which calls os_out_of_memory() when it fails */
-always_inline void *
-clib_mem_alloc_or_null (uword size)
-{
-  return clib_mem_alloc_aligned_at_offset (size, /* align */ 1,
-					   /* align_offset */ 0,
-					   /* os_out_of_memory */ 0);
-}
-
-always_inline void *
-clib_mem_alloc_aligned_or_null (uword size, uword align)
-{
-  return clib_mem_alloc_aligned_at_offset (size, align, /* align_offset */ 0,
-					   /* os_out_of_memory */ 0);
-}
-
-
+uword clib_mem_size (void *p);
+void clib_mem_free_s (void *p);
 
 /* Memory allocator which panics when it fails.
    Use macro so that clib_panic macro can expand __FUNCTION__ and __LINE__. */
@@ -298,62 +274,6 @@ clib_mem_alloc_aligned_or_null (uword size, uword align)
 
 /* Alias to stack allocator for naming consistency. */
 #define clib_mem_alloc_stack(bytes) __builtin_alloca(bytes)
-
-always_inline uword
-clib_mem_is_heap_object (void *p)
-{
-  int mspace_is_heap_object (void *msp, void *p);
-  clib_mem_heap_t *h = clib_mem_get_per_cpu_heap ();
-  return mspace_is_heap_object (h->mspace, p);
-}
-
-always_inline void
-clib_mem_free (void *p)
-{
-  void mspace_put (void *msp, void *p_arg);
-  clib_mem_heap_t *h = clib_mem_get_per_cpu_heap ();
-
-  /* Make sure object is in the correct heap. */
-  ASSERT (clib_mem_is_heap_object (p));
-
-  CLIB_MEM_POISON (p, clib_mem_size_nocheck (p));
-
-  mspace_put (h->mspace, p);
-}
-
-always_inline void *
-clib_mem_realloc (void *p, uword new_size, uword old_size)
-{
-  /* By default use alloc, copy and free to emulate realloc. */
-  void *q = clib_mem_alloc (new_size);
-  if (q)
-    {
-      uword copy_size;
-      if (old_size < new_size)
-	copy_size = old_size;
-      else
-	copy_size = new_size;
-      clib_memcpy_fast (q, p, copy_size);
-      clib_mem_free (p);
-    }
-  return q;
-}
-
-always_inline uword
-clib_mem_size (void *p)
-{
-  ASSERT (clib_mem_is_heap_object (p));
-  return clib_mem_size_nocheck (p);
-}
-
-always_inline void
-clib_mem_free_s (void *p)
-{
-  uword size = clib_mem_size (p);
-  CLIB_MEM_UNPOISON (p, size);
-  memset_s_inline (p, size, 0, size);
-  clib_mem_free (p);
-}
 
 always_inline clib_mem_heap_t *
 clib_mem_get_heap (void)
@@ -434,7 +354,7 @@ clib_mem_vm_alloc (uword size)
   if (mmap_addr == (void *) -1)
     mmap_addr = 0;
   else
-    CLIB_MEM_UNPOISON (mmap_addr, size);
+    clib_mem_unpoison (mmap_addr, size);
 
   return mmap_addr;
 }
@@ -470,15 +390,26 @@ clib_mem_get_page_size (void)
   return 1ULL << clib_mem_main.log2_page_sz;
 }
 
+static_always_inline void
+clib_mem_set_log2_default_hugepage_size (clib_mem_page_sz_t log2_page_sz)
+{
+  clib_mem_main.log2_default_hugepage_sz = log2_page_sz;
+}
+
 static_always_inline clib_mem_page_sz_t
 clib_mem_get_log2_default_hugepage_size ()
 {
   return clib_mem_main.log2_default_hugepage_sz;
 }
 
+static_always_inline uword
+clib_mem_get_default_hugepage_size (void)
+{
+  return 1ULL << clib_mem_main.log2_default_hugepage_sz;
+}
+
 int clib_mem_vm_create_fd (clib_mem_page_sz_t log2_page_size, char *fmt, ...);
 uword clib_mem_get_fd_page_size (int fd);
-uword clib_mem_get_default_hugepage_size (void);
 clib_mem_page_sz_t clib_mem_get_fd_log2_page_size (int fd);
 uword clib_mem_vm_reserve (uword start, uword size,
 			   clib_mem_page_sz_t log2_page_sz);

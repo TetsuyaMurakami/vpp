@@ -17,6 +17,7 @@
 #include <vlib/vlib.h>
 #include <vnet/vnet.h>
 #include <vppinfra/crc32.h>
+#include <vppinfra/xxhash.h>
 #include <vppinfra/error.h>
 #include <flowprobe/flowprobe.h>
 #include <vnet/ip/ip6_packet.h>
@@ -98,9 +99,12 @@ format_flowprobe_trace (u8 * s, va_list * args)
   return s;
 }
 
-vlib_node_registration_t flowprobe_ip4_node;
-vlib_node_registration_t flowprobe_ip6_node;
-vlib_node_registration_t flowprobe_l2_node;
+vlib_node_registration_t flowprobe_input_ip4_node;
+vlib_node_registration_t flowprobe_input_ip6_node;
+vlib_node_registration_t flowprobe_input_l2_node;
+vlib_node_registration_t flowprobe_output_ip4_node;
+vlib_node_registration_t flowprobe_output_ip6_node;
+vlib_node_registration_t flowprobe_output_l2_node;
 
 /* No counters at the moment */
 #define foreach_flowprobe_error			\
@@ -165,6 +169,11 @@ flowprobe_common_add (vlib_buffer_t * to_b, flowprobe_entry_t * e, u16 offset)
   u32 tx_if = clib_host_to_net_u32 (e->key.tx_sw_if_index);
   clib_memcpy_fast (to_b->data + offset, &tx_if, sizeof (tx_if));
   offset += sizeof (tx_if);
+
+  /* Flow direction
+     0x00: ingress flow
+     0x01: egress flow */
+  to_b->data[offset++] = (e->key.direction == FLOW_DIRECTION_TX);
 
   /* packet delta count */
   u64 packetdelta = clib_host_to_net_u64 (e->packetcount);
@@ -357,13 +366,17 @@ flowprobe_create (u32 my_cpu_number, flowprobe_key_t * k, u32 * poolindex)
 }
 
 static inline void
-add_to_flow_record_state (vlib_main_t * vm, vlib_node_runtime_t * node,
-			  flowprobe_main_t * fm, vlib_buffer_t * b,
+add_to_flow_record_state (vlib_main_t *vm, vlib_node_runtime_t *node,
+			  flowprobe_main_t *fm, vlib_buffer_t *b,
 			  timestamp_nsec_t timestamp, u16 length,
-			  flowprobe_variant_t which, flowprobe_trace_t * t)
+			  flowprobe_variant_t which,
+			  flowprobe_direction_t direction,
+			  flowprobe_trace_t *t)
 {
   if (fm->disabled)
     return;
+
+  ASSERT (direction == FLOW_DIRECTION_RX || direction == FLOW_DIRECTION_TX);
 
   u32 my_cpu_number = vm->thread_index;
   u16 octets = 0;
@@ -371,8 +384,9 @@ add_to_flow_record_state (vlib_main_t * vm, vlib_node_runtime_t * node,
   flowprobe_record_t flags = fm->context[which].flags;
   bool collect_ip4 = false, collect_ip6 = false;
   ASSERT (b);
-  ethernet_header_t *eth = vlib_buffer_get_current (b);
+  ethernet_header_t *eth = ethernet_buffer_get_header (b);
   u16 ethertype = clib_net_to_host_u16 (eth->type);
+  u16 l2_hdr_sz = sizeof (ethernet_header_t);
   /* *INDENT-OFF* */
   flowprobe_key_t k = {};
   /* *INDENT-ON* */
@@ -392,6 +406,7 @@ add_to_flow_record_state (vlib_main_t * vm, vlib_node_runtime_t * node,
   k.tx_sw_if_index = vnet_buffer (b)->sw_if_index[VLIB_TX];
 
   k.which = which;
+  k.direction = direction;
 
   if (flags & FLOW_RECORD_L2)
     {
@@ -399,9 +414,22 @@ add_to_flow_record_state (vlib_main_t * vm, vlib_node_runtime_t * node,
       clib_memcpy_fast (k.dst_mac, eth->dst_address, 6);
       k.ethertype = ethertype;
     }
+  if (ethertype == ETHERNET_TYPE_VLAN)
+    {
+      /*VLAN TAG*/
+      ethernet_vlan_header_tv_t *ethv =
+	(ethernet_vlan_header_tv_t *) (&(eth->type));
+      /*Q in Q possibility */
+      while (clib_net_to_host_u16 (ethv->type) == ETHERNET_TYPE_VLAN)
+	{
+	  ethv++;
+	  l2_hdr_sz += sizeof (ethernet_vlan_header_tv_t);
+	}
+      k.ethertype = ethertype = clib_net_to_host_u16 ((ethv)->type);
+    }
   if (collect_ip6 && ethertype == ETHERNET_TYPE_IP6)
     {
-      ip6 = (ip6_header_t *) (eth + 1);
+      ip6 = (ip6_header_t *) (b->data + l2_hdr_sz);
       if (flags & FLOW_RECORD_L3)
 	{
 	  k.src_address.as_u64[0] = ip6->src_address.as_u64[0];
@@ -420,7 +448,7 @@ add_to_flow_record_state (vlib_main_t * vm, vlib_node_runtime_t * node,
     }
   if (collect_ip4 && ethertype == ETHERNET_TYPE_IP4)
     {
-      ip4 = (ip4_header_t *) (eth + 1);
+      ip4 = (ip4_header_t *) (b->data + l2_hdr_sz);
       if (flags & FLOW_RECORD_L3)
 	{
 	  k.src_address.ip4.as_u32 = ip4->src_address.as_u32;
@@ -520,6 +548,7 @@ flowprobe_export_send (vlib_main_t * vm, vlib_buffer_t * b0,
 {
   flowprobe_main_t *fm = &flowprobe_main;
   flow_report_main_t *frm = &flow_report_main;
+  ipfix_exporter_t *exp = pool_elt_at_index (frm->exporters, 0);
   vlib_frame_t *f;
   ip4_ipfix_template_packet_t *tp;
   ipfix_set_header_t *s;
@@ -537,19 +566,19 @@ flowprobe_export_send (vlib_main_t * vm, vlib_buffer_t * b0,
       flowprobe_get_headersize ())
     return;
 
-  u32 i, index = vec_len (frm->streams);
+  u32 i, index = vec_len (exp->streams);
   for (i = 0; i < index; i++)
-    if (frm->streams[i].domain_id == 1)
+    if (exp->streams[i].domain_id == 1)
       {
 	index = i;
 	break;
       }
-  if (i == vec_len (frm->streams))
+  if (i == vec_len (exp->streams))
     {
-      vec_validate (frm->streams, index);
-      frm->streams[index].domain_id = 1;
+      vec_validate (exp->streams, index);
+      exp->streams[index].domain_id = 1;
     }
-  stream = &frm->streams[index];
+  stream = &exp->streams[index];
 
   tp = vlib_buffer_get_current (b0);
   ip = (ip4_header_t *) & tp->ip4;
@@ -561,10 +590,10 @@ flowprobe_export_send (vlib_main_t * vm, vlib_buffer_t * b0,
   ip->ttl = 254;
   ip->protocol = IP_PROTOCOL_UDP;
   ip->flags_and_fragment_offset = 0;
-  ip->src_address.as_u32 = frm->src_address.as_u32;
-  ip->dst_address.as_u32 = frm->ipfix_collector.as_u32;
+  ip->src_address.as_u32 = exp->src_address.ip.ip4.as_u32;
+  ip->dst_address.as_u32 = exp->ipfix_collector.ip.ip4.as_u32;
   udp->src_port = clib_host_to_net_u16 (stream->src_port);
-  udp->dst_port = clib_host_to_net_u16 (frm->collector_port);
+  udp->dst_port = clib_host_to_net_u16 (exp->collector_port);
   udp->checksum = 0;
 
   /* FIXUP: message header export_time */
@@ -590,7 +619,7 @@ flowprobe_export_send (vlib_main_t * vm, vlib_buffer_t * b0,
   ip->checksum = ip4_header_checksum (ip);
   udp->length = clib_host_to_net_u16 (b0->current_length - sizeof (*ip));
 
-  if (frm->udp_checksum)
+  if (exp->udp_checksum)
     {
       /* RFC 7011 section 10.3.2. */
       udp->checksum = ip4_tcp_udp_compute_checksum (vm, b0, ip);
@@ -616,7 +645,7 @@ flowprobe_export_send (vlib_main_t * vm, vlib_buffer_t * b0,
     }
 
   vlib_put_frame_to_node (vm, ip4_lookup_node.index, f);
-  vlib_node_increment_counter (vm, flowprobe_l2_node.index,
+  vlib_node_increment_counter (vm, flowprobe_output_l2_node.index,
 			       FLOWPROBE_ERROR_EXPORTED_PACKETS, 1);
 
   fm->context[which].frames_per_worker[my_cpu_number] = 0;
@@ -629,7 +658,7 @@ static vlib_buffer_t *
 flowprobe_get_buffer (vlib_main_t * vm, flowprobe_variant_t which)
 {
   flowprobe_main_t *fm = &flowprobe_main;
-  flow_report_main_t *frm = &flow_report_main;
+  ipfix_exporter_t *exp = pool_elt_at_index (flow_report_main.exporters, 0);
   vlib_buffer_t *b0;
   u32 bi0;
   u32 my_cpu_number = vm->thread_index;
@@ -642,7 +671,7 @@ flowprobe_get_buffer (vlib_main_t * vm, flowprobe_variant_t which)
     {
       if (vlib_buffer_alloc (vm, &bi0, 1) != 1)
 	{
-	  vlib_node_increment_counter (vm, flowprobe_l2_node.index,
+	  vlib_node_increment_counter (vm, flowprobe_output_l2_node.index,
 				       FLOWPROBE_ERROR_BUFFER, 1);
 	  return 0;
 	}
@@ -650,14 +679,13 @@ flowprobe_get_buffer (vlib_main_t * vm, flowprobe_variant_t which)
       /* Initialize the buffer */
       b0 = fm->context[which].buffers_per_worker[my_cpu_number] =
 	vlib_get_buffer (vm, bi0);
-      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b0);
 
       b0->current_data = 0;
       b0->current_length = flowprobe_get_headersize ();
       b0->flags |=
 	(VLIB_BUFFER_TOTAL_LENGTH_VALID | VNET_BUFFER_F_FLOW_REPORT);
       vnet_buffer (b0)->sw_if_index[VLIB_RX] = 0;
-      vnet_buffer (b0)->sw_if_index[VLIB_TX] = frm->fib_index;
+      vnet_buffer (b0)->sw_if_index[VLIB_TX] = exp->fib_index;
       fm->context[which].next_record_offset_per_worker[my_cpu_number] =
 	b0->current_length;
     }
@@ -670,7 +698,7 @@ flowprobe_export_entry (vlib_main_t * vm, flowprobe_entry_t * e)
 {
   u32 my_cpu_number = vm->thread_index;
   flowprobe_main_t *fm = &flowprobe_main;
-  flow_report_main_t *frm = &flow_report_main;
+  ipfix_exporter_t *exp = pool_elt_at_index (flow_report_main.exporters, 0);
   vlib_buffer_t *b0;
   bool collect_ip4 = false, collect_ip6 = false;
   flowprobe_variant_t which = e->key.which;
@@ -712,14 +740,14 @@ flowprobe_export_entry (vlib_main_t * vm, flowprobe_entry_t * e)
 
   fm->context[which].next_record_offset_per_worker[my_cpu_number] = offset;
   /* Time to flush the buffer? */
-  if (offset + fm->template_size[flags] > frm->path_mtu)
+  if (offset + fm->template_size[flags] > exp->path_mtu)
     flowprobe_export_send (vm, b0, which);
 }
 
 uword
-flowprobe_node_fn (vlib_main_t * vm,
-		   vlib_node_runtime_t * node, vlib_frame_t * frame,
-		   flowprobe_variant_t which)
+flowprobe_node_fn (vlib_main_t *vm, vlib_node_runtime_t *node,
+		   vlib_frame_t *frame, flowprobe_variant_t which,
+		   flowprobe_direction_t direction)
 {
   u32 n_left_from, *from, *to_next;
   flowprobe_next_t next_index;
@@ -756,8 +784,8 @@ flowprobe_node_fn (vlib_main_t * vm,
 	    vlib_prefetch_buffer_header (p2, LOAD);
 	    vlib_prefetch_buffer_header (p3, LOAD);
 
-	    CLIB_PREFETCH (p2->data, CLIB_CACHE_LINE_BYTES, STORE);
-	    CLIB_PREFETCH (p3->data, CLIB_CACHE_LINE_BYTES, STORE);
+	    clib_prefetch_store (p2->data);
+	    clib_prefetch_store (p3->data);
 	  }
 
 	  /* speculatively enqueue b0 and b1 to the current next frame */
@@ -779,20 +807,22 @@ flowprobe_node_fn (vlib_main_t * vm,
 	  u16 ethertype0 = clib_net_to_host_u16 (eh0->type);
 
 	  if (PREDICT_TRUE ((b0->flags & VNET_BUFFER_F_FLOW_REPORT) == 0))
-	    add_to_flow_record_state (vm, node, fm, b0, timestamp, len0,
-				      flowprobe_get_variant
-				      (which, fm->context[which].flags,
-				       ethertype0), 0);
+	    add_to_flow_record_state (
+	      vm, node, fm, b0, timestamp, len0,
+	      flowprobe_get_variant (which, fm->context[which].flags,
+				     ethertype0),
+	      direction, 0);
 
 	  len1 = vlib_buffer_length_in_chain (vm, b1);
 	  ethernet_header_t *eh1 = vlib_buffer_get_current (b1);
 	  u16 ethertype1 = clib_net_to_host_u16 (eh1->type);
 
 	  if (PREDICT_TRUE ((b1->flags & VNET_BUFFER_F_FLOW_REPORT) == 0))
-	    add_to_flow_record_state (vm, node, fm, b1, timestamp, len1,
-				      flowprobe_get_variant
-				      (which, fm->context[which].flags,
-				       ethertype1), 0);
+	    add_to_flow_record_state (
+	      vm, node, fm, b1, timestamp, len1,
+	      flowprobe_get_variant (which, fm->context[which].flags,
+				     ethertype1),
+	      direction, 0);
 
 	  /* verify speculative enqueues, maybe switch current next frame */
 	  vlib_validate_buffer_enqueue_x2 (vm, node, next_index,
@@ -830,10 +860,11 @@ flowprobe_node_fn (vlib_main_t * vm,
 				 && (b0->flags & VLIB_BUFFER_IS_TRACED)))
 		t = vlib_add_trace (vm, node, b0, sizeof (*t));
 
-	      add_to_flow_record_state (vm, node, fm, b0, timestamp, len0,
-					flowprobe_get_variant
-					(which, fm->context[which].flags,
-					 ethertype0), t);
+	      add_to_flow_record_state (
+		vm, node, fm, b0, timestamp, len0,
+		flowprobe_get_variant (which, fm->context[which].flags,
+				       ethertype0),
+		direction, t);
 	    }
 
 	  /* verify speculative enqueue, maybe switch current next frame */
@@ -848,24 +879,51 @@ flowprobe_node_fn (vlib_main_t * vm,
 }
 
 static uword
-flowprobe_ip4_node_fn (vlib_main_t * vm,
-		       vlib_node_runtime_t * node, vlib_frame_t * frame)
+flowprobe_input_ip4_node_fn (vlib_main_t *vm, vlib_node_runtime_t *node,
+			     vlib_frame_t *frame)
 {
-  return flowprobe_node_fn (vm, node, frame, FLOW_VARIANT_IP4);
+  return flowprobe_node_fn (vm, node, frame, FLOW_VARIANT_IP4,
+			    FLOW_DIRECTION_RX);
 }
 
 static uword
-flowprobe_ip6_node_fn (vlib_main_t * vm,
-		       vlib_node_runtime_t * node, vlib_frame_t * frame)
+flowprobe_input_ip6_node_fn (vlib_main_t *vm, vlib_node_runtime_t *node,
+			     vlib_frame_t *frame)
 {
-  return flowprobe_node_fn (vm, node, frame, FLOW_VARIANT_IP6);
+  return flowprobe_node_fn (vm, node, frame, FLOW_VARIANT_IP6,
+			    FLOW_DIRECTION_RX);
 }
 
 static uword
-flowprobe_l2_node_fn (vlib_main_t * vm,
-		      vlib_node_runtime_t * node, vlib_frame_t * frame)
+flowprobe_input_l2_node_fn (vlib_main_t *vm, vlib_node_runtime_t *node,
+			    vlib_frame_t *frame)
 {
-  return flowprobe_node_fn (vm, node, frame, FLOW_VARIANT_L2);
+  return flowprobe_node_fn (vm, node, frame, FLOW_VARIANT_L2,
+			    FLOW_DIRECTION_RX);
+}
+
+static uword
+flowprobe_output_ip4_node_fn (vlib_main_t *vm, vlib_node_runtime_t *node,
+			      vlib_frame_t *frame)
+{
+  return flowprobe_node_fn (vm, node, frame, FLOW_VARIANT_IP4,
+			    FLOW_DIRECTION_TX);
+}
+
+static uword
+flowprobe_output_ip6_node_fn (vlib_main_t *vm, vlib_node_runtime_t *node,
+			      vlib_frame_t *frame)
+{
+  return flowprobe_node_fn (vm, node, frame, FLOW_VARIANT_IP6,
+			    FLOW_DIRECTION_TX);
+}
+
+static uword
+flowprobe_output_l2_node_fn (vlib_main_t *vm, vlib_node_runtime_t *node,
+			     vlib_frame_t *frame)
+{
+  return flowprobe_node_fn (vm, node, frame, FLOW_VARIANT_L2,
+			    FLOW_DIRECTION_TX);
 }
 
 static inline void
@@ -923,14 +981,15 @@ flowprobe_walker_process (vlib_main_t * vm,
 			  vlib_node_runtime_t * rt, vlib_frame_t * f)
 {
   flowprobe_main_t *fm = &flowprobe_main;
-  flow_report_main_t *frm = &flow_report_main;
   flowprobe_entry_t *e;
+  ipfix_exporter_t *exp = pool_elt_at_index (flow_report_main.exporters, 0);
 
   /*
    * $$$$ Remove this check from here and track FRM status and disable
    * this process if required.
    */
-  if (frm->ipfix_collector.as_u32 == 0 || frm->src_address.as_u32 == 0)
+  if (ip_address_is_zero (&exp->ipfix_collector) ||
+      ip_address_is_zero (&exp->src_address))
     {
       fm->disabled = true;
       return 0;
@@ -998,35 +1057,68 @@ flowprobe_walker_process (vlib_main_t * vm,
 }
 
 /* *INDENT-OFF* */
-VLIB_REGISTER_NODE (flowprobe_ip4_node) = {
-  .function = flowprobe_ip4_node_fn,
-  .name = "flowprobe-ip4",
+VLIB_REGISTER_NODE (flowprobe_input_ip4_node) = {
+  .function = flowprobe_input_ip4_node_fn,
+  .name = "flowprobe-input-ip4",
   .vector_size = sizeof (u32),
   .format_trace = format_flowprobe_trace,
   .type = VLIB_NODE_TYPE_INTERNAL,
-  .n_errors = ARRAY_LEN(flowprobe_error_strings),
+  .n_errors = ARRAY_LEN (flowprobe_error_strings),
   .error_strings = flowprobe_error_strings,
   .n_next_nodes = FLOWPROBE_N_NEXT,
   .next_nodes = FLOWPROBE_NEXT_NODES,
 };
-VLIB_REGISTER_NODE (flowprobe_ip6_node) = {
-  .function = flowprobe_ip6_node_fn,
-  .name = "flowprobe-ip6",
+VLIB_REGISTER_NODE (flowprobe_input_ip6_node) = {
+  .function = flowprobe_input_ip6_node_fn,
+  .name = "flowprobe-input-ip6",
   .vector_size = sizeof (u32),
   .format_trace = format_flowprobe_trace,
   .type = VLIB_NODE_TYPE_INTERNAL,
-  .n_errors = ARRAY_LEN(flowprobe_error_strings),
+  .n_errors = ARRAY_LEN (flowprobe_error_strings),
   .error_strings = flowprobe_error_strings,
   .n_next_nodes = FLOWPROBE_N_NEXT,
   .next_nodes = FLOWPROBE_NEXT_NODES,
 };
-VLIB_REGISTER_NODE (flowprobe_l2_node) = {
-  .function = flowprobe_l2_node_fn,
-  .name = "flowprobe-l2",
+VLIB_REGISTER_NODE (flowprobe_input_l2_node) = {
+  .function = flowprobe_input_l2_node_fn,
+  .name = "flowprobe-input-l2",
   .vector_size = sizeof (u32),
   .format_trace = format_flowprobe_trace,
   .type = VLIB_NODE_TYPE_INTERNAL,
-  .n_errors = ARRAY_LEN(flowprobe_error_strings),
+  .n_errors = ARRAY_LEN (flowprobe_error_strings),
+  .error_strings = flowprobe_error_strings,
+  .n_next_nodes = FLOWPROBE_N_NEXT,
+  .next_nodes = FLOWPROBE_NEXT_NODES,
+};
+VLIB_REGISTER_NODE (flowprobe_output_ip4_node) = {
+  .function = flowprobe_output_ip4_node_fn,
+  .name = "flowprobe-output-ip4",
+  .vector_size = sizeof (u32),
+  .format_trace = format_flowprobe_trace,
+  .type = VLIB_NODE_TYPE_INTERNAL,
+  .n_errors = ARRAY_LEN (flowprobe_error_strings),
+  .error_strings = flowprobe_error_strings,
+  .n_next_nodes = FLOWPROBE_N_NEXT,
+  .next_nodes = FLOWPROBE_NEXT_NODES,
+};
+VLIB_REGISTER_NODE (flowprobe_output_ip6_node) = {
+  .function = flowprobe_output_ip6_node_fn,
+  .name = "flowprobe-output-ip6",
+  .vector_size = sizeof (u32),
+  .format_trace = format_flowprobe_trace,
+  .type = VLIB_NODE_TYPE_INTERNAL,
+  .n_errors = ARRAY_LEN (flowprobe_error_strings),
+  .error_strings = flowprobe_error_strings,
+  .n_next_nodes = FLOWPROBE_N_NEXT,
+  .next_nodes = FLOWPROBE_NEXT_NODES,
+};
+VLIB_REGISTER_NODE (flowprobe_output_l2_node) = {
+  .function = flowprobe_output_l2_node_fn,
+  .name = "flowprobe-output-l2",
+  .vector_size = sizeof (u32),
+  .format_trace = format_flowprobe_trace,
+  .type = VLIB_NODE_TYPE_INTERNAL,
+  .n_errors = ARRAY_LEN (flowprobe_error_strings),
   .error_strings = flowprobe_error_strings,
   .n_next_nodes = FLOWPROBE_N_NEXT,
   .next_nodes = FLOWPROBE_NEXT_NODES,

@@ -14,18 +14,13 @@
 add_vpp_library (vlibmemory
   SOURCES
   memory_api.c
-  memory_shared.c
-  memory_client.c
-  socket_client.c
   socket_api.c
-  vlib_api.c
+  memclnt_api.c
   vlib_api_cli.c
-  ../vlibapi/api_shared.c
-  ../vlibapi/node_serialize.c
+  vlib_api.c
 
   INSTALL_HEADERS
   vl_memory_msg_enum.h
-  memory_shared.h
   vl_memory_api_h.h
   socket_client.h
   memory_api.h
@@ -35,19 +30,30 @@ add_vpp_library (vlibmemory
 
   API_FILES
   memclnt.api
+  vlib.api
 
-  LINK_LIBRARIES vppinfra svm vlib
+  LINK_LIBRARIES vppinfra svm vlib vlibapi
 )
 add_dependencies(vlibmemory vlibmemory_api_headers)
 
 add_vpp_library (vlibmemoryclient
   SOURCES
-  memory_shared.c
   memory_client.c
   socket_client.c
-  ../vlibapi/api_shared.c
-  ../vlibapi/node_serialize.c
 
-  LINK_LIBRARIES vppinfra svm
+  LINK_LIBRARIES vppinfra svm vlibapi
 )
 add_dependencies(vlibmemoryclient vlibmemory_api_headers)
+
+add_vat_test_library(vlib
+  vlibapi_test.c
+)
+##############################################################################
+# VAT2 plugins
+##############################################################################
+add_vpp_test_library(vlibmemoryclient
+  memclnt.api
+)
+add_vpp_test_library(vlibmemory
+    vlib.api
+)

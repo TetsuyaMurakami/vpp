@@ -38,6 +38,25 @@ vcl_mq_evt_conn_get (vcl_worker_t * wrk, u32 mq_conn_idx)
   return pool_elt_at_index (wrk->mq_evt_conns, mq_conn_idx);
 }
 
+/* Add unix socket to epoll.
+ * Used only to get a notification on socket close
+ * We can't use eventfd because we don't get notifications on that fds
+ */
+static int
+vcl_mq_epoll_add_api_sock (vcl_worker_t *wrk)
+{
+  clib_socket_t *cs = &wrk->app_api_sock;
+  struct epoll_event e = { 0 };
+  int rv;
+
+  e.data.u32 = ~0;
+  rv = epoll_ctl (wrk->mqs_epfd, EPOLL_CTL_ADD, cs->fd, &e);
+  if (rv != EEXIST && rv < 0)
+    return -1;
+
+  return 0;
+}
+
 int
 vcl_mq_epoll_add_evfd (vcl_worker_t * wrk, svm_msg_q_t * mq)
 {
@@ -61,6 +80,12 @@ vcl_mq_epoll_add_evfd (vcl_worker_t * wrk, svm_msg_q_t * mq)
   if (epoll_ctl (wrk->mqs_epfd, EPOLL_CTL_ADD, mq_fd, &e) < 0)
     {
       VDBG (0, "failed to add mq eventfd to mq epoll fd");
+      return -1;
+    }
+
+  if (vcl_mq_epoll_add_api_sock (wrk))
+    {
+      VDBG (0, "failed to add mq socket to mq epoll fd");
       return -1;
     }
 
@@ -113,6 +138,9 @@ vcl_api_app_worker_add (void)
 void
 vcl_api_app_worker_del (vcl_worker_t * wrk)
 {
+  if (wrk->api_client_handle == ~0)
+    return;
+
   if (vcm->cfg.vpp_app_socket_api)
     return vcl_sapi_app_worker_del (wrk);
 
@@ -128,9 +156,16 @@ vcl_worker_cleanup (vcl_worker_t * wrk, u8 notify_vpp)
 
   if (wrk->mqs_epfd > 0)
     close (wrk->mqs_epfd);
+  pool_free (wrk->sessions);
+  pool_free (wrk->mq_evt_conns);
   hash_free (wrk->session_index_by_vpp_handles);
   vec_free (wrk->mq_events);
   vec_free (wrk->mq_msg_vector);
+  vec_free (wrk->unhandled_evts_vector);
+  vec_free (wrk->pending_session_wrk_updates);
+  clib_bitmap_free (wrk->rd_bitmap);
+  clib_bitmap_free (wrk->wr_bitmap);
+  clib_bitmap_free (wrk->ex_bitmap);
   vcl_worker_free (wrk);
   clib_spinlock_unlock (&vcm->workers_lock);
 }
@@ -138,11 +173,59 @@ vcl_worker_cleanup (vcl_worker_t * wrk, u8 notify_vpp)
 static void
 vcl_worker_cleanup_cb (void *arg)
 {
-  vcl_worker_t *wrk = vcl_worker_get_current ();
-  u32 wrk_index = wrk->wrk_index;
+  vcl_worker_t *wrk;
+  u32 wrk_index;
+
+  wrk_index = vcl_get_worker_index ();
+  wrk = vcl_worker_get_if_valid (wrk_index);
+  if (!wrk)
+    return;
+
   vcl_worker_cleanup (wrk, 1 /* notify vpp */ );
   vcl_set_worker_index (~0);
   VDBG (0, "cleaned up worker %u", wrk_index);
+}
+
+void
+vcl_worker_detach_sessions (vcl_worker_t *wrk)
+{
+  session_event_t *e;
+  vcl_session_t *s;
+  uword *seg_indices_map = 0;
+  u32 seg_index, val, *seg_indices = 0;
+
+  close (wrk->app_api_sock.fd);
+  pool_foreach (s, wrk->sessions)
+    {
+      if (s->session_state == VCL_STATE_LISTEN)
+	{
+	  s->session_state = VCL_STATE_LISTEN_NO_MQ;
+	  continue;
+	}
+      if ((s->flags & VCL_SESSION_F_IS_VEP) ||
+	  s->session_state == VCL_STATE_LISTEN_NO_MQ ||
+	  s->session_state == VCL_STATE_CLOSED)
+	continue;
+
+      hash_set (seg_indices_map, s->tx_fifo->segment_index, 1);
+
+      s->session_state = VCL_STATE_DETACHED;
+      vec_add2 (wrk->unhandled_evts_vector, e, 1);
+      e->event_type = SESSION_CTRL_EVT_DISCONNECTED;
+      e->session_index = s->session_index;
+      e->postponed = 1;
+    }
+
+  hash_foreach (seg_index, val, seg_indices_map,
+		({ vec_add1 (seg_indices, seg_index); }));
+
+  vcl_segment_detach_segments (seg_indices);
+
+  /* Detach worker's mqs segment */
+  vcl_segment_detach (vcl_vpp_worker_segment_handle (wrk->wrk_index));
+
+  vec_free (seg_indices);
+  hash_free (seg_indices_map);
 }
 
 vcl_worker_t *
@@ -154,18 +237,22 @@ vcl_worker_alloc_and_init ()
   if (vcl_get_worker_index () != ~0)
     return 0;
 
+  /* Grab lock before selecting mem thread index */
+  clib_spinlock_lock (&vcm->workers_lock);
+
   /* Use separate heap map entry for worker */
   clib_mem_set_thread_index ();
 
   if (pool_elts (vcm->workers) == vcm->cfg.max_workers)
     {
       VDBG (0, "max-workers %u limit reached", vcm->cfg.max_workers);
-      return 0;
+      wrk = 0;
+      goto done;
     }
 
-  clib_spinlock_lock (&vcm->workers_lock);
   wrk = vcl_worker_alloc ();
   vcl_set_worker_index (wrk->wrk_index);
+  wrk->api_client_handle = ~0;
   wrk->thread_id = pthread_self ();
   wrk->current_pid = getpid ();
 
@@ -182,6 +269,7 @@ vcl_worker_alloc_and_init ()
 	}
     }
 
+  wrk->ep_lt_current = VCL_INVALID_SESSION_INDEX;
   wrk->session_index_by_vpp_handles = hash_create (0, sizeof (uword));
   clib_time_init (&wrk->clib_time);
   vec_validate (wrk->mq_events, 64);
@@ -189,9 +277,9 @@ vcl_worker_alloc_and_init ()
   vec_reset_length (wrk->mq_msg_vector);
   vec_validate (wrk->unhandled_evts_vector, 128);
   vec_reset_length (wrk->unhandled_evts_vector);
-  clib_spinlock_unlock (&vcm->workers_lock);
 
 done:
+  clib_spinlock_unlock (&vcm->workers_lock);
   return wrk;
 }
 
@@ -302,11 +390,30 @@ vcl_session_write_ready (vcl_session_t * s)
       else
 	return VPPCOM_EBADFD;
     }
+  else if (s->session_state == VCL_STATE_UPDATED)
+    {
+      return 0;
+    }
   else
     {
       return (s->session_state == VCL_STATE_DISCONNECT) ?
 	VPPCOM_ECONNRESET : VPPCOM_ENOTCONN;
     }
+}
+
+int
+vcl_session_alloc_ext_cfg (vcl_session_t *s,
+			   transport_endpt_ext_cfg_type_t type, u32 len)
+{
+  if (s->ext_config)
+    return -1;
+
+  s->ext_config = clib_mem_alloc (len);
+  clib_memset (s->ext_config, 0, len);
+  s->ext_config->len = len;
+  s->ext_config->type = type;
+
+  return 0;
 }
 
 int
@@ -328,13 +435,14 @@ vcl_segment_attach (u64 segment_handle, char *name, ssvm_segment_type_t type,
   if ((rv = fifo_segment_attach (&vcm->segment_main, a)))
     {
       clib_warning ("svm_fifo_segment_attach ('%s') failed", name);
+      clib_rwlock_writer_unlock (&vcm->segment_table_lock);
       return rv;
     }
   hash_set (vcm->segment_table, segment_handle, a->new_segment_indices[0]);
 
   clib_rwlock_writer_unlock (&vcm->segment_table_lock);
 
-  vec_reset_length (a->new_segment_indices);
+  vec_free (a->new_segment_indices);
   return 0;
 }
 
@@ -374,10 +482,40 @@ vcl_segment_detach (u64 segment_handle)
   VDBG (0, "detached segment %u handle %u", segment_index, segment_handle);
 }
 
+void
+vcl_segment_detach_segments (u32 *seg_indices)
+{
+  u64 *seg_handles = 0, *seg_handle, key;
+  u32 *seg_index;
+  u32 val;
+
+  clib_rwlock_reader_lock (&vcm->segment_table_lock);
+
+  vec_foreach (seg_index, seg_indices)
+    {
+      /* clang-format off */
+      hash_foreach (key, val, vcm->segment_table, ({
+        if (val == *seg_index)
+          {
+            vec_add1 (seg_handles, key);
+            break;
+          }
+      }));
+      /* clang-format on */
+    }
+
+  clib_rwlock_reader_unlock (&vcm->segment_table_lock);
+
+  vec_foreach (seg_handle, seg_handles)
+    vcl_segment_detach (seg_handle[0]);
+
+  vec_free (seg_handles);
+}
+
 int
 vcl_segment_attach_session (uword segment_handle, uword rxf_offset,
-			    uword txf_offset, uword mq_offset, u8 is_ct,
-			    vcl_session_t *s)
+			    uword txf_offset, uword mq_offset, u32 mq_index,
+			    u8 is_ct, vcl_session_t *s)
 {
   u32 fs_index, eqs_index;
   svm_fifo_t *rxf, *txf;
@@ -404,12 +542,13 @@ vcl_segment_attach_session (uword segment_handle, uword rxf_offset,
   fs = fifo_segment_get_segment (&vcm->segment_main, fs_index);
   rxf = fifo_segment_alloc_fifo_w_offset (fs, rxf_offset);
   txf = fifo_segment_alloc_fifo_w_offset (fs, txf_offset);
+  rxf->segment_index = fs_index;
+  txf->segment_index = fs_index;
 
   if (!is_ct && mq_offset != (uword) ~0)
     {
       fs = fifo_segment_get_segment (&vcm->segment_main, eqs_index);
-      s->vpp_evt_q =
-	fifo_segment_msg_q_attach (fs, mq_offset, rxf->shr->slice_index);
+      s->vpp_evt_q = fifo_segment_msg_q_attach (fs, mq_offset, mq_index);
     }
 
   clib_rwlock_reader_unlock (&vcm->segment_table_lock);
@@ -430,6 +569,38 @@ vcl_segment_attach_session (uword segment_handle, uword rxf_offset,
     }
 
   return 0;
+}
+
+void
+vcl_session_detach_fifos (vcl_session_t *s)
+{
+  fifo_segment_t *fs;
+
+  if (!s->rx_fifo)
+    return;
+
+  clib_rwlock_reader_lock (&vcm->segment_table_lock);
+
+  fs = fifo_segment_get_segment_if_valid (&vcm->segment_main,
+					  s->rx_fifo->segment_index);
+  if (!fs)
+    goto done;
+
+  fifo_segment_free_client_fifo (fs, s->rx_fifo);
+  fifo_segment_free_client_fifo (fs, s->tx_fifo);
+  if (s->ct_rx_fifo)
+    {
+      fs = fifo_segment_get_segment_if_valid (&vcm->segment_main,
+					      s->ct_rx_fifo->segment_index);
+      if (!fs)
+	goto done;
+
+      fifo_segment_free_client_fifo (fs, s->ct_rx_fifo);
+      fifo_segment_free_client_fifo (fs, s->ct_tx_fifo);
+    }
+
+done:
+  clib_rwlock_reader_unlock (&vcm->segment_table_lock);
 }
 
 int
@@ -477,6 +648,172 @@ vcl_segment_discover_mqs (uword segment_handle, int *fds, u32 n_fds)
   clib_rwlock_reader_unlock (&vcm->segment_table_lock);
 
   return 0;
+}
+
+svm_fifo_chunk_t *
+vcl_segment_alloc_chunk (uword segment_handle, u32 slice_index, u32 size,
+			 uword *offset)
+{
+  svm_fifo_chunk_t *c;
+  fifo_segment_t *fs;
+  u32 fs_index;
+
+  fs_index = vcl_segment_table_lookup (segment_handle);
+  if (fs_index == VCL_INVALID_SEGMENT_INDEX)
+    {
+      VDBG (0, "ERROR: mq segment %lx for is not attached!", segment_handle);
+      return 0;
+    }
+
+  clib_rwlock_reader_lock (&vcm->segment_table_lock);
+
+  fs = fifo_segment_get_segment (&vcm->segment_main, fs_index);
+  c = fifo_segment_alloc_chunk_w_slice (fs, slice_index, size);
+  *offset = fifo_segment_chunk_offset (fs, c);
+
+  clib_rwlock_reader_unlock (&vcm->segment_table_lock);
+
+  return c;
+}
+
+int
+vcl_session_share_fifos (vcl_session_t *s, svm_fifo_t *rxf, svm_fifo_t *txf)
+{
+  vcl_worker_t *wrk = vcl_worker_get_current ();
+  fifo_segment_t *fs;
+
+  clib_rwlock_reader_lock (&vcm->segment_table_lock);
+
+  fs = fifo_segment_get_segment (&vcm->segment_main, rxf->segment_index);
+  s->rx_fifo = fifo_segment_duplicate_fifo (fs, rxf);
+  s->tx_fifo = fifo_segment_duplicate_fifo (fs, txf);
+
+  clib_rwlock_reader_unlock (&vcm->segment_table_lock);
+
+  svm_fifo_add_subscriber (s->rx_fifo, wrk->vpp_wrk_index);
+  svm_fifo_add_subscriber (s->tx_fifo, wrk->vpp_wrk_index);
+
+  return 0;
+}
+
+const char *
+vcl_session_state_str (vcl_session_state_t state)
+{
+  char *st;
+
+  switch (state)
+    {
+    case VCL_STATE_CLOSED:
+      st = "STATE_CLOSED";
+      break;
+    case VCL_STATE_LISTEN:
+      st = "STATE_LISTEN";
+      break;
+    case VCL_STATE_READY:
+      st = "STATE_READY";
+      break;
+    case VCL_STATE_VPP_CLOSING:
+      st = "STATE_VPP_CLOSING";
+      break;
+    case VCL_STATE_DISCONNECT:
+      st = "STATE_DISCONNECT";
+      break;
+    case VCL_STATE_DETACHED:
+      st = "STATE_DETACHED";
+      break;
+    case VCL_STATE_UPDATED:
+      st = "STATE_UPDATED";
+      break;
+    case VCL_STATE_LISTEN_NO_MQ:
+      st = "STATE_LISTEN_NO_MQ";
+      break;
+    default:
+      st = "UNKNOWN_STATE";
+      break;
+    }
+
+  return st;
+}
+
+u8 *
+vcl_format_ip4_address (u8 *s, va_list *args)
+{
+  u8 *a = va_arg (*args, u8 *);
+  return format (s, "%d.%d.%d.%d", a[0], a[1], a[2], a[3]);
+}
+
+u8 *
+vcl_format_ip6_address (u8 *s, va_list *args)
+{
+  ip6_address_t *a = va_arg (*args, ip6_address_t *);
+  u32 i, i_max_n_zero, max_n_zeros, i_first_zero, n_zeros, last_double_colon;
+
+  i_max_n_zero = ARRAY_LEN (a->as_u16);
+  max_n_zeros = 0;
+  i_first_zero = i_max_n_zero;
+  n_zeros = 0;
+  for (i = 0; i < ARRAY_LEN (a->as_u16); i++)
+    {
+      u32 is_zero = a->as_u16[i] == 0;
+      if (is_zero && i_first_zero >= ARRAY_LEN (a->as_u16))
+	{
+	  i_first_zero = i;
+	  n_zeros = 0;
+	}
+      n_zeros += is_zero;
+      if ((!is_zero && n_zeros > max_n_zeros) ||
+	  (i + 1 >= ARRAY_LEN (a->as_u16) && n_zeros > max_n_zeros))
+	{
+	  i_max_n_zero = i_first_zero;
+	  max_n_zeros = n_zeros;
+	  i_first_zero = ARRAY_LEN (a->as_u16);
+	  n_zeros = 0;
+	}
+    }
+
+  last_double_colon = 0;
+  for (i = 0; i < ARRAY_LEN (a->as_u16); i++)
+    {
+      if (i == i_max_n_zero && max_n_zeros > 1)
+	{
+	  s = format (s, "::");
+	  i += max_n_zeros - 1;
+	  last_double_colon = 1;
+	}
+      else
+	{
+	  s = format (s, "%s%x", (last_double_colon || i == 0) ? "" : ":",
+		      clib_net_to_host_u16 (a->as_u16[i]));
+	  last_double_colon = 0;
+	}
+    }
+
+  return s;
+}
+
+/* Format an IP46 address. */
+u8 *
+vcl_format_ip46_address (u8 *s, va_list *args)
+{
+  ip46_address_t *ip46 = va_arg (*args, ip46_address_t *);
+  ip46_type_t type = va_arg (*args, ip46_type_t);
+  int is_ip4 = 1;
+
+  switch (type)
+    {
+    case IP46_TYPE_ANY:
+      is_ip4 = ip46_address_is_ip4 (ip46);
+      break;
+    case IP46_TYPE_IP4:
+      is_ip4 = 1;
+      break;
+    case IP46_TYPE_IP6:
+      is_ip4 = 0;
+      break;
+    }
+
+  return is_ip4 ? format (s, "%U", vcl_format_ip4_address, &ip46->ip4) :
+		  format (s, "%U", vcl_format_ip6_address, &ip46->ip6);
 }
 
 /*

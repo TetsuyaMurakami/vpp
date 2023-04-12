@@ -312,41 +312,26 @@ VLIB_CLI_COMMAND (ip4_punt_policer_command, static) =
 
 #ifndef CLIB_MARCH_VARIANT
 
-void
-ip4_punt_redirect_add (u32 rx_sw_if_index,
-		       u32 tx_sw_if_index, ip46_address_t * nh)
-{
-  /* *INDENT-OFF* */
-  fib_route_path_t *rpaths = NULL, rpath = {
-    .frp_proto = DPO_PROTO_IP4,
-    .frp_addr = *nh,
-    .frp_sw_if_index = tx_sw_if_index,
-    .frp_weight = 1,
-    .frp_fib_index = ~0,
-  };
-  /* *INDENT-ON* */
-
-  vec_add1 (rpaths, rpath);
-
-  ip4_punt_redirect_add_paths (rx_sw_if_index, rpaths);
-
-  vec_free (rpaths);
-}
+static u32 ip4_punt_redirect_enable_counts;
 
 void
-ip4_punt_redirect_add_paths (u32 rx_sw_if_index, fib_route_path_t * rpaths)
+ip4_punt_redirect_add_paths (u32 rx_sw_if_index,
+			     const fib_route_path_t *rpaths)
 {
   ip_punt_redirect_add (FIB_PROTOCOL_IP4,
 			rx_sw_if_index,
 			FIB_FORW_CHAIN_TYPE_UNICAST_IP4, rpaths);
 
-  vnet_feature_enable_disable ("ip4-punt", "ip4-punt-redirect", 0, 1, 0, 0);
+  if (1 == ++ip4_punt_redirect_enable_counts)
+    vnet_feature_enable_disable ("ip4-punt", "ip4-punt-redirect", 0, 1, 0, 0);
 }
 
 void
 ip4_punt_redirect_del (u32 rx_sw_if_index)
 {
-  vnet_feature_enable_disable ("ip4-punt", "ip4-punt-redirect", 0, 0, 0, 0);
+  ASSERT (ip4_punt_redirect_enable_counts);
+  if (0 == --ip4_punt_redirect_enable_counts)
+    vnet_feature_enable_disable ("ip4-punt", "ip4-punt-redirect", 0, 0, 0, 0);
 
   ip_punt_redirect_del (FIB_PROTOCOL_IP4, rx_sw_if_index);
 }
@@ -358,10 +343,10 @@ ip4_punt_redirect_cmd (vlib_main_t * vm,
 		       vlib_cli_command_t * cmd)
 {
   unformat_input_t _line_input, *line_input = &_line_input;
-  ip46_address_t nh = { 0 };
+  fib_route_path_t *rpaths = NULL, rpath;
+  dpo_proto_t payload_proto = DPO_PROTO_IP4;
   clib_error_t *error = 0;
   u32 rx_sw_if_index = ~0;
-  u32 tx_sw_if_index = ~0;
   vnet_main_t *vnm;
   u8 is_add;
 
@@ -378,17 +363,13 @@ ip4_punt_redirect_cmd (vlib_main_t * vm,
       else if (unformat (line_input, "add"))
 	is_add = 1;
       else if (unformat (line_input, "rx all"))
-	rx_sw_if_index = ~0;
+	rx_sw_if_index = 0;
       else if (unformat (line_input, "rx %U",
 			 unformat_vnet_sw_interface, vnm, &rx_sw_if_index))
 	;
-      else if (unformat (line_input, "via %U %U",
-			 unformat_ip4_address, &nh.ip4,
-			 unformat_vnet_sw_interface, vnm, &tx_sw_if_index))
-	;
-      else if (unformat (line_input, "via %U",
-			 unformat_vnet_sw_interface, vnm, &tx_sw_if_index))
-	;
+      else if (unformat (line_input, "via %U", unformat_fib_route_path, &rpath,
+			 &payload_proto))
+	vec_add1 (rpaths, rpath);
       else
 	{
 	  error = unformat_parse_error (line_input);
@@ -404,7 +385,8 @@ ip4_punt_redirect_cmd (vlib_main_t * vm,
 
   if (is_add)
     {
-      ip4_punt_redirect_add (rx_sw_if_index, tx_sw_if_index, &nh);
+      if (vec_len (rpaths))
+	ip4_punt_redirect_add_paths (rx_sw_if_index, rpaths);
     }
   else
     {
@@ -412,6 +394,7 @@ ip4_punt_redirect_cmd (vlib_main_t * vm,
     }
 
 done:
+  vec_free (rpaths);
   unformat_free (line_input);
   return (error);
 }

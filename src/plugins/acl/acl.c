@@ -36,7 +36,6 @@
 #include <acl/acl.api_enum.h>
 #include <acl/acl.api_types.h>
 
-#define vl_print(handle, ...) vlib_cli_output (handle, __VA_ARGS__)
 
 #include "fa_node.h"
 #include "public_inlines.h"
@@ -310,7 +309,9 @@ static int
 acl_api_invalid_prefix (const vl_api_prefix_t * prefix)
 {
   ip_prefix_t ip_prefix;
-  return ip_prefix_decode2 (prefix, &ip_prefix);
+  int valid_af =
+    prefix->address.af == ADDRESS_IP4 || prefix->address.af == ADDRESS_IP6;
+  return (!valid_af) || ip_prefix_decode2 (prefix, &ip_prefix);
 }
 
 static int
@@ -339,6 +340,8 @@ acl_add_list (u32 count, vl_api_acl_rule_t rules[],
 	return VNET_API_ERROR_INVALID_SRC_ADDRESS;
       if (acl_api_invalid_prefix (&rules[i].dst_prefix))
 	return VNET_API_ERROR_INVALID_DST_ADDRESS;
+      if (rules[i].src_prefix.address.af != rules[i].dst_prefix.address.af)
+	return VNET_API_ERROR_INVALID_SRC_ADDRESS;
       if (ntohs (rules[i].srcport_or_icmptype_first) >
 	  ntohs (rules[i].srcport_or_icmptype_last))
 	return VNET_API_ERROR_INVALID_VALUE_2;
@@ -1772,7 +1775,7 @@ macip_acl_interface_add_del_acl (u32 sw_if_index, u8 is_add,
  *
  */
 static int
-verify_message_len (void *mp, u32 expected_len, char *where)
+verify_message_len (void *mp, u64 expected_len, char *where)
 {
   u32 supplied_len = vl_msg_api_get_msg_length (mp);
   if (supplied_len < expected_len)
@@ -1796,7 +1799,7 @@ vl_api_acl_add_replace_t_handler (vl_api_acl_add_replace_t * mp)
   int rv;
   u32 acl_list_index = ntohl (mp->acl_index);
   u32 acl_count = ntohl (mp->count);
-  u32 expected_len = sizeof (*mp) + acl_count * sizeof (mp->r[0]);
+  u64 expected_len = sizeof (*mp) + acl_count * sizeof (mp->r[0]);
 
   if (verify_message_len (mp, expected_len, "acl_add_replace"))
     {
@@ -2085,7 +2088,7 @@ vl_api_macip_acl_add_t_handler (vl_api_macip_acl_add_t * mp)
   int rv;
   u32 acl_list_index = ~0;
   u32 acl_count = ntohl (mp->count);
-  u32 expected_len = sizeof (*mp) + acl_count * sizeof (mp->r[0]);
+  u64 expected_len = sizeof (*mp) + acl_count * sizeof (mp->r[0]);
 
   if (verify_message_len (mp, expected_len, "macip_acl_add"))
     {
@@ -2112,7 +2115,7 @@ vl_api_macip_acl_add_replace_t_handler (vl_api_macip_acl_add_replace_t * mp)
   int rv;
   u32 acl_list_index = ntohl (mp->acl_index);
   u32 acl_count = ntohl (mp->count);
-  u32 expected_len = sizeof (*mp) + acl_count * sizeof (mp->r[0]);
+  u64 expected_len = sizeof (*mp) + acl_count * sizeof (mp->r[0]);
 
   if (verify_message_len (mp, expected_len, "macip_acl_add_replace"))
     {
@@ -2448,6 +2451,45 @@ static void
 	send_acl_interface_etype_whitelist_details (am, reg, sw_if_index,
 						    mp->context);
     }
+}
+
+static void
+vl_api_acl_plugin_use_hash_lookup_set_t_handler (
+  vl_api_acl_plugin_use_hash_lookup_set_t *mp)
+{
+  acl_main_t *am = &acl_main;
+  vl_api_acl_plugin_use_hash_lookup_set_reply_t *rmp;
+  vl_api_registration_t *reg;
+  int rv = 0;
+
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
+
+  am->use_hash_acl_matching = mp->enable;
+  REPLY_MACRO (VL_API_ACL_PLUGIN_USE_HASH_LOOKUP_SET_REPLY);
+}
+
+static void
+vl_api_acl_plugin_use_hash_lookup_get_t_handler (
+  vl_api_acl_plugin_use_hash_lookup_get_t *mp)
+{
+  acl_main_t *am = &acl_main;
+  vl_api_acl_plugin_use_hash_lookup_get_reply_t *rmp;
+  int msg_size = sizeof (*rmp);
+  vl_api_registration_t *reg;
+
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
+
+  rmp = vl_msg_api_alloc (msg_size);
+  clib_memset (rmp, 0, msg_size);
+  rmp->_vl_msg_id =
+    ntohs (VL_API_ACL_PLUGIN_USE_HASH_LOOKUP_GET_REPLY + am->msg_id_base);
+  rmp->context = mp->context;
+  rmp->enable = am->use_hash_acl_matching;
+  vl_api_send_msg (reg, (u8 *) rmp);
 }
 
 static void
@@ -2802,6 +2844,7 @@ acl_set_aclplugin_interface_fn (vlib_main_t * vm,
 	break;
     }
 
+  unformat_free (line_input);
   if (~0 == sw_if_index)
     return (clib_error_return (0, "invalid interface"));
   if (~0 == acl_index)
@@ -2809,7 +2852,6 @@ acl_set_aclplugin_interface_fn (vlib_main_t * vm,
 
   acl_interface_add_del_inout_acl (sw_if_index, is_add, is_input, acl_index);
 
-  unformat_free (line_input);
   return (NULL);
 }
 
@@ -2832,13 +2874,13 @@ acl_set_aclplugin_acl_fn (vlib_main_t * vm,
   int rv;
   int rule_idx = 0;
   int n_rules_override = -1;
+  u32 acl_index = ~0;
   u32 proto = 0;
   u32 port1 = 0;
   u32 port2 = 0;
   u32 action = 0;
   u32 tcpflags, tcpmask;
-  u32 src_prefix_length = 0, dst_prefix_length = 0;
-  ip46_address_t src, dst;
+  ip_prefix_t src, dst;
   u8 *tag = 0;
 
   if (!unformat_user (input, unformat_line_input, line_input))
@@ -2846,7 +2888,13 @@ acl_set_aclplugin_acl_fn (vlib_main_t * vm,
 
   while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
-      if (unformat (line_input, "permit+reflect"))
+      if (unformat (line_input, "index %d", &acl_index))
+	{
+	  /* operate on this acl index (which must exist),
+	   * If not specified, or set to -1, create a new ACL
+	   */
+	}
+      else if (unformat (line_input, "permit+reflect"))
 	{
 	  vec_validate_acl_rules (rules, rule_idx);
 	  rules[rule_idx].is_permit = 2;
@@ -2870,25 +2918,15 @@ acl_set_aclplugin_acl_fn (vlib_main_t * vm,
 	  vec_validate_acl_rules (rules, rule_idx);
 	  rules[rule_idx].is_permit = action;
 	}
-      else if (unformat (line_input, "src %U/%d",
-			 unformat_ip46_address, &src, IP46_TYPE_ANY,
-			 &src_prefix_length))
+      else if (unformat (line_input, "src %U", unformat_ip_prefix, &src))
 	{
 	  vec_validate_acl_rules (rules, rule_idx);
-	  ip_address_encode (&src, IP46_TYPE_ANY,
-			     &rules[rule_idx].src_prefix.address);
-	  rules[rule_idx].src_prefix.address.af = ADDRESS_IP4;
-	  rules[rule_idx].src_prefix.len = src_prefix_length;
+	  ip_prefix_encode2 (&src, &rules[rule_idx].src_prefix);
 	}
-      else if (unformat (line_input, "dst %U/%d",
-			 unformat_ip46_address, &dst, IP46_TYPE_ANY,
-			 &dst_prefix_length))
+      else if (unformat (line_input, "dst %U", unformat_ip_prefix, &dst))
 	{
 	  vec_validate_acl_rules (rules, rule_idx);
-	  ip_address_encode (&dst, IP46_TYPE_ANY,
-			     &rules[rule_idx].dst_prefix.address);
-	  rules[rule_idx].dst_prefix.address.af = ADDRESS_IP4;
-	  rules[rule_idx].dst_prefix.len = dst_prefix_length;
+	  ip_prefix_encode2 (&dst, &rules[rule_idx].dst_prefix);
 	}
       else if (unformat (line_input, "sport %d-%d", &port1, &port2))
 	{
@@ -2944,7 +2982,6 @@ acl_set_aclplugin_acl_fn (vlib_main_t * vm,
 	break;
     }
 
-  u32 acl_index = ~0;
   if (!tag)
     vec_add (tag, "cli", 4);
 
@@ -2953,11 +2990,43 @@ acl_set_aclplugin_acl_fn (vlib_main_t * vm,
   vec_free (rules);
   vec_free (tag);
 
+  unformat_free (line_input);
   if (rv)
     return (clib_error_return (0, "failed"));
 
   vlib_cli_output (vm, "ACL index:%d", acl_index);
 
+  return (NULL);
+}
+
+static clib_error_t *
+acl_delete_aclplugin_acl_fn (vlib_main_t *vm, unformat_input_t *input,
+			     vlib_cli_command_t *cmd)
+{
+  unformat_input_t _line_input, *line_input = &_line_input;
+  int rv;
+  u32 acl_index = ~0;
+
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "index %d", &acl_index))
+	{
+	  /* operate on this acl index (which must exist) */
+	}
+      else
+	break;
+    }
+
+  rv = acl_del_list (acl_index);
+
+  unformat_free (line_input);
+  if (rv)
+    return (clib_error_return (0, "failed"));
+
+  vlib_cli_output (vm, "Deleted ACL index:%d", acl_index);
   return (NULL);
 }
 
@@ -3443,6 +3512,8 @@ acl_show_aclplugin_tables_fn (vlib_main_t * vm,
     }
   vlib_cli_output (vm, "Stats counters enabled for interface ACLs: %d",
 		   acl_main.interface_acl_counters_enabled);
+  vlib_cli_output (vm, "Use hash-based lookup for ACLs: %d",
+		   acl_main.use_hash_acl_matching);
   if (show_mask_type)
     acl_plugin_show_tables_mask_type ();
   if (show_acl_hash_info)
@@ -3556,26 +3627,46 @@ VLIB_CLI_COMMAND (aclplugin_set_interface_command, static) = {
 
 /*?
  * Create an Access Control List (ACL)
- *  an ACL is composed of more than one Access control element (ACE). Multiple
+ *  If index is not specified, a new one will be created. Otherwise, replace
+ *  the one at this index.
+ *
+ *  An ACL is composed of more than one Access control element (ACE). Multiple
  *  ACEs can be specified with this command using a comma separated list.
  *
- * Each ACE describes a tuple of src+dst IP prefix, ip protocol, src+dst port ranges.
- * (the ACL plugin also support ICMP types/codes instead of UDP/TCP ports, but
- *  this CLI does not).
+ * Each ACE describes a tuple of src+dst IP prefix, ip protocol, src+dst port
+ * ranges. (the ACL plugin also support ICMP types/codes instead of UDP/TCP
+ * ports, but this CLI does not).
  *
- * An ACL can optionally be assigned a 'tag' - which is an identifier understood
- * by the client. VPP does not examine it in any way.
+ * An ACL can optionally be assigned a 'tag' - which is an identifier
+ * understood by the client. VPP does not examine it in any way.
  *
- * @cliexpar
- * <b><em> set acl-plugin acl <permit|deny> src <PREFIX> dst <PREFIX> proto <TCP|UDP> sport <X-Y> dport <X-Y> [tag FOO] </b></em>
- * @cliexend
+ * @cliexcmd{set acl-plugin acl <permit|deny|permit+reflect> src <PREFIX> dst
+ * <PREFIX> proto <TCP|UDP> sport <X-Y> dport <X-Y> tcpflags <X> mask <X>
+ * [tag FOO]}
  ?*/
 VLIB_CLI_COMMAND (aclplugin_set_acl_command, static) = {
-    .path = "set acl-plugin acl",
-    .short_help = "set acl-plugin acl <permit|deny> src <PREFIX> dst <PREFIX> proto X sport X-Y dport X-Y [tag FOO] {use comma separated list for multiple rules}",
-    .function = acl_set_aclplugin_acl_fn,
+  .path = "set acl-plugin acl",
+  .short_help =
+    "set acl-plugin acl [index <idx>] <permit|deny|permit+reflect> src "
+    "<PREFIX> dst <PREFIX> [proto X] [sport X[-Y]] [dport X[-Y]] [tcpflags "
+    "<int> mask <int>] [tag FOO] {use comma separated list for multiple "
+    "rules}",
+  .function = acl_set_aclplugin_acl_fn,
 };
 /* *INDENT-ON* */
+
+/*?
+ * Delete an Access Control List (ACL)
+ *  Removes an ACL at the specified index, which must exist but not in use by
+ *  any interface.
+ *
+ * @cliexcmd{delete acl-plugin acl index <idx>}
+ ?*/
+VLIB_CLI_COMMAND (aclplugin_delete_acl_command, static) = {
+  .path = "delete acl-plugin acl",
+  .short_help = "delete acl-plugin acl index <idx>",
+  .function = acl_delete_aclplugin_acl_fn,
+};
 
 static clib_error_t *
 acl_plugin_config (vlib_main_t * vm, unformat_input_t * input)
@@ -3707,7 +3798,7 @@ acl_init (vlib_main_t * vm)
 	vec_validate (pw->expired,
 		      ACL_N_TIMEOUTS *
 		      am->fa_max_deleted_sessions_per_interval);
-	_vec_len (pw->expired) = 0;
+	vec_set_len (pw->expired, 0);
 	vec_validate_init_empty (pw->fa_conn_list_head, ACL_N_TIMEOUTS - 1,
 				 FA_SESSION_BOGUS_INDEX);
 	vec_validate_init_empty (pw->fa_conn_list_tail, ACL_N_TIMEOUTS - 1,

@@ -1,5 +1,4 @@
 #include <vnet/vnet.h>
-#include <builtinurl/builtinurl.h>
 #include <http_static/http_static.h>
 #include <mactime/mactime.h>
 #include <vlib/unix/plugin.h>
@@ -15,9 +14,8 @@ mactime_ip_neighbor_copy (index_t ipni, void *ctx)
   return (WALK_CONTINUE);
 }
 
-static int
-handle_get_mactime (http_builtin_method_type_t reqtype,
-		    u8 * request, http_session_t * hs)
+static hss_url_handler_rc_t
+handle_get_mactime (hss_url_handler_args_t *args)
 {
   mactime_main_t *mm = &mactime_main;
   mactime_device_t *dp;
@@ -42,12 +40,10 @@ handle_get_mactime (http_builtin_method_type_t reqtype,
   if (PREDICT_FALSE ((now - mm->sunday_midnight) > 86400.0 * 7.0))
     mm->sunday_midnight = clib_timebase_find_sunday_midnight (now);
 
-    /* *INDENT-OFF* */
-    pool_foreach (dp, mm->devices)
-     {
-        vec_add1 (pool_indices, dp - mm->devices);
+  pool_foreach (dp, mm->devices)
+    {
+      vec_add1 (pool_indices, dp - mm->devices);
     }
-    /* *INDENT-ON* */
 
   s = format (s, "{%smactime%s: [\n", q, q);
 
@@ -149,21 +145,20 @@ handle_get_mactime (http_builtin_method_type_t reqtype,
   vec_free (macstring);
   vec_free (pool_indices);
 
-  hs->data = s;
-  hs->data_offset = 0;
-  hs->cache_pool_index = ~0;
-  hs->free_data = 1;
-  return 0;
+  args->data = s;
+  args->data_len = vec_len (s);
+  args->free_vec_data = 1;
+  return HSS_URL_HANDLER_OK;
 }
 
 void
 mactime_url_init (vlib_main_t * vm)
 {
-  void (*fp) (void *, char *, int);
+  hss_register_url_fn fp;
 
   /* Look up the builtin URL registration handler */
   fp = vlib_get_plugin_symbol ("http_static_plugin.so",
-			       "http_static_server_register_builtin_handler");
+			       "hss_register_url_handler");
 
   if (fp == 0)
     {
@@ -171,7 +166,7 @@ mactime_url_init (vlib_main_t * vm)
       return;
     }
 
-  (*fp) (handle_get_mactime, "mactime.json", HTTP_BUILTIN_METHOD_GET);
+  (*fp) (handle_get_mactime, "mactime.json", HTTP_REQ_GET);
 }
 
 /*

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Copyright (c) 2015 Cisco and/or its affiliates.
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,7 +20,7 @@ cd "$path"
 if [ -f .version ]; then
     vstring=$(cat .version)
 else
-    vstring=$(git describe --long)
+    vstring=$(git describe --long --match "v*")
     if [ $? != 0 ]; then
       exit 1
     fi

@@ -53,6 +53,9 @@ typedef struct session_cb_vft_
   /** Notify app that session or transport are about to be removed */
   void (*session_cleanup_callback) (session_t * s, session_cleanup_ntf_t ntf);
 
+  /** Notify app that half open state was cleaned up (optional) */
+  void (*half_open_cleanup_callback) (session_t *s);
+
   /** Notify app that session was reset */
   void (*session_reset_callback) (session_t * s);
 
@@ -114,9 +117,6 @@ typedef struct _vnet_bind_args_t
   /*
    * Results
    */
-  char *segment_name;
-  u32 segment_name_length;
-  u64 server_event_queue_address;
   u64 handle;
 } vnet_listen_args_t;
 
@@ -143,8 +143,15 @@ typedef struct _vnet_connect_args
   u32 wrk_map_index;
   u32 api_context;
 
-  session_handle_t session_handle;
+  /* Resulting session, or half-open session, if connect successful */
+  session_handle_t sh;
 } vnet_connect_args_t;
+
+typedef struct _vnet_shutdown_args_t
+{
+  session_handle_t handle;
+  u32 app_index;
+} vnet_shutdown_args_t;
 
 typedef struct _vnet_disconnect_args_t
 {
@@ -216,15 +223,17 @@ typedef enum
   APP_OPTIONS_N_OPTIONS
 } app_attach_options_index_t;
 
-#define foreach_app_options_flags				\
-  _(ACCEPT_REDIRECT, "Use FIFO with redirects")			\
-  _(ADD_SEGMENT, "Add segment and signal app if needed")	\
-  _(IS_BUILTIN, "Application is builtin")			\
-  _(IS_TRANSPORT_APP, "Application is a transport proto")	\
-  _(IS_PROXY, "Application is proxying")			\
-  _(USE_GLOBAL_SCOPE, "App can use global session scope")	\
-  _(USE_LOCAL_SCOPE, "App can use local session scope")		\
-  _(EVT_MQ_USE_EVENTFD, "Use eventfds for signaling")		\
+#define foreach_app_options_flags                                             \
+  _ (ACCEPT_REDIRECT, "Use FIFO with redirects")                              \
+  _ (ADD_SEGMENT, "Add segment and signal app if needed")                     \
+  _ (IS_BUILTIN, "Application is builtin")                                    \
+  _ (IS_TRANSPORT_APP, "Application is a transport proto")                    \
+  _ (IS_PROXY, "Application is proxying")                                     \
+  _ (USE_GLOBAL_SCOPE, "App can use global session scope")                    \
+  _ (USE_LOCAL_SCOPE, "App can use local session scope")                      \
+  _ (EVT_MQ_USE_EVENTFD, "Use eventfds for signaling")                        \
+  _ (MEMFD_FOR_BUILTIN, "Use memfd for builtin app segs")                     \
+  _ (USE_HUGE_PAGE, "Use huge page for FIFO")
 
 typedef enum _app_options
 {
@@ -271,12 +280,15 @@ int vnet_application_detach (vnet_app_detach_args_t * a);
 int vnet_listen (vnet_listen_args_t * a);
 int vnet_connect (vnet_connect_args_t * a);
 int vnet_unlisten (vnet_unlisten_args_t * a);
+int vnet_shutdown_session (vnet_shutdown_args_t *a);
 int vnet_disconnect_session (vnet_disconnect_args_t * a);
 
 int vnet_app_add_cert_key_pair (vnet_app_add_cert_key_pair_args_t * a);
 int vnet_app_del_cert_key_pair (u32 index);
 /** Ask for app cb on pair deletion */
 int vnet_app_add_cert_key_interest (u32 index, u32 app_index);
+
+uword unformat_vnet_uri (unformat_input_t *input, va_list *args);
 
 typedef struct app_session_transport_
 {
@@ -314,9 +326,8 @@ typedef struct session_listen_msg_
   u8 proto;
   u8 is_ip4;
   ip46_address_t ip;
-  u32 ckpair_index;
-  u8 crypto_engine;
   u8 flags;
+  uword ext_config;
 } __clib_packed session_listen_msg_t;
 
 STATIC_ASSERT (sizeof (session_listen_msg_t) <= SESSION_CTRL_MSG_MAX_SIZE,
@@ -344,6 +355,7 @@ typedef struct session_bound_msg_
   uword tx_fifo;
   uword vpp_evt_q;
   u64 segment_handle;
+  u32 mq_index;
 } __clib_packed session_bound_msg_t;
 
 typedef struct session_unlisten_msg_
@@ -371,6 +383,7 @@ typedef struct session_accepted_msg_
   u64 segment_handle;
   uword vpp_event_queue_address;
   u32 mq_index;
+  transport_endpoint_t lcl;
   transport_endpoint_t rmt;
   u8 flags;
 } __clib_packed session_accepted_msg_t;
@@ -394,12 +407,12 @@ typedef struct session_connect_msg_
   u8 is_ip4;
   ip46_address_t ip;
   ip46_address_t lcl_ip;
-  u8 hostname_len;
-  u8 hostname[16];
   u64 parent_handle;
   u32 ckpair_index;
   u8 crypto_engine;
   u8 flags;
+  u8 dscp;
+  uword ext_config;
 } __clib_packed session_connect_msg_t;
 
 STATIC_ASSERT (sizeof (session_connect_msg_t) <= SESSION_CTRL_MSG_MAX_SIZE,
@@ -427,11 +440,16 @@ typedef struct session_connected_msg_
   uword ct_tx_fifo;
   u64 ct_segment_handle;
   uword vpp_event_queue_address;
-  u32 segment_size;
-  u8 segment_name_length;
-  u8 segment_name[64];
   transport_endpoint_t lcl;
+  u32 mq_index;
 } __clib_packed session_connected_msg_t;
+
+typedef struct session_shutdown_msg_
+{
+  u32 client_index;
+  u32 context;
+  session_handle_t handle;
+} __clib_packed session_shutdown_msg_t;
 
 typedef struct session_disconnect_msg_
 {
@@ -535,6 +553,22 @@ typedef struct session_app_wrk_rpc_msg_
   u8 data[64];		/**< rpc data */
 } __clib_packed session_app_wrk_rpc_msg_t;
 
+typedef struct session_transport_attr_msg_
+{
+  u32 client_index;
+  session_handle_t handle;
+  transport_endpt_attr_t attr;
+  u8 is_get;
+} __clib_packed session_transport_attr_msg_t;
+
+typedef struct session_transport_attr_reply_msg_
+{
+  i32 retval;
+  session_handle_t handle;
+  transport_endpt_attr_t attr;
+  u8 is_get;
+} __clib_packed session_transport_attr_reply_msg_t;
+
 typedef struct app_session_event_
 {
   svm_msg_q_msg_t msg;
@@ -582,8 +616,8 @@ app_send_io_evt_to_vpp (svm_msg_q_t * mq, u32 session_index, u8 evt_type,
     {
       if (svm_msg_q_try_lock (mq))
 	return -1;
-      if (PREDICT_FALSE (svm_msg_q_ring_is_full (mq, SESSION_MQ_IO_EVT_RING)
-			 || svm_msg_q_is_full (mq)))
+      if (PREDICT_FALSE (
+	    svm_msg_q_or_ring_is_full (mq, SESSION_MQ_IO_EVT_RING)))
 	{
 	  svm_msg_q_unlock (mq);
 	  return -2;
@@ -598,9 +632,8 @@ app_send_io_evt_to_vpp (svm_msg_q_t * mq, u32 session_index, u8 evt_type,
   else
     {
       svm_msg_q_lock (mq);
-      while (svm_msg_q_ring_is_full (mq, SESSION_MQ_IO_EVT_RING)
-	     || svm_msg_q_is_full (mq))
-	svm_msg_q_wait (mq, SVM_MQ_WAIT_FULL);
+      while (svm_msg_q_or_ring_is_full (mq, SESSION_MQ_IO_EVT_RING))
+	svm_msg_q_or_ring_wait_prod (mq, SESSION_MQ_IO_EVT_RING);
       msg = svm_msg_q_alloc_msg_w_ring (mq, SESSION_MQ_IO_EVT_RING);
       evt = (session_event_t *) svm_msg_q_msg_data (mq, &msg);
       evt->session_index = session_index;
@@ -610,14 +643,18 @@ app_send_io_evt_to_vpp (svm_msg_q_t * mq, u32 session_index, u8 evt_type,
     }
 }
 
+#define app_send_dgram_raw(f, at, vpp_evt_q, data, len, evt_type, do_evt,     \
+			   noblock)                                           \
+  app_send_dgram_raw_gso (f, at, vpp_evt_q, data, len, 0, evt_type, do_evt,   \
+			  noblock)
+
 always_inline int
-app_send_dgram_raw (svm_fifo_t * f, app_session_transport_t * at,
-		    svm_msg_q_t * vpp_evt_q, u8 * data, u32 len, u8 evt_type,
-		    u8 do_evt, u8 noblock)
+app_send_dgram_raw_gso (svm_fifo_t *f, app_session_transport_t *at,
+			svm_msg_q_t *vpp_evt_q, u8 *data, u32 len,
+			u16 gso_size, u8 evt_type, u8 do_evt, u8 noblock)
 {
   session_dgram_hdr_t hdr;
   int rv;
-
   if (svm_fifo_max_enqueue_prod (f) < (sizeof (session_dgram_hdr_t) + len))
     return 0;
 
@@ -628,7 +665,7 @@ app_send_dgram_raw (svm_fifo_t * f, app_session_transport_t * at,
   hdr.rmt_port = at->rmt_port;
   clib_memcpy_fast (&hdr.lcl_ip, &at->lcl_ip, sizeof (ip46_address_t));
   hdr.lcl_port = at->lcl_port;
-
+  hdr.gso_size = gso_size;
   /* *INDENT-OFF* */
   svm_fifo_seg_t segs[2] = {{ (u8 *) &hdr, sizeof (hdr) }, { data, len }};
   /* *INDENT-ON* */
@@ -787,6 +824,8 @@ typedef enum app_sapi_msg_type
   APP_SAPI_MSG_TYPE_ADD_DEL_WORKER,
   APP_SAPI_MSG_TYPE_ADD_DEL_WORKER_REPLY,
   APP_SAPI_MSG_TYPE_SEND_FDS,
+  APP_SAPI_MSG_TYPE_ADD_DEL_CERT_KEY,
+  APP_SAPI_MSG_TYPE_ADD_DEL_CERT_KEY_REPLY,
 } __clib_packed app_sapi_msg_type_e;
 
 typedef struct app_sapi_attach_msg_
@@ -831,6 +870,22 @@ typedef struct app_sapi_worker_add_del_reply_msg_
   u8 is_add;
 } __clib_packed app_sapi_worker_add_del_reply_msg_t;
 
+typedef struct app_sapi_cert_key_add_del_msg_
+{
+  u32 context;
+  u32 index;
+  u16 cert_len;
+  u16 certkey_len;
+  u8 is_add;
+} __clib_packed app_sapi_cert_key_add_del_msg_t;
+
+typedef struct app_sapi_cert_key_add_del_reply_msg_
+{
+  u32 context;
+  i32 retval;
+  u32 index;
+} __clib_packed app_sapi_cert_key_add_del_reply_msg_t;
+
 typedef struct app_sapi_msg_
 {
   app_sapi_msg_type_e type;
@@ -840,8 +895,24 @@ typedef struct app_sapi_msg_
     app_sapi_attach_reply_msg_t attach_reply;
     app_sapi_worker_add_del_msg_t worker_add_del;
     app_sapi_worker_add_del_reply_msg_t worker_add_del_reply;
+    app_sapi_cert_key_add_del_msg_t cert_key_add_del;
+    app_sapi_cert_key_add_del_reply_msg_t cert_key_add_del_reply;
   };
 } __clib_packed app_sapi_msg_t;
+
+static inline void
+session_endpoint_alloc_ext_cfg (session_endpoint_cfg_t *sep_ext,
+				transport_endpt_ext_cfg_type_t type)
+{
+  transport_endpt_ext_cfg_t *cfg;
+  u32 cfg_size;
+
+  cfg_size = sizeof (transport_endpt_ext_cfg_t);
+  cfg = clib_mem_alloc (cfg_size);
+  clib_memset (cfg, 0, cfg_size);
+  cfg->type = type;
+  sep_ext->ext_cfg = cfg;
+}
 
 #endif /* __included_uri_h__ */
 

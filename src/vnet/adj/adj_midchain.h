@@ -99,7 +99,7 @@ extern void adj_nbr_midchain_stack(adj_index_t adj_index,
  *  The FIB entry to stack on
  *
  * @param fct
- *  The chain type to use from the fib entry fowarding
+ *  The chain type to use from the fib entry forwarding
  */
 extern void adj_nbr_midchain_stack_on_fib_entry(adj_index_t adj_index,
                                                 fib_node_index_t fei,
@@ -159,6 +159,11 @@ extern void adj_midchain_delegate_restack(adj_index_t ai);
  * @brief unstack a midchain delegate (this stacks it on a drop)
  */
 extern void adj_midchain_delegate_unstack(adj_index_t ai);
+
+/**
+ * @brief remove a midchain delegate (this stacks it on a drop)
+ */
+extern void adj_midchain_delegate_remove (adj_index_t ai);
 
 extern u8 adj_is_midchain (adj_index_t ai);
 

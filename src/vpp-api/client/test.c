@@ -32,18 +32,17 @@
 #include <vlib/unix/unix.h>
 #include <vlibapi/api.h>
 #include <vppinfra/time.h>
-#include <vpp/api/vpe_msg_enum.h>
 #include <signal.h>
 #include "vppapiclient.h"
 #include "stat_client.h"
 
-#define vl_typedefs             /* define message structures */
-#include <vpp/api/vpe_all_api_h.h> 
-#undef vl_typedefs
+#include <vlibmemory/vlib.api_enum.h>
+#include <vlibmemory/vlib.api_types.h>
+#include <vlibmemory/memclnt.api_enum.h>
+#include <vlibmemory/memclnt.api_types.h>
 
-/* we are not linking with vlib */
-vlib_main_t vlib_global_main;
-vlib_main_t **vlib_mains;
+#include <vpp/api/vpe.api_enum.h>
+#include <vpp/api/vpe.api_types.h>
 
 volatile int sigterm_received = 0;
 volatile u32 result_ready;
@@ -71,7 +70,6 @@ wrap_vac_callback (unsigned char *data, int len)
 static void
 test_connect ()
 {
-  static int i;
   int rv = vac_connect("vac_client", NULL, wrap_vac_callback, 32 /* rx queue-length*/);
   if (rv != 0) {
     printf("Connect failed: %d\n", rv);
@@ -79,7 +77,6 @@ test_connect ()
   }
   printf(".");
   vac_disconnect();
-  i++;
 }
 
 static void
@@ -143,7 +140,7 @@ test_stats (void)
   assert(rv == 0);
 
   u32 *dir;
-  int i, j, k;
+  int i, k;
   stat_segment_data_t *res;
   u8 **pattern = 0;
   vec_add1(pattern, (u8 *)"/if/names");
@@ -161,11 +158,6 @@ test_stats (void)
 	if (res[i].name_vector[k])
 	  fformat (stdout, "[%d]: %s %s\n", k, res[i].name_vector[k],
 		   res[i].name);
-      break;
-    case STAT_DIR_TYPE_ERROR_INDEX:
-      for (j = 0; j < vec_len (res[i].error_vector); j++)
-	fformat (stdout, "%llu %s\n", res[i].error_vector[j],
-		 res[i].name);
       break;
     default:
       assert(0);

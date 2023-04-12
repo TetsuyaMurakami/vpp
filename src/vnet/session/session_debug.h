@@ -17,49 +17,81 @@
 
 #include <vnet/session/transport.h>
 #include <vlib/vlib.h>
+#include <vpp/vnet/config.h>
 
-#define foreach_session_dbg_evt			\
-  _(ENQ, "enqueue")				\
-  _(DEQ, "dequeue")				\
-  _(DEQ_NODE, "dequeue")			\
-  _(POLL_GAP_TRACK, "poll gap track")		\
-  _(POLL_DISPATCH_TIME, "dispatch time")	\
-  _(DISPATCH_START, "dispatch start")		\
-  _(DISPATCH_END, "dispatch end")		\
-  _(FREE, "session free")			\
-  _(DSP_CNTRS, "dispatch counters")		\
-  _(IO_EVT_COUNTS, "io evt counts")		\
-  _(EVT_COUNTS, "ctrl evt counts")		\
+#define foreach_session_dbg_evt                                               \
+  _ (ENQ, DEQ_EVTS, 1, "enqueue")                                             \
+  _ (DEQ, DEQ_EVTS, 1, "dequeue")                                             \
+  _ (DEQ_NODE, DISPATCH_DBG, 1, "dequeue")                                    \
+  _ (POLL_GAP_TRACK, EVT_POLL_DBG, 1, "poll gap track")                       \
+  _ (POLL_DISPATCH_TIME, EVT_POLL_DBG, 1, "dispatch time")                    \
+  _ (DISPATCH_START, CLOCKS_EVT_DBG, 1, "dispatch start")                     \
+  _ (DISPATCH_END, CLOCKS_EVT_DBG, 1, "dispatch end")                         \
+  _ (DSP_CNTRS, CLOCKS_EVT_DBG, 1, "dispatch counters")                       \
+  _ (STATE_CHANGE, SM, 1, "session state change")                             \
+  _ (FREE, SM, 1, "session free")                                             \
+  _ (IO_EVT_COUNTS, COUNTS_EVT_DBG, 1, "io evt counts")                       \
+  _ (COUNTS, COUNTS_EVT_DBG, 1, "ctrl evt counts")
 
 typedef enum _session_evt_dbg
 {
-#define _(sym, str) SESSION_EVT_##sym,
+#define _(sym, grp, lvl, str) SESSION_EVT_##sym,
   foreach_session_dbg_evt
 #undef _
 } session_evt_dbg_e;
 
-#define foreach_session_events                         		\
-_(CLK_UPDATE_TIME, 1, 1, "Time Update Time") 			\
-_(CLK_MQ_DEQ, 1, 1, "Time MQ Dequeue") 	          		\
-_(CLK_CTRL_EVTS, 1, 1, "Time Ctrl Events")			\
-_(CLK_NEW_IO_EVTS, 1, 1, "Time New IO Events")			\
-_(CLK_OLD_IO_EVTS, 1, 1, "Time Old IO Events")			\
-_(CLK_TOTAL, 1, 1, "Time Total in Node")			\
-_(CLK_START, 1, 1, "Time Since Last Reset")			\
-								\
-_(CNT_MQ_EVTS, 1, 0, "# of MQ Events Processed" )     		\
-_(CNT_CTRL_EVTS, 1, 0, "# of Ctrl Events Processed" )		\
-_(CNT_NEW_EVTS, 1, 0, "# of New Events Processed" )    		\
-_(CNT_OLD_EVTS, 1, 0, "# of Old Events Processed" )    		\
-_(CNT_IO_EVTS, 1, 0, "# of Events Processed" )      		\
-_(CNT_NODE_CALL, 1, 0, "# of Node Calls")               	\
-								\
-_(BASE_OFFSET_IO_EVTS, 0, 0, "NULL")                  		\
-_(SESSION_IO_EVT_RX, 1, 0, "# of IO Event RX")          	\
-_(SESSION_IO_EVT_TX,  1, 0, "# of IO Event TX")                 \
-_(SESSION_IO_EVT_TX_FLUSH, 1, 0, "# of IO Event TX Flush")      \
-_(SESSION_IO_EVT_BUILTIN_RX, 1, 0, "# of IO Event BuiltIn RX")	\
-_(SESSION_IO_EVT_BUILTIN_TX, 1, 0, "# of IO Event BuiltIn TX")	\
+typedef enum session_evt_lvl_
+{
+#define _(sym, grp, lvl, str) SESSION_EVT_##sym##_LVL = lvl,
+  foreach_session_dbg_evt
+#undef _
+} session_evt_lvl_e;
+
+#define foreach_session_evt_grp                                               \
+  _ (DEQ_EVTS, "dequeue/enqueue events")                                      \
+  _ (DISPATCH_DBG, "dispatch")                                                \
+  _ (EVT_POLL_DBG, "event poll")                                              \
+  _ (SM, "state machine")                                                     \
+  _ (CLOCKS_EVT_DBG, "clocks events")                                         \
+  _ (COUNTS_EVT_DBG, "counts events")
+
+typedef enum session_evt_grp_
+{
+#define _(sym, str) SESSION_EVT_GRP_##sym,
+  foreach_session_evt_grp
+#undef _
+    SESSION_EVT_N_GRP
+} session_evt_grp_e;
+
+typedef enum session_evt_to_grp_
+{
+#define _(sym, grp, lvl, str) SESSION_EVT_##sym##_GRP = SESSION_EVT_GRP_##grp,
+  foreach_session_dbg_evt
+#undef _
+} session_evt_to_grp_e;
+
+#define foreach_session_events                                                \
+  _ (CLK_UPDATE_TIME, 1, 1, "Time Update Time")                               \
+  _ (CLK_MQ_DEQ, 1, 1, "Time MQ Dequeue")                                     \
+  _ (CLK_CTRL_EVTS, 1, 1, "Time Ctrl Events")                                 \
+  _ (CLK_NEW_IO_EVTS, 1, 1, "Time New IO Events")                             \
+  _ (CLK_OLD_IO_EVTS, 1, 1, "Time Old IO Events")                             \
+  _ (CLK_TOTAL, 1, 1, "Time Total in Node")                                   \
+  _ (CLK_START, 1, 1, "Time Since Last Reset")                                \
+                                                                              \
+  _ (CNT_MQ_EVTS, 1, 0, "# of MQ Events Processed")                           \
+  _ (CNT_CTRL_EVTS, 1, 0, "# of Ctrl Events Processed")                       \
+  _ (CNT_NEW_EVTS, 1, 0, "# of New Events Processed")                         \
+  _ (CNT_OLD_EVTS, 1, 0, "# of Old Events Processed")                         \
+  _ (CNT_IO_EVTS, 1, 0, "# of Events Processed")                              \
+  _ (CNT_NODE_CALL, 1, 0, "# of Node Calls")                                  \
+                                                                              \
+  _ (BASE_OFFSET_IO_EVTS, 0, 0, "NULL")                                       \
+  _ (SESSION_IO_EVT_RX, 1, 0, "# of IO Event RX")                             \
+  _ (SESSION_IO_EVT_TX, 1, 0, "# of IO Event TX")                             \
+  _ (SESSION_IO_EVT_TX_FLUSH, 1, 0, "# of IO Event TX Flush")                 \
+  _ (SESSION_IO_EVT_BUILTIN_RX, 1, 0, "# of IO Event BuiltIn RX")             \
+  _ (SESSION_IO_EVT_TX_MAIN, 1, 0, "# of IO Event TX Main")
 
 typedef enum
 {
@@ -90,17 +122,28 @@ typedef struct session_dbg_evts_t
 typedef struct session_dbg_main_
 {
   session_dbg_evts_t *wrk;
+  u8 grp_dbg_lvl[SESSION_EVT_N_GRP];
 } session_dbg_main_t;
 
 extern session_dbg_main_t session_dbg_main;
 
-#define SESSION_DEBUG 0 * (TRANSPORT_DEBUG > 0)
-#define SESSION_DEQ_EVTS (0)
-#define SESSION_DISPATCH_DBG (0)
-#define SESSION_EVT_POLL_DBG (0)
-#define SESSION_SM (0)
+#if defined VPP_SESSION_DEBUG && (TRANSPORT_DEBUG > 0)
+#define SESSION_DEBUG	       (1)
+#define SESSION_DEQ_EVTS       (1)
+#define SESSION_DISPATCH_DBG   (1)
+#define SESSION_EVT_POLL_DBG   (1)
+#define SESSION_SM	       (1)
+#define SESSION_CLOCKS_EVT_DBG (1)
+#define SESSION_COUNTS_EVT_DBG (1)
+#else
+#define SESSION_DEBUG	       (0)
+#define SESSION_DEQ_EVTS       (0)
+#define SESSION_DISPATCH_DBG   (0)
+#define SESSION_EVT_POLL_DBG   (0)
+#define SESSION_SM	       (0)
 #define SESSION_CLOCKS_EVT_DBG (0)
 #define SESSION_COUNTS_EVT_DBG (0)
+#endif
 
 #if SESSION_DEBUG
 
@@ -123,17 +166,43 @@ extern session_dbg_main_t session_dbg_main;
   ed = ELOG_DATA (&vlib_global_main.elog_main, _e)
 
 #if SESSION_SM
-#define SESSION_EVT_FREE_HANDLER(_s)					\
-{									\
-  ELOG_TYPE_DECLARE (_e) =						\
-  {									\
-    .format = "free: idx %u",						\
-    .format_args = "i4",						\
-  };									\
-  DEC_SESSION_ETD(_s, _e, 1);						\
-  ed->data[0] =	_s->session_index;					\
-}
+#define SESSION_EVT_STATE_CHANGE_HANDLER(_s)                                  \
+  {                                                                           \
+    ELOG_TYPE_DECLARE (_e) = {						      \
+      .format = "%s: idx %u",                                                 \
+      .format_args = "t4i4",                                                  \
+      .n_enum_strings = 12,					     	      \
+      .enum_strings = {                                           	      \
+		       "created",					      \
+		       "listening",					      \
+		       "connecting",					      \
+		       "accepting",					      \
+		       "ready",						      \
+		       "opened",					      \
+		       "transport closing",				      \
+		       "closing",					      \
+		       "app closed",					      \
+		       "transport closed",				      \
+		       "closed",					      \
+		       "transport deleted",				      \
+		       },						      \
+    };                                   \
+    DEC_SESSION_ETD (_s, _e, 2);                                              \
+    ed->data[0] = _s->session_state;                                          \
+    ed->data[1] = _s->session_index;                                          \
+  }
+
+#define SESSION_EVT_FREE_HANDLER(_s)                                          \
+  {                                                                           \
+    ELOG_TYPE_DECLARE (_e) = {                                                \
+      .format = "free: idx %u",                                               \
+      .format_args = "i4",                                                    \
+    };                                                                        \
+    DEC_SESSION_ED (_e, 1);                                                   \
+    ed->data[0] = _s->session_index;                                          \
+  }
 #else
+#define SESSION_EVT_STATE_CHANGE_HANDLER(_s)
 #define SESSION_EVT_FREE_HANDLER(_s)
 #endif
 
@@ -237,14 +306,14 @@ extern session_dbg_main_t session_dbg_main;
 
 #if SESSION_CLOCKS_EVT_DBG
 
-#define SESSION_EVT_DSP_CNTRS_UPDATE_TIME_HANDLER(_wrk, _diff, _args...)	\
-  session_dbg_evts_t *sde = &session_dbg_main.wrk[_wrk->vm->thread_index];	\
-  sde->counters[SESS_Q_CLK_UPDATE_TIME].f64 += _diff;       			\
+#define SESSION_EVT_DSP_CNTRS_UPDATE_TIME_HANDLER(_wrk, _diff, _args...)      \
+  session_dbg_evts_t *sde = &session_dbg_main.wrk[_wrk->vm->thread_index];    \
+  sde->counters[SESS_Q_CLK_UPDATE_TIME].f64 += _diff;
 
-#define SESSION_EVT_DSP_CNTRS_MQ_DEQ_HANDLER(_wrk, _diff, _cnt, _dq, _args...)	\
-  session_dbg_evts_t *sde = &session_dbg_main.wrk[_wrk->vm->thread_index];	\
-  sde->counters[SESS_Q_CNT_MQ_EVTS].u64 += _dq * _cnt;      			\
-  sde->counters[SESS_Q_CLK_MQ_DEQ].f64 += _diff;	      			\
+#define SESSION_EVT_DSP_CNTRS_MQ_DEQ_HANDLER(_wrk, _diff, _cnt, _args...)     \
+  session_dbg_evts_t *sde = &session_dbg_main.wrk[_wrk->vm->thread_index];    \
+  sde->counters[SESS_Q_CNT_MQ_EVTS].u64 += _cnt;                              \
+  sde->counters[SESS_Q_CLK_MQ_DEQ].f64 += _diff;
 
 #define SESSION_EVT_DSP_CNTRS_CTRL_EVTS_HANDLER(_wrk, _diff, _args...)		\
   session_dbg_evts_t *sde = &session_dbg_main.wrk[_wrk->vm->thread_index];	\
@@ -282,17 +351,17 @@ extern session_dbg_main_t session_dbg_main;
 	counters[SESS_Q_##_node_evt].u64 += _cnt;     		\
 }
 
-#define SESSION_IO_EVT_COUNTS_HANDLER(_node_evt, _cnt, _wrk)   	\
-{                                                             	\
-  u8 type = SESS_Q_BASE_OFFSET_IO_EVTS + _node_evt + 1;      	\
-  session_dbg_evts_t *sde;					\
-  sde = &session_dbg_main.wrk[_wrk->vm->thread_index];		\
-  sde->counters[type].u64 += _cnt;                    		\
-  sde->counters[SESS_Q_CNT_IO_EVTS].u64 += _cnt ;     		\
-}
+#define SESSION_EVT_IO_EVT_COUNTS_HANDLER(_node_evt, _cnt, _wrk)              \
+  {                                                                           \
+    u8 type = SESS_Q_BASE_OFFSET_IO_EVTS + _node_evt + 1;                     \
+    session_dbg_evts_t *sde;                                                  \
+    sde = &session_dbg_main.wrk[_wrk->vm->thread_index];                      \
+    sde->counters[type].u64 += _cnt;                                          \
+    sde->counters[SESS_Q_CNT_IO_EVTS].u64 += _cnt;                            \
+  }
 #else
 #define SESSION_EVT_COUNTS_HANDLER(_node_evt, _cnt, _wrk)
-#define SESSION_IO_EVT_COUNTS_HANDLER(_node_evt, _cnt, _wrk)
+#define SESSION_EVT_IO_EVT_COUNTS_HANDLER(_node_evt, _cnt, _wrk)
 #endif /*SESSION_COUNTS_EVT_DBG */
 
 
@@ -322,8 +391,14 @@ extern session_dbg_main_t session_dbg_main;
 
 #define CONCAT_HELPER(_a, _b) _a##_b
 #define CC(_a, _b) CONCAT_HELPER(_a, _b)
-#define SESSION_EVT(_evt, _args...) CC(_evt, _HANDLER)(_args)
-
+#define session_evt_lvl(_evt) CC (_evt, _LVL)
+#define session_evt_grp(_evt) CC (_evt, _GRP)
+#define session_evt_grp_dbg_lvl(_evt)                                         \
+  session_dbg_main.grp_dbg_lvl[session_evt_grp (_evt)]
+#define SESSION_EVT(_evt, _args...)                                           \
+  if (PREDICT_FALSE (session_evt_grp_dbg_lvl (_evt) >=                        \
+		     session_evt_lvl (_evt)))                                 \
+  CC (_evt, _HANDLER) (_args)
 #else
 #define SESSION_EVT(_evt, _args...)
 #define SESSION_DBG(_fmt, _args...)

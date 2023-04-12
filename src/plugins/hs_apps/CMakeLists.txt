@@ -19,7 +19,9 @@ add_vpp_plugin(hs_apps
   echo_client.c
   echo_server.c
   hs_apps.c
-  http_server.c
+  http_cli.c
+  http_client_cli.c
+  http_tps.c
   proxy.c
 )
 
@@ -33,6 +35,7 @@ if(VPP_BUILD_HS_SAPI_APPS)
     sapi/vpp_echo.c
     sapi/vpp_echo_common.c
     sapi/vpp_echo_bapi.c
+    sapi/vpp_echo_sapi.c
     sapi/vpp_echo_proto_quic.c
     sapi/vpp_echo_proto_tcp.c
     sapi/vpp_echo_proto_udp.c
@@ -47,13 +50,24 @@ endif(VPP_BUILD_HS_SAPI_APPS)
 option(VPP_BUILD_VCL_TESTS "Build vcl tests." ON)
 if(VPP_BUILD_VCL_TESTS)
   foreach(test
-    vcl_test_server
-    vcl_test_client
     sock_test_server
     sock_test_client
   )
     add_vpp_executable(${test}
       SOURCES "vcl/${test}.c"
+      LINK_LIBRARIES vppcom pthread
+      NO_INSTALL
+    )
+  endforeach()
+
+  foreach(test
+    vcl_test_server
+    vcl_test_client
+  )
+    add_vpp_executable(${test}
+      SOURCES
+      "vcl/${test}.c"
+      vcl/vcl_test_protos.c
       LINK_LIBRARIES vppcom pthread
       NO_INSTALL
     )

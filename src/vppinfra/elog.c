@@ -395,8 +395,8 @@ format_elog_event (u8 * s, va_list * va)
   return s;
 }
 
-u8 *
-format_elog_track_name (u8 * s, va_list * va)
+__clib_export u8 *
+format_elog_track_name (u8 *s, va_list *va)
 {
   elog_main_t *em = va_arg (*va, elog_main_t *);
   elog_event_t *e = va_arg (*va, elog_event_t *);
@@ -494,7 +494,7 @@ elog_alloc_internal (elog_main_t * em, u32 n_events, int free_ring)
   em->event_ring_size = n_events = max_pow2 (n_events);
 
   vec_validate_aligned (em->event_ring, n_events, CLIB_CACHE_LINE_BYTES);
-  _vec_len (em->event_ring) = n_events;
+  vec_set_len (em->event_ring, n_events);
 }
 
 __clib_export void
@@ -695,8 +695,8 @@ elog_cmp (void *a1, void *a2)
 /*
  * merge two event logs. Complicated and cranky.
  */
-void
-elog_merge (elog_main_t * dst, u8 * dst_tag, elog_main_t * src, u8 * src_tag,
+__clib_export void
+elog_merge (elog_main_t *dst, u8 *dst_tag, elog_main_t *src, u8 *src_tag,
 	    f64 align_tweak)
 {
   elog_event_t *e;
@@ -1143,8 +1143,8 @@ serialize_elog_main (serialize_main_t * m, va_list * va)
   vec_foreach (e, em->events) serialize (m, serialize_elog_event, em, e);
 }
 
-void
-unserialize_elog_main (serialize_main_t * m, va_list * va)
+__clib_export void
+unserialize_elog_main (serialize_main_t *m, va_list *va)
 {
   elog_main_t *em = va_arg (*va, elog_main_t *);
   uword i;
@@ -1198,7 +1198,7 @@ elog_write_file_not_inline (elog_main_t * em, char *clib_file, int flush_ring)
 __clib_export clib_error_t *
 elog_read_file_not_inline (elog_main_t * em, char *clib_file)
 {
-  serialize_main_t m;
+  serialize_main_t m = { 0 };
   clib_error_t *error;
 
   error = unserialize_open_clib_file (&m, clib_file);

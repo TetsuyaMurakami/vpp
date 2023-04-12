@@ -213,44 +213,45 @@ vl_api_trace_dump_t_handler (vl_api_trace_dump_t * mp)
   iterator_position = clib_net_to_host_u32 (mp->position);
   max_records = clib_net_to_host_u32 (mp->max_records);
 
-  /* Don't overflow the existing queue space. */
-  svm_queue_t *q = rp->vl_input_queue;
-  u32 queue_slots_available = q->maxsize - q->cursize;
-  int chunk = (queue_slots_available > 0) ? queue_slots_available - 1 : 0;
-  if (chunk < max_records)
-    max_records = chunk;
+  /* Don't overflow the existing queue space for shared memory API clients. */
+  if (rp->vl_input_queue)
+    {
+      svm_queue_t *q = rp->vl_input_queue;
+      u32 queue_slots_available = q->maxsize - q->cursize;
+      int chunk = (queue_slots_available > 0) ? queue_slots_available - 1 : 0;
+      if (chunk < max_records)
+	max_records = chunk;
+    }
 
   /* Need a fresh cache for this client? */
   if (vec_len (client_trace_cache) == 0
       && (iterator_thread_id != ~0 || iterator_position != ~0))
     {
-      vlib_worker_thread_barrier_sync (&vlib_global_main);
+      vlib_worker_thread_barrier_sync (vlib_get_first_main ());
 
       /* Make a slot for each worker thread */
-      vec_validate (client_trace_cache, vec_len (vlib_mains) - 1);
+      vec_validate (client_trace_cache, vlib_get_n_threads () - 1);
       i = 0;
 
-      /* *INDENT-OFF* */
-      foreach_vlib_main (
-      ({
-        vlib_trace_main_t *tm = &this_vlib_main->trace_main;
+      foreach_vlib_main ()
+	{
+	  vlib_trace_main_t *tm = &this_vlib_main->trace_main;
 
-        /* Filter as directed */
-        trace_apply_filter(this_vlib_main);
+	  /* Filter as directed */
+	  trace_apply_filter (this_vlib_main);
 
-        pool_foreach (th, tm->trace_buffer_pool)
-         {
-          vec_add1 (client_trace_cache[i], th[0]);
-        }
+	  pool_foreach (th, tm->trace_buffer_pool)
+	    {
+	      vec_add1 (client_trace_cache[i], th[0]);
+	    }
 
-        /* Sort them by increasing time. */
-        if (vec_len (client_trace_cache[i]))
-          vec_sort_with_function (client_trace_cache[i], trace_cmp);
+	  /* Sort them by increasing time. */
+	  if (vec_len (client_trace_cache[i]))
+	    vec_sort_with_function (client_trace_cache[i], trace_cmp);
 
-        i++;
-      }));
-      /* *INDENT-ON* */
-      vlib_worker_thread_barrier_release (&vlib_global_main);
+	  i++;
+	}
+      vlib_worker_thread_barrier_release (vlib_get_first_main ());
     }
 
   /* Save the cache, one way or the other */
@@ -268,7 +269,8 @@ vl_api_trace_dump_t_handler (vl_api_trace_dump_t * mp)
 
 	  vec_reset_length (s);
 
-	  s = format (s, "%U", format_vlib_trace, &vlib_global_main, th[0]);
+	  s =
+	    format (s, "%U", format_vlib_trace, vlib_get_first_main (), th[0]);
 
 	  dmp = vl_msg_api_alloc (sizeof (*dmp) + vec_len (s));
 	  dmp->_vl_msg_id =
@@ -350,7 +352,7 @@ tracedump_init (vlib_main_t * vm)
   /* Add our API messages to the global name_crc hash table */
   tdmp->msg_id_base = setup_message_id_table ();
 
-  am->is_mp_safe[tdmp->msg_id_base + VL_API_TRACE_DUMP] = 1;
+  vl_api_set_msg_thread_safe (am, tdmp->msg_id_base + VL_API_TRACE_DUMP, 1);
 
   return error;
 }

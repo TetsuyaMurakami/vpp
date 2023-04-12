@@ -26,6 +26,13 @@ get_random_u32_max (u32 max)
   return random_u32 (&seed) % max;
 }
 
+static u32
+get_random_u32_max_opt (u32 max, f64 time)
+{
+  u32 seed = (u32) (time * 1e6);
+  return random_u32 (&seed) % max;
+}
+
 static void
 stop_timer (wg_peer_t * peer, u32 timer_id)
 {
@@ -66,7 +73,7 @@ start_timer_thread_fn (void *arg)
   return 0;
 }
 
-static void
+static_always_inline void
 start_timer_from_mt (u32 peer_idx, u32 timer_id, u32 interval_ticks)
 {
   wg_timers_args a = {
@@ -191,14 +198,14 @@ wg_expired_zero_key_material (vlib_main_t * vm, wg_peer_t * peer)
       return;
     }
 
-  if (!peer->is_dead)
+  if (!wg_peer_is_dead (peer))
     {
       noise_remote_clear (vm, &peer->remote);
     }
 }
 
-void
-wg_timers_any_authenticated_packet_traversal (wg_peer_t * peer)
+inline void
+wg_timers_any_authenticated_packet_traversal (wg_peer_t *peer)
 {
   if (peer->persistent_keepalive_interval)
     {
@@ -214,6 +221,12 @@ wg_timers_any_authenticated_packet_sent (wg_peer_t * peer)
   peer->last_sent_packet = vlib_time_now (vlib_get_main ());
 }
 
+inline void
+wg_timers_any_authenticated_packet_sent_opt (wg_peer_t *peer, f64 time)
+{
+  peer->last_sent_packet = time;
+}
+
 void
 wg_timers_handshake_initiated (wg_peer_t * peer)
 {
@@ -223,6 +236,16 @@ wg_timers_handshake_initiated (wg_peer_t * peer)
 
   start_timer_from_mt (peer - wg_peer_pool, WG_TIMER_RETRANSMIT_HANDSHAKE,
 		       peer->rehandshake_interval_tick);
+}
+
+void
+wg_timers_send_first_handshake (wg_peer_t *peer)
+{
+  // zero value is not allowed
+  peer->new_handshake_interval_tick =
+    get_random_u32_max (REKEY_TIMEOUT_JITTER) + 1;
+  start_timer_from_mt (peer - wg_peer_pool, WG_TIMER_NEW_HANDSHAKE,
+		       peer->new_handshake_interval_tick);
 }
 
 void
@@ -241,6 +264,17 @@ wg_timers_data_sent (wg_peer_t * peer)
   peer->new_handshake_interval_tick =
     (KEEPALIVE_TIMEOUT + REKEY_TIMEOUT) * WHZ +
     get_random_u32_max (REKEY_TIMEOUT_JITTER);
+
+  start_timer_from_mt (peer - wg_peer_pool, WG_TIMER_NEW_HANDSHAKE,
+		       peer->new_handshake_interval_tick);
+}
+
+inline void
+wg_timers_data_sent_opt (wg_peer_t *peer, f64 time)
+{
+  peer->new_handshake_interval_tick =
+    (KEEPALIVE_TIMEOUT + REKEY_TIMEOUT) * WHZ +
+    get_random_u32_max_opt (REKEY_TIMEOUT_JITTER, time);
 
   start_timer_from_mt (peer - wg_peer_pool, WG_TIMER_NEW_HANDSHAKE,
 		       peer->new_handshake_interval_tick);
@@ -273,6 +307,12 @@ void
 wg_timers_any_authenticated_packet_received (wg_peer_t * peer)
 {
   peer->last_received_packet = vlib_time_now (vlib_get_main ());
+}
+
+inline void
+wg_timers_any_authenticated_packet_received_opt (wg_peer_t *peer, f64 time)
+{
+  peer->last_received_packet = time;
 }
 
 static vlib_node_registration_t wg_timer_mngr_node;

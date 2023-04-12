@@ -100,8 +100,8 @@ load_balance_alloc_i (void)
     vlib_main_t *vm = vlib_get_main();
     ASSERT (vm->thread_index == 0);
 
-    pool_get_aligned_will_expand (load_balance_pool, need_barrier_sync,
-                                  CLIB_CACHE_LINE_BYTES);
+    need_barrier_sync = pool_get_will_expand (load_balance_pool);
+
     if (need_barrier_sync)
         vlib_worker_thread_barrier_sync (vm);
 
@@ -408,7 +408,7 @@ ip_multipath_normalize_next_hops (const load_balance_path_t * raw_next_hops,
     {
         nhs[0] = raw_next_hops[0];
         nhs[0].path_weight = 1;
-        _vec_len (nhs) = 1;
+        vec_set_len (nhs, 1);
         sum_weight = 1;
         goto done;
     }
@@ -425,7 +425,7 @@ ip_multipath_normalize_next_hops (const load_balance_path_t * raw_next_hops,
         if (nhs[0].path_weight == nhs[1].path_weight)
         {
             nhs[0].path_weight = nhs[1].path_weight = 1;
-            _vec_len (nhs) = 2;
+            vec_set_len (nhs, 2);
             sum_weight = 2;
             goto done;
         }
@@ -491,7 +491,7 @@ ip_multipath_normalize_next_hops (const load_balance_path_t * raw_next_hops,
         if (error <= multipath_next_hop_error_tolerance*n_adj)
         {
             /* Truncate any next hops with zero weight. */
-            _vec_len (nhs) = i;
+            vec_set_len (nhs, i);
             break;
         }
     }
@@ -592,6 +592,7 @@ load_balance_fill_buckets_sticky (load_balance_t *lb,
             {
                 /* fill the bucks from the next up path */
                 load_balance_set_bucket_i(lb, bucket++, buckets, &fwding_paths[fpath].path_dpo);
+                ASSERT(vec_len(fwding_paths) > 0);
                 fpath = (fpath + 1) % vec_len(fwding_paths);
             }
         }

@@ -104,7 +104,7 @@ vnet_hw_if_unregister_rx_queue (vnet_main_t *vnm, u32 queue_index)
   vnet_hw_interface_t *hi = vnet_get_hw_interface (vnm, rxq->hw_if_index);
   u64 key;
 
-  key = ((u64) rxq->hw_if_index << 32) | rxq->queue_id;
+  key = rx_queue_key (rxq->hw_if_index, rxq->queue_id);
   hash_unset_mem_free (&im->rxq_index_by_hw_if_index_and_queue_id, &key);
 
   for (int i = 0; i < vec_len (hi->rx_queue_indices); i++)
@@ -122,11 +122,32 @@ void
 vnet_hw_if_unregister_all_rx_queues (vnet_main_t *vnm, u32 hw_if_index)
 {
   vnet_hw_interface_t *hi = vnet_get_hw_interface (vnm, hw_if_index);
+  vnet_interface_main_t *im = &vnm->interface_main;
+  vnet_hw_if_rx_queue_t *rxq;
+  vlib_main_t *vm;
+  vnet_hw_if_rx_node_runtime_t *rt;
+  u64 key;
+  u32 queue_index;
 
   log_debug ("unregister_all: interface %v", hi->name);
 
   for (int i = 0; i < vec_len (hi->rx_queue_indices); i++)
-    vnet_hw_if_unregister_rx_queue (vnm, hi->rx_queue_indices[i]);
+    {
+      rxq = vnet_hw_if_get_rx_queue (vnm, hi->rx_queue_indices[i]);
+      key = rx_queue_key (rxq->hw_if_index, rxq->queue_id);
+      if (PREDICT_FALSE (rxq->mode == VNET_HW_IF_RX_MODE_INTERRUPT ||
+			 rxq->mode == VNET_HW_IF_RX_MODE_ADAPTIVE))
+	{
+	  vm = vlib_get_main_by_index (rxq->thread_index);
+	  queue_index = vnet_hw_if_get_rx_queue_index_by_id (vnm, hw_if_index,
+							     rxq->queue_id);
+	  rt = vlib_node_get_runtime_data (vm, hi->input_node_index);
+	  clib_interrupt_clear (rt->rxq_interrupts, queue_index);
+	}
+      hash_unset_mem_free (&im->rxq_index_by_hw_if_index_and_queue_id, &key);
+
+      pool_put_index (im->hw_if_rx_queues, hi->rx_queue_indices[i]);
+    }
 
   vec_free (hi->rx_queue_indices);
 }
@@ -219,7 +240,7 @@ vnet_hw_if_set_rx_queue_thread_index (vnet_main_t *vnm, u32 queue_index,
 	     hi->name, rxq->queue_id, thread_index);
 }
 
-void
+vnet_hw_if_rxq_poll_vector_t *
 vnet_hw_if_generate_rxq_int_poll_vector (vlib_main_t *vm,
 					 vlib_node_runtime_t *node)
 {
@@ -229,7 +250,7 @@ vnet_hw_if_generate_rxq_int_poll_vector (vlib_main_t *vm,
 
   ASSERT (node->state == VLIB_NODE_STATE_INTERRUPT);
 
-  vec_reset_length (rt->rxq_poll_vector);
+  vec_reset_length (rt->rxq_vector_int);
 
   while ((int_num = clib_interrupt_get_next (rt->rxq_interrupts, int_num)) !=
 	 -1)
@@ -239,10 +260,11 @@ vnet_hw_if_generate_rxq_int_poll_vector (vlib_main_t *vm,
 
       clib_interrupt_clear (rt->rxq_interrupts, int_num);
 
-      vec_add2 (rt->rxq_poll_vector, pv, 1);
+      vec_add2 (rt->rxq_vector_int, pv, 1);
       pv->dev_instance = rxq->dev_instance;
       pv->queue_id = rxq->queue_id;
     }
+  return rt->rxq_vector_int;
 }
 
 /*

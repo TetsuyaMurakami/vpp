@@ -16,7 +16,7 @@
 #define _GNU_SOURCE
 #include <vnet/bonding/node.h>
 #include <lacp/node.h>
-#include <vpp/stats/stat_segment.h>
+#include <vlib/stats/stats.h>
 
 static int
 lacp_packet_scan (vlib_main_t * vm, member_if_t * mif)
@@ -36,10 +36,8 @@ lacp_packet_scan (vlib_main_t * vm, member_if_t * mif)
       (lacpdu->terminator.tlv_length != 0))
     return (LACP_ERROR_BAD_TLV);
 
-  lacp_machine_dispatch (&lacp_rx_machine, vm, mif,
-			 LACP_RX_EVENT_PDU_RECEIVED, &mif->rx_state);
-
-  return LACP_ERROR_NONE;
+  return lacp_machine_dispatch (&lacp_rx_machine, vm, mif,
+				LACP_RX_EVENT_PDU_RECEIVED, &mif->rx_state);
 }
 
 static void
@@ -157,7 +155,7 @@ lacp_input (vlib_main_t * vm, vlib_buffer_t * b0, u32 bi0)
     {
       mif->last_marker_pdu_recd_time = vlib_time_now (vm);
       if (mif->last_marker_pkt)
-	_vec_len (mif->last_marker_pkt) = 0;
+	vec_set_len (mif->last_marker_pkt, 0);
       vec_validate (mif->last_marker_pkt,
 		    vlib_buffer_length_in_chain (vm, b0) - 1);
       nbytes = vlib_buffer_contents (vm, bi0, mif->last_marker_pkt);
@@ -178,7 +176,7 @@ lacp_input (vlib_main_t * vm, vlib_buffer_t * b0, u32 bi0)
    * and reuse it.
    */
   if (mif->last_rx_pkt)
-    _vec_len (mif->last_rx_pkt) = 0;
+    vec_set_len (mif->last_rx_pkt, 0);
 
   /*
    * Make sure the per-neighbor rx buffer is big enough to hold
@@ -215,19 +213,19 @@ lacp_input (vlib_main_t * vm, vlib_buffer_t * b0, u32 bi0)
       /* Actually scan the packet */
       e = lacp_packet_scan (vm, mif);
       bif = bond_get_bond_if_by_dev_instance (mif->bif_dev_instance);
-      stat_segment_set_state_counter (bm->stats[bif->sw_if_index]
-				      [mif->sw_if_index].actor_state,
-				      mif->actor.state);
-      stat_segment_set_state_counter (bm->stats[bif->sw_if_index]
-				      [mif->sw_if_index].partner_state,
-				      mif->partner.state);
+      vlib_stats_set_gauge (
+	bm->stats[bif->sw_if_index][mif->sw_if_index].actor_state,
+	mif->actor.state);
+      vlib_stats_set_gauge (
+	bm->stats[bif->sw_if_index][mif->sw_if_index].partner_state,
+	mif->partner.state);
       mif->last_packet_signature_valid = 1;
       mif->last_packet_signature = last_packet_signature;
     }
   mif->pdu_received++;
 
   if (mif->last_rx_pkt)
-    _vec_len (mif->last_rx_pkt) = 0;
+    vec_set_len (mif->last_rx_pkt, 0);
 
   return e;
 }

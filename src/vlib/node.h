@@ -89,9 +89,8 @@ typedef enum
 typedef struct _vlib_node_fn_registration
 {
   vlib_node_function_t *function;
-  int priority;
+  clib_march_variant_type_t march_variant;
   struct _vlib_node_fn_registration *next_registration;
-  char *name;
 } vlib_node_fn_registration_t;
 
 typedef struct _vlib_node_registration
@@ -116,7 +115,7 @@ typedef struct _vlib_node_registration
 
   /* Error strings indexed by error code for this node. */
   char **error_strings;
-  vl_counter_t *error_counters;
+  vlib_error_desc_t *error_counters;
 
   /* Buffer format/unformat for this node. */
   format_function_t *format_buffer;
@@ -150,7 +149,8 @@ typedef struct _vlib_node_registration
   u8 protocol_hint;
 
   /* Size of scalar and vector arguments in bytes. */
-  u16 scalar_size, vector_size;
+  u8 vector_size, aux_size;
+  u16 scalar_size;
 
   /* Number of error codes used by this node. */
   u16 n_errors;
@@ -167,25 +167,25 @@ typedef struct _vlib_node_registration
 } vlib_node_registration_t;
 
 #ifndef CLIB_MARCH_VARIANT
-#define VLIB_REGISTER_NODE(x,...)                                       \
-    __VA_ARGS__ vlib_node_registration_t x;                             \
-static void __vlib_add_node_registration_##x (void)                     \
-    __attribute__((__constructor__)) ;                                  \
-static void __vlib_add_node_registration_##x (void)                     \
-{                                                                       \
-    vlib_main_t * vm = vlib_get_main();                                 \
-    x.next_registration = vm->node_main.node_registrations;             \
-    vm->node_main.node_registrations = &x;                              \
-}                                                                       \
-static void __vlib_rm_node_registration_##x (void)                      \
-    __attribute__((__destructor__)) ;                                   \
-static void __vlib_rm_node_registration_##x (void)                      \
-{                                                                       \
-    vlib_main_t * vm = vlib_get_main();                                 \
-    VLIB_REMOVE_FROM_LINKED_LIST (vm->node_main.node_registrations,     \
-                                  &x, next_registration);               \
-}                                                                       \
-__VA_ARGS__ vlib_node_registration_t x
+#define VLIB_REGISTER_NODE(x, ...)                                            \
+  __VA_ARGS__ vlib_node_registration_t x;                                     \
+  static void __vlib_add_node_registration_##x (void)                         \
+    __attribute__ ((__constructor__));                                        \
+  static void __vlib_add_node_registration_##x (void)                         \
+  {                                                                           \
+    vlib_global_main_t *vgm = vlib_get_global_main ();                        \
+    x.next_registration = vgm->node_registrations;                            \
+    vgm->node_registrations = &x;                                             \
+  }                                                                           \
+  static void __vlib_rm_node_registration_##x (void)                          \
+    __attribute__ ((__destructor__));                                         \
+  static void __vlib_rm_node_registration_##x (void)                          \
+  {                                                                           \
+    vlib_global_main_t *vgm = vlib_get_global_main ();                        \
+    VLIB_REMOVE_FROM_LINKED_LIST (vgm->node_registrations, &x,                \
+				  next_registration);                         \
+  }                                                                           \
+  __VA_ARGS__ vlib_node_registration_t x
 #else
 #define VLIB_REGISTER_NODE(x,...)                                       \
 STATIC_ASSERT (sizeof(# __VA_ARGS__) != 7,"node " #x " must not be declared as static"); \
@@ -200,35 +200,27 @@ static __clib_unused vlib_node_registration_t __clib_unused_##x
 #define CLIB_MARCH_VARIANT_STR _CLIB_MARCH_VARIANT_STR(CLIB_MARCH_VARIANT)
 #endif
 
-#define VLIB_NODE_FN(node)						\
-uword CLIB_MARCH_SFX (node##_fn)();					\
-static vlib_node_fn_registration_t					\
-  CLIB_MARCH_SFX(node##_fn_registration) =				\
-  { .function = &CLIB_MARCH_SFX (node##_fn), };				\
-									\
-static void __clib_constructor						\
-CLIB_MARCH_SFX (node##_multiarch_register) (void)			\
-{									\
-  extern vlib_node_registration_t node;					\
-  vlib_node_fn_registration_t *r;					\
-  r = & CLIB_MARCH_SFX (node##_fn_registration);			\
-  r->priority = CLIB_MARCH_FN_PRIORITY();				\
-  r->name = CLIB_MARCH_VARIANT_STR;					\
-  r->next_registration = node.node_fn_registrations;			\
-  node.node_fn_registrations = r;					\
-}									\
-uword CLIB_CPU_OPTIMIZED CLIB_MARCH_SFX (node##_fn)
+#define VLIB_NODE_FN(node)                                                    \
+  uword CLIB_MARCH_SFX (node##_fn) (vlib_main_t *, vlib_node_runtime_t *,     \
+				    vlib_frame_t *);                          \
+  static vlib_node_fn_registration_t CLIB_MARCH_SFX (                         \
+    node##_fn_registration) = {                                               \
+    .function = &CLIB_MARCH_SFX (node##_fn),                                  \
+  };                                                                          \
+                                                                              \
+  static void __clib_constructor CLIB_MARCH_SFX (node##_multiarch_register) ( \
+    void)                                                                     \
+  {                                                                           \
+    extern vlib_node_registration_t node;                                     \
+    vlib_node_fn_registration_t *r;                                           \
+    r = &CLIB_MARCH_SFX (node##_fn_registration);                             \
+    r->march_variant = CLIB_MARCH_SFX (CLIB_MARCH_VARIANT_TYPE);              \
+    r->next_registration = node.node_fn_registrations;                        \
+    node.node_fn_registrations = r;                                           \
+  }                                                                           \
+  uword CLIB_MARCH_SFX (node##_fn)
 
 unformat_function_t unformat_vlib_node_variant;
-
-always_inline vlib_node_registration_t *
-vlib_node_next_registered (vlib_node_registration_t * c)
-{
-  c =
-    clib_elf_section_data_next (c,
-				c->n_next_nodes * sizeof (c->next_nodes[0]));
-  return c;
-}
 
 typedef struct
 {
@@ -283,7 +275,7 @@ typedef struct vlib_node_t
   u32 runtime_index;
 
   /* Runtime data for this node. */
-  void *runtime_data;
+  u8 *runtime_data;
 
   /* Node flags. */
   u16 flags;
@@ -304,6 +296,7 @@ typedef struct vlib_node_t
 #define VLIB_NODE_FLAG_SWITCH_FROM_INTERRUPT_TO_POLLING_MODE (1 << 6)
 #define VLIB_NODE_FLAG_SWITCH_FROM_POLLING_TO_INTERRUPT_MODE (1 << 7)
 #define VLIB_NODE_FLAG_TRACE_SUPPORTED (1 << 8)
+#define VLIB_NODE_FLAG_ADAPTIVE_MODE			     (1 << 9)
 
   /* State for input nodes. */
   u8 state;
@@ -318,14 +311,15 @@ typedef struct vlib_node_t
   u16 n_errors;
 
   /* Size of scalar and vector arguments in bytes. */
-  u16 scalar_size, vector_size;
+  u16 frame_size, scalar_offset, vector_offset, magic_offset, aux_offset;
+  u16 frame_size_index;
 
   /* Handle/index in error heap for this node. */
   u32 error_heap_handle;
   u32 error_heap_index;
 
   /* Counter structures indexed by counter code for this node. */
-  vl_counter_t *error_counters;
+  vlib_error_desc_t *error_counters;
 
   /* Vector of next node names.
      Only used before next_nodes array is initialized. */
@@ -376,7 +370,10 @@ typedef struct vlib_node_t
 
 /* Max number of vector elements to process at once per node. */
 #define VLIB_FRAME_SIZE 256
-#define VLIB_FRAME_ALIGN CLIB_CACHE_LINE_BYTES
+/* Number of extra elements allocated at the end of vecttor. */
+#define VLIB_FRAME_SIZE_EXTRA 4
+/* Frame data alignment */
+#define VLIB_FRAME_DATA_ALIGN 16
 
 /* Calling frame (think stack frame) for a node. */
 typedef struct vlib_frame_t
@@ -387,14 +384,14 @@ typedef struct vlib_frame_t
   /* User flags. Used for sending hints to the next node. */
   u16 flags;
 
-  /* Number of scalar bytes in arguments. */
-  u8 scalar_size;
-
-  /* Number of bytes per vector argument. */
-  u8 vector_size;
+  /* Scalar, vector and aux offsets in this frame. */
+  u16 scalar_offset, vector_offset, aux_offset;
 
   /* Number of vector elements currently in frame. */
   u16 n_vectors;
+
+  /* Index of frame size corresponding to allocated node. */
+  u16 frame_size_index;
 
   /* Scalar and vector arguments to next node. */
   u8 arguments[0];
@@ -448,11 +445,11 @@ vlib_next_frame_init (vlib_next_frame_t * nf)
 /* A frame pending dispatch by main loop. */
 typedef struct
 {
-  /* Node and runtime for this frame. */
-  u32 node_runtime_index;
-
   /* Frame index (in the heap). */
   vlib_frame_t *frame;
+
+  /* Node and runtime for this frame. */
+  u32 node_runtime_index;
 
   /* Start of next frames for this node. */
   u32 next_frame_index;
@@ -510,7 +507,7 @@ typedef struct vlib_node_runtime_t
 					  zero before first run of this
 					  node. */
 
-  u16 thread_index;			/**< thread this node runs on */
+  CLIB_ALIGN_MARK (runtime_data_pad, 8);
 
   u8 runtime_data[0];			/**< Function dependent
 					  node-runtime data. This data is
@@ -530,9 +527,14 @@ typedef struct
   /* Number of allocated frames for this scalar/vector size. */
   u32 n_alloc_frames;
 
+  /* Frame size */
+  u16 frame_size;
+
   /* Vector of free frames for this scalar/vector size. */
   vlib_frame_t **free_frames;
 } vlib_frame_size_t;
+
+STATIC_ASSERT_SIZEOF (vlib_frame_size_t, 16);
 
 typedef struct
 {
@@ -575,7 +577,7 @@ typedef struct
   u32 n_suspends;
 
   /* Vectors of pending event data indexed by event type index. */
-  void **pending_event_data_by_type_index;
+  u8 **pending_event_data_by_type_index;
 
   /* Bitmap of event type-indices with non-empty vectors. */
   uword *non_empty_event_type_bitmap;
@@ -666,6 +668,14 @@ vlib_timing_wheel_data_get_index (u32 d)
 
 typedef struct
 {
+  clib_march_variant_type_t index;
+  int priority;
+  char *suffix;
+  char *desc;
+} vlib_node_fn_variant_t;
+
+typedef struct
+{
   /* Public nodes. */
   vlib_node_t **nodes;
 
@@ -722,20 +732,23 @@ typedef struct
   /* Current counts of nodes in each state. */
   u32 input_node_counts_by_state[VLIB_N_NODE_STATE];
 
-  /* Hash of (scalar_size,vector_size) to frame_sizes index. */
-  uword *frame_size_hash;
-
   /* Per-size frame allocation information. */
   vlib_frame_size_t *frame_sizes;
 
   /* Time of last node runtime stats clear. */
   f64 time_last_runtime_stats_clear;
 
-  /* Node registrations added by constructors */
-  vlib_node_registration_t *node_registrations;
-
   /* Node index from error code */
   u32 *node_by_error;
+
+  /* Node Function Variants */
+  vlib_node_fn_variant_t *variants;
+
+  /* Node Function Default Variant Index */
+  u32 node_fn_default_march_variant;
+
+  /* Node Function march Variant by Suffix Hash */
+  uword *node_fn_march_variant_by_suffix;
 } vlib_node_main_t;
 
 typedef u16 vlib_error_t;
@@ -760,7 +773,6 @@ typedef struct
 {
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
   u64 head;
-  u64 head_hint;
   u64 tail;
   u32 n_in_use;
   u32 nelts;

@@ -174,6 +174,7 @@ ip6_fib_table_destroy (u32 fib_index)
     {
 	hash_unset (ip6_main.fib_index_by_table_id, fib_table->ft_table_id);
     }
+    vec_free (fib_table->ft_locks);
     vec_free(fib_table->ft_src_route_counts);
     pool_put_index(ip6_main.v6_fibs, fib_table->ft_index);
     pool_put(ip6_main.fibs, fib_table);
@@ -772,7 +773,7 @@ ip6_show_fib (vlib_main_t * vm,
  * entries for each table.
  *
  * @note This command will run for a long time when the FIB tables are
- * comprised of millions of entries. For those senarios, consider displaying
+ * comprised of millions of entries. For those scenarios, consider displaying
  * in summary mode.
  *
  * @cliexpar

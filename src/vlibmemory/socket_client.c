@@ -36,8 +36,11 @@
 #include <vlibmemory/vl_memory_api_h.h>
 #undef vl_endianfun
 
+#define vl_calcsizefun
+#include <vlibmemory/vl_memory_api_h.h>
+#undef vl_calcsizefun
+
 /* instantiate all the print functions we know about */
-#define vl_print(handle, ...) clib_warning (__VA_ARGS__)
 #define vl_printfun
 #include <vlibmemory/vl_memory_api_h.h>
 #undef vl_printfun
@@ -84,12 +87,11 @@ vl_socket_client_read_internal (socket_client_main_t * scm, int wait)
 
   while (1)
     {
-      while (vec_len (scm->socket_rx_buffer) < sizeof (*mbp))
+      current_rx_index = vec_len (scm->socket_rx_buffer);
+      while (current_rx_index < sizeof (*mbp))
 	{
-	  current_rx_index = vec_len (scm->socket_rx_buffer);
 	  vec_validate (scm->socket_rx_buffer, current_rx_index
 			+ scm->socket_buffer_size - 1);
-	  _vec_len (scm->socket_rx_buffer) = current_rx_index;
 	  n = read (scm->socket_fd, scm->socket_rx_buffer + current_rx_index,
 		    scm->socket_buffer_size);
 	  if (n < 0)
@@ -98,10 +100,12 @@ vl_socket_client_read_internal (socket_client_main_t * scm, int wait)
 		continue;
 
 	      clib_unix_warning ("socket_read");
+	      vec_set_len (scm->socket_rx_buffer, current_rx_index);
 	      return -1;
 	    }
-	  _vec_len (scm->socket_rx_buffer) += n;
+	  current_rx_index += n;
 	}
+      vec_set_len (scm->socket_rx_buffer, current_rx_index);
 
 #if CLIB_DEBUG > 1
       if (n > 0)
@@ -112,32 +116,32 @@ vl_socket_client_read_internal (socket_client_main_t * scm, int wait)
       data_len = ntohl (mbp->data_len);
       current_rx_index = vec_len (scm->socket_rx_buffer);
       vec_validate (scm->socket_rx_buffer, current_rx_index + data_len);
-      _vec_len (scm->socket_rx_buffer) = current_rx_index;
       mbp = (msgbuf_t *) (scm->socket_rx_buffer);
       msg_size = data_len + sizeof (*mbp);
 
-      while (vec_len (scm->socket_rx_buffer) < msg_size)
+      while (current_rx_index < msg_size)
 	{
-	  n = read (scm->socket_fd,
-		    scm->socket_rx_buffer + vec_len (scm->socket_rx_buffer),
-		    msg_size - vec_len (scm->socket_rx_buffer));
+	  n = read (scm->socket_fd, scm->socket_rx_buffer + current_rx_index,
+		    msg_size - current_rx_index);
 	  if (n < 0)
 	    {
 	      if (errno == EAGAIN)
 		continue;
 
 	      clib_unix_warning ("socket_read");
+	      vec_set_len (scm->socket_rx_buffer, current_rx_index);
 	      return -1;
 	    }
-	  _vec_len (scm->socket_rx_buffer) += n;
+	  current_rx_index += n;
 	}
+      vec_set_len (scm->socket_rx_buffer, current_rx_index);
 
       if (vec_len (scm->socket_rx_buffer) >= data_len + sizeof (*mbp))
 	{
-	  vl_msg_api_socket_handler ((void *) (mbp->data));
+	  vl_msg_api_socket_handler ((void *) (mbp->data), data_len);
 
 	  if (vec_len (scm->socket_rx_buffer) == data_len + sizeof (*mbp))
-	    _vec_len (scm->socket_rx_buffer) = 0;
+	    vec_set_len (scm->socket_rx_buffer, 0);
 	  else
 	    vec_delete (scm->socket_rx_buffer, data_len + sizeof (*mbp), 0);
 	  mbp = 0;
@@ -175,11 +179,11 @@ static int
 vl_socket_client_write_internal (socket_client_main_t * scm)
 {
   int n;
-
+  int len = vec_len (scm->socket_tx_buffer);
   msgbuf_t msgbuf = {
     .q = 0,
     .gc_mark_timestamp = 0,
-    .data_len = htonl (scm->socket_tx_nbytes),
+    .data_len = htonl (len),
   };
 
   n = write (scm->socket_fd, &msgbuf, sizeof (msgbuf));
@@ -189,8 +193,11 @@ vl_socket_client_write_internal (socket_client_main_t * scm)
       return -1;
     }
 
-  n = write (scm->socket_fd, scm->socket_tx_buffer, scm->socket_tx_nbytes);
-  if (n < scm->socket_tx_nbytes)
+  n = write (scm->socket_fd, scm->socket_tx_buffer, len);
+
+  vec_set_len (scm->socket_tx_buffer, 0);
+
+  if (n < len)
     {
       clib_unix_warning ("socket write (msg)");
       return -1;
@@ -220,7 +227,7 @@ vl_socket_client_write2 (socket_client_main_t * scm)
 void *
 vl_socket_client_msg_alloc2 (socket_client_main_t * scm, int nbytes)
 {
-  scm->socket_tx_nbytes = nbytes;
+  vec_set_len (scm->socket_tx_buffer, nbytes);
   return ((void *) scm->socket_tx_buffer);
 }
 
@@ -423,22 +430,23 @@ vl_api_sockclnt_create_reply_t_handler (vl_api_sockclnt_create_reply_t * mp)
 _(SOCKCLNT_CREATE_REPLY, sockclnt_create_reply)			\
 _(SOCK_INIT_SHM_REPLY, sock_init_shm_reply)     		\
 
-static void
-noop_handler (void *notused)
-{
-}
-
 void
 vl_sock_client_install_message_handlers (void)
 {
 
-#define _(N,n)                                                  \
-    vl_msg_api_set_handlers(VL_API_##N, #n,                     \
-                            vl_api_##n##_t_handler,             \
-                            noop_handler,                       \
-                            vl_api_##n##_t_endian,              \
-                            vl_api_##n##_t_print,               \
-                            sizeof(vl_api_##n##_t), 1);
+#define _(N, n)                                                               \
+  vl_msg_api_config (&(vl_msg_api_msg_config_t){                              \
+    .id = VL_API_##N,                                                         \
+    .name = #n,                                                               \
+    .handler = vl_api_##n##_t_handler,                                        \
+    .endian = vl_api_##n##_t_endian,                                          \
+    .format_fn = vl_api_##n##_t_format,                                       \
+    .size = sizeof (vl_api_##n##_t),                                          \
+    .traced = 0,                                                              \
+    .tojson = vl_api_##n##_t_tojson,                                          \
+    .fromjson = vl_api_##n##_t_fromjson,                                      \
+    .calc_size = vl_api_##n##_t_calc_size,                                    \
+  });
   foreach_sock_client_api_msg;
 #undef _
 }
@@ -462,7 +470,7 @@ vl_socket_client_connect_internal (socket_client_main_t * scm,
 
   sock = &scm->client_socket;
   sock->config = socket_path;
-  sock->flags = CLIB_SOCKET_F_IS_CLIENT | CLIB_SOCKET_F_NON_BLOCKING_CONNECT;
+  sock->flags = CLIB_SOCKET_F_IS_CLIENT;
 
   if ((error = clib_socket_init (sock)))
     {
@@ -477,8 +485,8 @@ vl_socket_client_connect_internal (socket_client_main_t * scm,
     SOCKET_CLIENT_DEFAULT_BUFFER_SIZE;
   vec_validate (scm->socket_tx_buffer, scm->socket_buffer_size - 1);
   vec_validate (scm->socket_rx_buffer, scm->socket_buffer_size - 1);
-  _vec_len (scm->socket_rx_buffer) = 0;
-  _vec_len (scm->socket_tx_buffer) = 0;
+  vec_set_len (scm->socket_rx_buffer, 0);
+  vec_set_len (scm->socket_tx_buffer, 0);
   scm->name = format (0, "%s", client_name);
 
   mp = vl_socket_client_msg_alloc2 (scm, sizeof (*mp));

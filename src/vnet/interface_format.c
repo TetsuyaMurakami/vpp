@@ -43,6 +43,7 @@
 #include <vnet/l2/l2_output.h>
 #include <vnet/l2/l2_vtr.h>
 #include <vnet/interface/rx_queue_funcs.h>
+#include <vnet/interface/tx_queue_funcs.h>
 
 u8 *
 format_vtr (u8 * s, va_list * args)
@@ -119,7 +120,7 @@ format_vnet_hw_interface_link_speed (u8 * s, va_list * args)
 {
   u32 link_speed = va_arg (*args, u32);
 
-  if (link_speed == 0)
+  if (link_speed == 0 || link_speed == UINT32_MAX)
     return format (s, "unknown");
 
   if (link_speed >= 1000000)
@@ -205,6 +206,25 @@ format_vnet_hw_interface (u8 * s, va_list * args)
 	  s = format (s, "\n%U%-6u%-15U%-10U", format_white_space, indent + 4,
 		      rxq->queue_id, format_vlib_thread_name_and_index,
 		      rxq->thread_index, format_vnet_hw_if_rx_mode, rxq->mode);
+	}
+    }
+
+  if (vec_len (hi->tx_queue_indices))
+    {
+      s = format (s, "\n%UTX Queues:", format_white_space, indent + 2);
+      s = format (
+	s, "\n%UTX Hash: %U", format_white_space, indent + 4, format_vnet_hash,
+	vnet_hash_function_from_func (hi->hf, hw_class->tx_hash_fn_type));
+      s = format (s, "\n%U%-6s%-7s%-15s", format_white_space, indent + 4,
+		  "queue", "shared", "thread(s)");
+      for (int i = 0; i < vec_len (hi->tx_queue_indices); i++)
+	{
+	  vnet_hw_if_tx_queue_t *txq;
+	  txq = vnet_hw_if_get_tx_queue (vnm, hi->tx_queue_indices[i]);
+	  s = format (
+	    s, "\n%U%-6u%-7s%U", format_white_space, indent + 4, txq->queue_id,
+	    clib_bitmap_count_set_bits (txq->threads) > 1 ? "yes" : "no",
+	    format_bitmap_list, txq->threads);
 	}
     }
 
@@ -349,11 +369,11 @@ format_vnet_sw_interface_cntrs (u8 * s, vnet_interface_main_t * im,
       n_printed += 2;
 
       if (n)
-	_vec_len (n) = 0;
+	vec_set_len (n, 0);
       n = format (n, "%s packets", cm->name);
       s = format (s, "%-16v%16Ld", n, vtotal.packets);
 
-      _vec_len (n) = 0;
+      vec_set_len (n, 0);
       n = format (n, "%s bytes", cm->name);
       s = format (s, "\n%U%-16v%16Ld",
 		  format_white_space, indent, n, vtotal.bytes);
@@ -582,9 +602,9 @@ format_vnet_buffer_opaque (u8 * s, va_list * args)
 
   s = format (s,
 	      "l2_classify.table_index: %d, l2_classify.opaque_index: %d, "
-	      "l2_classify.hash: 0x%llx",
-	      o->l2_classify.table_index,
-	      o->l2_classify.opaque_index, o->l2_classify.hash);
+	      "l2_classify.hash: 0x%lx",
+	      o->l2_classify.table_index, o->l2_classify.opaque_index,
+	      o->l2_classify.hash);
   vec_add1 (s, '\n');
 
   s = format (s, "policer.index: %d", o->policer.index);
@@ -677,15 +697,8 @@ format_vnet_buffer_opaque2 (u8 * s, va_list * args)
   s = format (s, "loop_counter: %d", o->loop_counter);
   vec_add1 (s, '\n');
 
-  s = format (s, "gbp.flags: %x, gbp.sclass: %d",
-	      (u32) (o->gbp.flags), (u32) (o->gbp.sclass));
-  vec_add1 (s, '\n');
-
   s = format (s, "gso_size: %d, gso_l4_hdr_sz: %d",
 	      (u32) (o->gso_size), (u32) (o->gso_l4_hdr_sz));
-  vec_add1 (s, '\n');
-
-  s = format (s, "pg_replay_timestamp: %llu", (u32) (o->pg_replay_timestamp));
   vec_add1 (s, '\n');
 
   for (i = 0; i < vec_len (im->buffer_opaque2_format_helpers); i++)
@@ -745,7 +758,7 @@ unformat_vnet_buffer_offload_flags (unformat_input_t *input, va_list *args)
 {
   u32 *flagp = va_arg (*args, u32 *);
   int rv = 0;
-  u32 oflags = 0;
+  vnet_buffer_oflags_t oflags = 0;
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
     {
@@ -762,7 +775,7 @@ unformat_vnet_buffer_offload_flags (unformat_input_t *input, va_list *args)
 	else break;
     }
   if (rv)
-    *flagp = oflags;
+    *flagp = (u32) oflags;
   return rv;
 }
 

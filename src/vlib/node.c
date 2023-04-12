@@ -68,7 +68,8 @@ node_set_elog_name (vlib_main_t * vm, uword node_index)
   vec_free (t->format);
   t->format = (char *) format (0, "%v-return: %%d%c", n->name, 0);
 
-  n->name_elog_string = elog_string (&vm->elog_main, "%v%c", n->name, 0);
+  n->name_elog_string =
+    elog_string (&vlib_global_main.elog_main, "%v%c", n->name, 0);
 }
 
 void
@@ -290,11 +291,51 @@ node_elog_init (vlib_main_t * vm, uword ni)
 #define STACK_ALIGN CLIB_CACHE_LINE_BYTES
 #endif
 
-static void
-register_node (vlib_main_t * vm, vlib_node_registration_t * r)
+vlib_node_function_t *
+vlib_node_get_preferred_node_fn_variant (vlib_main_t *vm,
+					 vlib_node_fn_registration_t *regs)
+{
+  vlib_node_main_t *nm = &vm->node_main;
+  vlib_node_fn_registration_t *r;
+  vlib_node_fn_variant_t *v;
+  vlib_node_function_t *fn = 0;
+  int priority = -1;
+
+  if (nm->node_fn_default_march_variant != ~0)
+    {
+      r = regs;
+      while (r)
+	{
+	  if (r->march_variant == nm->node_fn_default_march_variant)
+	    return r->function;
+	  r = r->next_registration;
+	}
+    }
+
+  r = regs;
+  while (r)
+    {
+      v = vec_elt_at_index (nm->variants, r->march_variant);
+      if (v->priority > priority)
+	{
+	  priority = v->priority;
+	  fn = r->function;
+	}
+      r = r->next_registration;
+    }
+
+  ASSERT (fn);
+  return fn;
+}
+
+u32
+vlib_register_node (vlib_main_t *vm, vlib_node_registration_t *r, char *fmt,
+		    ...)
 {
   vlib_node_main_t *nm = &vm->node_main;
   vlib_node_t *n;
+  va_list va;
+  u32 size;
   int i;
 
   if (CLIB_DEBUG > 0)
@@ -306,22 +347,12 @@ register_node (vlib_main_t * vm, vlib_node_registration_t * r)
 
   if (r->node_fn_registrations)
     {
-      vlib_node_fn_registration_t *fnr = r->node_fn_registrations;
-      int priority = -1;
-
       /* to avoid confusion, please remove ".function " statiement from
          CLIB_NODE_REGISTRATION() if using function function candidates */
       ASSERT (r->function == 0);
 
-      while (fnr)
-	{
-	  if (fnr->priority > priority)
-	    {
-	      priority = fnr->priority;
-	      r->function = fnr->function;
-	    }
-	  fnr = fnr->next_registration;
-	}
+      r->function =
+	vlib_node_get_preferred_node_fn_variant (vm, r->node_fn_registrations);
     }
 
   ASSERT (r->function != 0);
@@ -334,11 +365,9 @@ register_node (vlib_main_t * vm, vlib_node_registration_t * r)
 
   vec_add1 (nm->nodes, n);
 
-  /* Name is always a vector so it can be formatted with %v. */
-  if (clib_mem_is_heap_object (vec_header (r->name, 0)))
-    n->name = vec_dup ((u8 *) r->name);
-  else
-    n->name = format (0, "%s", r->name);
+  va_start (va, fmt);
+  n->name = va_format (0, fmt, &va);
+  va_end (va);
 
   if (!nm->node_by_name)
     nm->node_by_name = hash_create_vec ( /* size */ 32,
@@ -372,12 +401,65 @@ register_node (vlib_main_t * vm, vlib_node_registration_t * r)
   _(type);
   _(flags);
   _(state);
-  _(scalar_size);
-  _(vector_size);
   _(format_buffer);
   _(unformat_buffer);
   _(format_trace);
   _(validate_frame);
+
+  size = round_pow2 (sizeof (vlib_frame_t), VLIB_FRAME_DATA_ALIGN);
+
+  /* scalar data size */
+  if (r->scalar_size)
+    {
+      n->scalar_offset = size;
+      size += round_pow2 (r->scalar_size, VLIB_FRAME_DATA_ALIGN);
+    }
+  else
+    n->scalar_offset = 0;
+
+  /* Vecor data size */
+  n->vector_offset = size;
+  size += r->vector_size * VLIB_FRAME_SIZE;
+
+  /* Allocate a few extra slots of vector data to support
+     speculative vector enqueues which overflow vector data in next frame. */
+  size += r->vector_size * VLIB_FRAME_SIZE_EXTRA;
+
+  /* space for VLIB_FRAME_MAGIC */
+  n->magic_offset = size;
+  size += sizeof (u32);
+
+  /* round size to VLIB_FRAME_DATA_ALIGN */
+  size = round_pow2 (size, VLIB_FRAME_DATA_ALIGN);
+
+  if (r->aux_size)
+    {
+      n->aux_offset = size;
+      size += r->aux_size * VLIB_FRAME_SIZE;
+    }
+  else
+    n->aux_offset = 0;
+
+  /* final size */
+  n->frame_size = size = round_pow2 (size, CLIB_CACHE_LINE_BYTES);
+  ASSERT (size <= __UINT16_MAX__);
+
+  vlib_frame_size_t *fs = 0;
+
+  n->frame_size_index = (u16) ~0;
+  vec_foreach (fs, nm->frame_sizes)
+    if (fs->frame_size == size)
+      {
+	n->frame_size_index = fs - nm->frame_sizes;
+	break;
+      }
+
+  if (n->frame_size_index == (u16) ~0)
+    {
+      vec_add2 (nm->frame_sizes, fs, 1);
+      fs->frame_size = size;
+      n->frame_size_index = fs - nm->frame_sizes;
+    }
 
   /* Register error counters. */
   vlib_register_errors (vm, n->index, r->n_errors, r->error_strings,
@@ -483,13 +565,7 @@ register_node (vlib_main_t * vm, vlib_node_registration_t * r)
 
     vec_free (n->runtime_data);
   }
-}
-
-/* Register new packet processing node. */
-u32
-vlib_register_node (vlib_main_t * vm, vlib_node_registration_t * r)
-{
-  register_node (vm, r);
+#undef _
   return r->index;
 }
 
@@ -501,14 +577,49 @@ null_node_fn (vlib_main_t * vm,
 
   vlib_node_increment_counter (vm, node->node_index, 0, n_vectors);
   vlib_buffer_free (vm, vlib_frame_vector_args (frame), n_vectors);
-  vlib_frame_free (vm, node, frame);
+  vlib_frame_free (vm, frame);
 
   return n_vectors;
 }
 
 void
+vlib_register_all_node_march_variants (vlib_main_t *vm)
+{
+  vlib_node_main_t *nm = &vm->node_main;
+  vlib_node_fn_variant_t *v;
+  int prio = -1;
+
+  nm->node_fn_default_march_variant = ~0;
+  ASSERT (nm->variants == 0);
+  vec_add2 (nm->variants, v, 1);
+  v->desc = v->suffix = "default";
+  v->index = CLIB_MARCH_VARIANT_TYPE;
+
+#define _(s, n)                                                               \
+  vec_add2 (nm->variants, v, 1);                                              \
+  v->suffix = #s;                                                             \
+  v->index = CLIB_MARCH_VARIANT_TYPE_##s;                                     \
+  v->priority = clib_cpu_march_priority_##s ();                               \
+  v->desc = n;
+
+  foreach_march_variant;
+#undef _
+
+  nm->node_fn_march_variant_by_suffix = hash_create_string (0, sizeof (u32));
+
+  vec_foreach (v, nm->variants)
+    {
+      ASSERT (v->index == v - nm->variants);
+      hash_set (nm->node_fn_march_variant_by_suffix, v->suffix, v->index);
+      if (v->priority > prio)
+	prio = v->priority;
+    }
+}
+
+void
 vlib_register_all_static_nodes (vlib_main_t * vm)
 {
+  vlib_global_main_t *vgm = vlib_get_global_main ();
   vlib_node_registration_t *r;
 
   static char *null_node_error_strings[] = {
@@ -518,19 +629,18 @@ vlib_register_all_static_nodes (vlib_main_t * vm)
   static vlib_node_registration_t null_node_reg = {
     .function = null_node_fn,
     .vector_size = sizeof (u32),
-    .name = "null-node",
     .n_errors = 1,
     .error_strings = null_node_error_strings,
   };
 
   /* make sure that node index 0 is not used by
      real node */
-  register_node (vm, &null_node_reg);
+  vlib_register_node (vm, &null_node_reg, "null-node");
 
-  r = vm->node_main.node_registrations;
+  r = vgm->node_registrations;
   while (r)
     {
-      register_node (vm, r);
+      vlib_register_node (vm, r, "%s", r->name);
       r = r->next_registration;
     }
 }
@@ -551,9 +661,9 @@ vlib_node_get_nodes (vlib_main_t * vm, u32 max_threads, int include_stats,
 
   if (vec_len (stat_vms) == 0)
     {
-      for (i = 0; i < vec_len (vlib_mains); i++)
+      for (i = 0; i < vlib_get_n_threads (); i++)
 	{
-	  stat_vm = vlib_mains[i];
+	  stat_vm = vlib_get_main_by_index (i);
 	  if (stat_vm)
 	    vec_add1 (stat_vms, stat_vm);
 	}
@@ -605,10 +715,6 @@ vlib_node_main_init (vlib_main_t * vm)
   vlib_node_t *n;
   uword ni;
 
-  nm->frame_sizes = vec_new (vlib_frame_size_t, 1);
-#ifdef VLIB_SUPPORTS_ARBITRARY_SCALAR_SIZES
-  nm->frame_size_hash = hash_create (0, sizeof (uword));
-#endif
   nm->flags |= VLIB_NODE_MAIN_RUNTIME_STARTED;
 
   /* Generate sibling relationships */
@@ -736,14 +842,13 @@ vlib_process_create (vlib_main_t * vm, char *name,
 
   memset (&r, 0, sizeof (r));
 
-  r.name = (char *) format (0, "%s", name, 0);
   r.function = f;
   r.process_log2_n_stack_bytes = log2_n_stack_bytes;
   r.type = VLIB_NODE_TYPE_PROCESS;
 
   vlib_worker_thread_barrier_sync (vm);
 
-  vlib_register_node (vm, &r);
+  vlib_register_node (vm, &r, "%s", name);
   vec_free (r.name);
 
   vlib_worker_thread_node_runtime_update ();
@@ -755,6 +860,39 @@ vlib_process_create (vlib_main_t * vm, char *name,
   return (r.index);
 }
 
+int
+vlib_node_set_march_variant (vlib_main_t *vm, u32 node_index,
+			     clib_march_variant_type_t march_variant)
+{
+  vlib_node_fn_registration_t *fnr;
+  vlib_node_fn_variant_t *v;
+  vlib_node_t *n = vlib_get_node (vm, node_index);
+
+  if (n->node_fn_registrations == 0)
+    return -1;
+
+  fnr = n->node_fn_registrations;
+  v = vec_elt_at_index (vm->node_main.variants, march_variant);
+
+  while (fnr)
+    {
+      if (fnr->march_variant == v->index)
+	{
+	  n->function = fnr->function;
+
+	  for (int i = 0; i < vlib_get_n_threads (); i++)
+	    {
+	      vlib_node_runtime_t *nrt;
+	      nrt =
+		vlib_node_get_runtime (vlib_get_main_by_index (i), n->index);
+	      nrt->function = fnr->function;
+	    }
+	  return 0;
+	}
+      fnr = fnr->next_registration;
+    }
+  return -1;
+}
 /*
  * fd.io coding-style-patch-verification: ON
  *

@@ -38,6 +38,7 @@
  */
 
 #include <vlib/vlib.h>
+#include <vlib/stats/stats.h>
 #include <vlib/unix/unix.h>
 #include <vppinfra/callback.h>
 #include <vppinfra/cpu.h>
@@ -158,6 +159,64 @@ done:
   return match;
 }
 
+uword
+unformat_vlib_cli_line (unformat_input_t *i, va_list *va)
+{
+  unformat_input_t *result = va_arg (*va, unformat_input_t *);
+  u8 *line = 0;
+  uword c;
+  int skip;
+
+next_line:
+  skip = 0;
+
+  /* skip leading whitespace if any */
+  unformat_skip_white_space (i);
+
+  if (unformat_is_eof (i))
+    return 0;
+
+  while ((c = unformat_get_input (i)) != UNFORMAT_END_OF_INPUT)
+    {
+      if (c == '\\')
+	{
+	  c = unformat_get_input (i);
+
+	  if (c == '\n')
+	    {
+	      if (!skip)
+		vec_add1 (line, '\n');
+	      skip = 0;
+	      continue;
+	    }
+
+	  if (!skip)
+	    vec_add1 (line, '\\');
+
+	  if (c == UNFORMAT_END_OF_INPUT)
+	    break;
+
+	  if (!skip)
+	    vec_add1 (line, c);
+	  continue;
+	}
+
+      if (c == '#')
+	skip = 1;
+      else if (c == '\n')
+	break;
+
+      if (!skip)
+	vec_add1 (line, c);
+    }
+
+  if (line == 0)
+    goto next_line;
+
+  unformat_init_vector (result, line);
+  return 1;
+}
+
 /* Looks for string based sub-input formatted { SUB-INPUT }. */
 uword
 unformat_vlib_cli_sub_input (unformat_input_t * i, va_list * args)
@@ -205,10 +264,11 @@ get_sub_command (vlib_cli_main_t * cm, vlib_cli_command_t * parent, u32 si)
 static uword
 unformat_vlib_cli_sub_command (unformat_input_t * i, va_list * args)
 {
-  vlib_main_t *vm = va_arg (*args, vlib_main_t *);
+  vlib_main_t __clib_unused *vm = va_arg (*args, vlib_main_t *);
+  vlib_global_main_t *vgm = vlib_get_global_main ();
   vlib_cli_command_t *c = va_arg (*args, vlib_cli_command_t *);
   vlib_cli_command_t **result = va_arg (*args, vlib_cli_command_t **);
-  vlib_cli_main_t *cm = &vm->cli_main;
+  vlib_cli_main_t *cm = &vgm->cli_main;
   uword *match_bitmap, is_unique, index;
 
   match_bitmap = vlib_cli_sub_command_match (c, i);
@@ -238,8 +298,8 @@ vlib_cli_get_possible_completions (u8 * str)
 {
   vlib_cli_command_t *c;
   vlib_cli_sub_command_t *sc;
-  vlib_main_t *vm = vlib_get_main ();
-  vlib_cli_main_t *vcm = &vm->cli_main;
+  vlib_global_main_t *vgm = vlib_get_global_main ();
+  vlib_cli_main_t *vcm = &vgm->cli_main;
   uword *match_bitmap = 0;
   uword index, is_unique, help_next_level;
   u8 **result = 0;
@@ -388,11 +448,12 @@ vlib_cli_dispatch_sub_commands (vlib_main_t * vm,
 				unformat_input_t * input,
 				uword parent_command_index)
 {
+  vlib_global_main_t *vgm = vlib_get_global_main ();
   vlib_cli_command_t *parent, *c;
   clib_error_t *error = 0;
   unformat_input_t sub_input;
   u8 *string;
-  uword is_main_dispatch = cm == &vm->cli_main;
+  uword is_main_dispatch = cm == &vgm->cli_main;
 
   parent = vec_elt_at_index (cm->commands, parent_command_index);
   if (is_main_dispatch && unformat (input, "help"))
@@ -469,6 +530,23 @@ vlib_cli_dispatch_sub_commands (vlib_main_t * vm,
 
   else if (unformat (input, "comment %v", &string))
     {
+      vec_free (string);
+    }
+
+  else if (unformat (input, "vpplog %v", &string))
+    {
+      int i;
+      /*
+       * Delete leading whitespace, so "vpplog { this and that }"
+       * and "vpplog this" line up nicely.
+       */
+      for (i = 0; i < vec_len (string); i++)
+	if (string[i] != ' ')
+	  break;
+      if (i > 0)
+	vec_delete (string, i, 0);
+
+      vlib_log_notice (cm->log, "CLI: %v", string);
       vec_free (string);
     }
 
@@ -558,8 +636,8 @@ vlib_cli_dispatch_sub_commands (vlib_main_t * vm,
 		  {
 		    u32 c;
 		  } *ed;
-		  ed = ELOG_DATA (&vm->elog_main, e);
-		  ed->c = elog_string (&vm->elog_main, "%v", c->path);
+		  ed = ELOG_DATA (vlib_get_elog_main (), e);
+		  ed->c = elog_string (vlib_get_elog_main (), "%v", c->path);
 		}
 
 	      if (!c->is_mp_safe)
@@ -590,17 +668,17 @@ vlib_cli_dispatch_sub_commands (vlib_main_t * vm,
 		  {
 		    u32 c, err;
 		  } *ed;
-		  ed = ELOG_DATA (&vm->elog_main, e);
-		  ed->c = elog_string (&vm->elog_main, "%v", c->path);
+		  ed = ELOG_DATA (vlib_get_elog_main (), e);
+		  ed->c = elog_string (vlib_get_elog_main (), "%v", c->path);
 		  if (c_error)
 		    {
 		      vec_add1 (c_error->what, 0);
-		      ed->err =
-			elog_string (&vm->elog_main, (char *) c_error->what);
-		      _vec_len (c_error->what) -= 1;
+		      ed->err = elog_string (vlib_get_elog_main (),
+					     (char *) c_error->what);
+		      vec_dec_len (c_error->what, 1);
 		    }
 		  else
-		    ed->err = elog_string (&vm->elog_main, "OK");
+		    ed->err = elog_string (vlib_get_elog_main (), "OK");
 		}
 
 	      if (c_error)
@@ -657,6 +735,7 @@ vlib_cli_input (vlib_main_t * vm,
 		unformat_input_t * input,
 		vlib_cli_output_function_t * function, uword function_arg)
 {
+  vlib_global_main_t *vgm = vlib_get_global_main ();
   vlib_process_t *cp = vlib_get_current_process (vm);
   clib_error_t *error;
   vlib_cli_output_function_t *save_function;
@@ -671,7 +750,7 @@ vlib_cli_input (vlib_main_t * vm,
 
   do
     {
-      error = vlib_cli_dispatch_sub_commands (vm, &vm->cli_main, input,
+      error = vlib_cli_dispatch_sub_commands (vm, &vgm->cli_main, input,
 					      /* parent */ 0);
     }
   while (!error && !unformat (input, "%U", unformat_eof));
@@ -731,13 +810,6 @@ void vl_msg_pop_heap (void *oldheap) __attribute__ ((weak));
 void
 vl_msg_pop_heap (void *oldheap)
 {
-}
-
-void *vlib_stats_push_heap (void *) __attribute__ ((weak));
-void *
-vlib_stats_push_heap (void *notused)
-{
-  return 0;
 }
 
 static clib_error_t *
@@ -800,14 +872,14 @@ show_memory_usage (vlib_main_t * vm,
     }
   if (stats_segment)
     {
-      void *oldheap = vlib_stats_push_heap (0);
+      void *oldheap = vlib_stats_set_heap ();
       was_enabled = clib_mem_trace_enable_disable (0);
       u8 *s_in_svm = format (0, "%U\n", format_clib_mem_heap, 0, 1);
       if (oldheap)
 	clib_mem_set_heap (oldheap);
       u8 *s = vec_dup (s_in_svm);
 
-      oldheap = vlib_stats_push_heap (0);
+      oldheap = vlib_stats_set_heap ();
       vec_free (s_in_svm);
       if (oldheap)
 	{
@@ -829,17 +901,14 @@ show_memory_usage (vlib_main_t * vm,
 	 */
 	was_enabled = clib_mem_trace_enable_disable (0);
 
-        /* *INDENT-OFF* */
-        foreach_vlib_main (
-        ({
-          vlib_cli_output (vm, "%sThread %d %s\n", index ? "\n":"", index,
-                           vlib_worker_threads[index].name);
-          vlib_cli_output (vm, "  %U\n", format_clib_mem_heap,
-                           mm->per_cpu_mheaps[index],
-                           verbose);
-          index++;
-        }));
-        /* *INDENT-ON* */
+	foreach_vlib_main ()
+	  {
+	    vlib_cli_output (vm, "%sThread %d %s\n", index ? "\n" : "", index,
+			     vlib_worker_threads[index].name);
+	    vlib_cli_output (vm, "  %U\n", format_clib_mem_heap,
+			     mm->per_cpu_mheaps[index], verbose);
+	    index++;
+	  }
 
 	/* Restore the trace flag */
 	clib_mem_trace_enable_disable (was_enabled);
@@ -912,7 +981,7 @@ show_memory_usage (vlib_main_t * vm,
 VLIB_CLI_COMMAND (show_memory_usage_command, static) = {
   .path = "show memory",
   .short_help = "show memory [api-segment][stats-segment][verbose]\n"
-  "            [numa-heaps][map]",
+		"            [numa-heaps][map][main-heap]",
   .function = show_memory_usage,
 };
 /* *INDENT-ON* */
@@ -1021,7 +1090,7 @@ enable_disable_memory_trace (vlib_main_t * vm,
   /* Stats segment */
   if (stats_segment)
     {
-      oldheap = vlib_stats_push_heap (0);
+      oldheap = vlib_stats_set_heap ();
       current_traced_heap = clib_mem_get_heap ();
       clib_mem_trace (stats_segment);
       /* We don't want to call vlib_stats_pop_heap... */
@@ -1069,6 +1138,7 @@ static clib_error_t *
 restart_cmd_fn (vlib_main_t * vm, unformat_input_t * input,
 		vlib_cli_command_t * cmd)
 {
+  vlib_global_main_t *vgm = vlib_get_global_main ();
   clib_file_main_t *fm = &file_main;
   clib_file_t *f;
 
@@ -1085,7 +1155,7 @@ restart_cmd_fn (vlib_main_t * vm, unformat_input_t * input,
   /* *INDENT-ON* */
 
   /* Exec ourself */
-  execve (vm->name, (char **) vm->argv, environ);
+  execve (vgm->name, (char **) vgm->argv, environ);
 
   return 0;
 }
@@ -1167,7 +1237,7 @@ vlib_cli_normalize_path (char *input, char **result)
 
   /* Remove any extra space at end. */
   if (l > 0 && s[l - 1] == ' ')
-    _vec_len (s) -= 1;
+    vec_dec_len (s, 1);
 
   *result = s;
   return index_of_last_space;
@@ -1205,6 +1275,9 @@ add_sub_command (vlib_cli_main_t * cm, uword parent_index, uword child_index)
       sub_name = 0;
       vec_add (sub_name, c->path + l + 1, vec_len (c->path) - (l + 1));
     }
+
+  /* "Can't happen," check mainly to shut up coverity */
+  ALWAYS_ASSERT (sub_name != 0);
 
   if (sub_name[0] == '%')
     {
@@ -1335,7 +1408,8 @@ vlib_cli_command_is_empty (vlib_cli_command_t * c)
 clib_error_t *
 vlib_cli_register (vlib_main_t * vm, vlib_cli_command_t * c)
 {
-  vlib_cli_main_t *cm = &vm->cli_main;
+  vlib_global_main_t *vgm = vlib_get_global_main ();
+  vlib_cli_main_t *cm = &vgm->cli_main;
   clib_error_t *error = 0;
   uword ci, *p;
   char *normalized_path;
@@ -1530,7 +1604,7 @@ event_logger_trace_command_fn (vlib_main_t * vm,
    */
   if (dispatch || circuit)
     {
-      elog_main_t *em = &vm->elog_main;
+      elog_main_t *em = &vlib_global_main.elog_main;
 
       em->n_total_events_disable_limit =
 	em->n_total_events + vec_len (em->event_ring);
@@ -1609,8 +1683,8 @@ sort_cmds_by_path (void *a1, void *a2)
 {
   u32 *index1 = a1;
   u32 *index2 = a2;
-  vlib_main_t *vm = vlib_get_main ();
-  vlib_cli_main_t *cm = &vm->cli_main;
+  vlib_global_main_t *vgm = vlib_get_global_main ();
+  vlib_cli_main_t *cm = &vgm->cli_main;
   vlib_cli_command_t *c1, *c2;
   int i, lmin;
 
@@ -1720,6 +1794,7 @@ static clib_error_t *
 show_cli_command_fn (vlib_main_t * vm,
 		     unformat_input_t * input, vlib_cli_command_t * cmd)
 {
+  vlib_global_main_t *vgm = vlib_get_global_main ();
   int show_mp_safe = 0;
   int show_not_mp_safe = 0;
   int show_hit = 0;
@@ -1743,8 +1818,8 @@ show_cli_command_fn (vlib_main_t * vm,
   if (clear_hit == 0 && (show_mp_safe + show_not_mp_safe) == 0)
     show_mp_safe = show_not_mp_safe = 1;
 
-  vlib_cli_output (vm, "%U", format_mp_safe, &vm->cli_main,
-		   show_mp_safe, show_not_mp_safe, show_hit, clear_hit);
+  vlib_cli_output (vm, "%U", format_mp_safe, &vgm->cli_main, show_mp_safe,
+		   show_not_mp_safe, show_hit, clear_hit);
   if (clear_hit)
     vlib_cli_output (vm, "hit counters cleared...");
 
@@ -1804,7 +1879,8 @@ VLIB_CLI_COMMAND (show_cli_command, static) =
 static clib_error_t *
 vlib_cli_init (vlib_main_t * vm)
 {
-  vlib_cli_main_t *cm = &vm->cli_main;
+  vlib_global_main_t *vgm = vlib_get_global_main ();
+  vlib_cli_main_t *cm = &vgm->cli_main;
   clib_error_t *error = 0;
   vlib_cli_command_t *cmd;
 
@@ -1817,6 +1893,9 @@ vlib_cli_init (vlib_main_t * vm)
 	return error;
       cmd = cmd->next_cli_command;
     }
+
+  cm->log = vlib_log_register_class_rate_limit (
+    "cli", "log", 0x7FFFFFFF /* aka no rate limit */);
   return error;
 }
 

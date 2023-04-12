@@ -30,17 +30,15 @@
 #include <lb/lb.api_enum.h>
 #include <lb/lb.api_types.h>
 
-#define vl_print(handle, ...) vlib_cli_output (handle, __VA_ARGS__)
 
 #define REPLY_MSG_ID_BASE lbm->msg_id_base
 #include <vlibapi/api_helper_macros.h>
 
-/* Macro to finish up custom dump fns */
-#define FINISH                                  \
-    vec_add1 (s, 0);                            \
-    vl_print (handle, (char *)s);               \
-    vec_free (s);                               \
-    return handle;
+#define FINISH                                                                \
+  vec_add1 (s, 0);                                                            \
+  vlib_cli_output (handle, (char *) s);                                       \
+  vec_free (s);                                                               \
+  return handle;
 
 static void
 vl_api_lb_conf_t_handler
@@ -130,6 +128,80 @@ vl_api_lb_add_del_vip_t_handler
 }
 
 static void
+vl_api_lb_add_del_vip_v2_t_handler (vl_api_lb_add_del_vip_v2_t *mp)
+{
+  lb_main_t *lbm = &lb_main;
+  vl_api_lb_conf_reply_t *rmp;
+  int rv = 0;
+  lb_vip_add_args_t args;
+
+  /* if port == 0, it means all-port VIP */
+  if (mp->port == 0)
+    {
+      mp->protocol = ~0;
+    }
+
+  ip_address_decode (&mp->pfx.address, &(args.prefix));
+
+  if (mp->is_del)
+    {
+      u32 vip_index;
+      if (!(rv = lb_vip_find_index (&(args.prefix), mp->pfx.len, mp->protocol,
+				    ntohs (mp->port), &vip_index)))
+	rv = lb_vip_del (vip_index);
+    }
+  else
+    {
+      u32 vip_index;
+      lb_vip_type_t type = 0;
+
+      if (ip46_prefix_is_ip4 (&(args.prefix), mp->pfx.len))
+	{
+	  if (mp->encap == LB_API_ENCAP_TYPE_GRE4)
+	    type = LB_VIP_TYPE_IP4_GRE4;
+	  else if (mp->encap == LB_API_ENCAP_TYPE_GRE6)
+	    type = LB_VIP_TYPE_IP4_GRE6;
+	  else if (mp->encap == LB_API_ENCAP_TYPE_L3DSR)
+	    type = LB_VIP_TYPE_IP4_L3DSR;
+	  else if (mp->encap == LB_API_ENCAP_TYPE_NAT4)
+	    type = LB_VIP_TYPE_IP4_NAT4;
+	}
+      else
+	{
+	  if (mp->encap == LB_API_ENCAP_TYPE_GRE4)
+	    type = LB_VIP_TYPE_IP6_GRE4;
+	  else if (mp->encap == LB_API_ENCAP_TYPE_GRE6)
+	    type = LB_VIP_TYPE_IP6_GRE6;
+	  else if (mp->encap == LB_API_ENCAP_TYPE_NAT6)
+	    type = LB_VIP_TYPE_IP6_NAT6;
+	}
+
+      args.plen = mp->pfx.len;
+      args.protocol = mp->protocol;
+      args.port = ntohs (mp->port);
+      args.type = type;
+      args.new_length = ntohl (mp->new_flows_table_length);
+
+      if (mp->src_ip_sticky)
+	args.src_ip_sticky = 1;
+
+      if (mp->encap == LB_API_ENCAP_TYPE_L3DSR)
+	{
+	  args.encap_args.dscp = (u8) (mp->dscp & 0x3F);
+	}
+      else if ((mp->encap == LB_API_ENCAP_TYPE_NAT4) ||
+	       (mp->encap == LB_API_ENCAP_TYPE_NAT6))
+	{
+	  args.encap_args.srv_type = mp->type;
+	  args.encap_args.target_port = ntohs (mp->target_port);
+	}
+
+      rv = lb_vip_add (args, &vip_index);
+    }
+  REPLY_MACRO (VL_API_LB_ADD_DEL_VIP_V2_REPLY);
+}
+
+static void
 vl_api_lb_add_del_as_t_handler
 (vl_api_lb_add_del_as_t * mp)
 {
@@ -211,7 +283,6 @@ static void send_lb_as_details
   lb_main_t *lbm = &lb_main;
   int msg_size = 0;
   u32 *as_index;
-  u32 asindex = 0;
 
   /* construct as list under this vip */
   lb_as_t *as;
@@ -235,7 +306,6 @@ static void send_lb_as_details
         rmp->in_use_since = htonl(as->last_used);
 
         vl_api_send_msg (reg, (u8 *) rmp);
-        asindex++;
       }
   }
 

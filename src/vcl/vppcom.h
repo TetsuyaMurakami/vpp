@@ -18,16 +18,16 @@
 
 #include <netdb.h>
 #include <errno.h>
-#include <sys/fcntl.h>
-#include <sys/poll.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <sys/epoll.h>
 
-/* *INDENT-OFF* */
+/* clang-format off */
+
 #ifdef __cplusplus
 extern "C"
 {
 #endif
-/* *INDENT-ON* */
 
 /*
  * VPPCOM Public API Definitions, Enums, and Data Structures
@@ -42,33 +42,60 @@ extern "C"
 #define VPPCOM_ENV_APP_NAMESPACE_SECRET      	"VCL_APP_NAMESPACE_SECRET"
 #define VPPCOM_ENV_APP_SCOPE_LOCAL           	"VCL_APP_SCOPE_LOCAL"
 #define VPPCOM_ENV_APP_SCOPE_GLOBAL          	"VCL_APP_SCOPE_GLOBAL"
+#define VPPCOM_ENV_APP_USE_MQ_EVENTFD		"VCL_APP_USE_MQ_EVENTFD"
 #define VPPCOM_ENV_VPP_API_SOCKET           	"VCL_VPP_API_SOCKET"
 #define VPPCOM_ENV_VPP_SAPI_SOCKET		"VCL_VPP_SAPI_SOCKET"
 
-  typedef enum
-  {
-    VPPCOM_PROTO_TCP = 0,
-    VPPCOM_PROTO_UDP,
-    VPPCOM_PROTO_NONE,
-    VPPCOM_PROTO_TLS,
-    VPPCOM_PROTO_QUIC,
-    VPPCOM_PROTO_DTLS,
-  } vppcom_proto_t;
+typedef enum vppcom_proto_
+{
+  VPPCOM_PROTO_TCP = 0,
+  VPPCOM_PROTO_UDP,
+  VPPCOM_PROTO_NONE,
+  VPPCOM_PROTO_TLS,
+  VPPCOM_PROTO_QUIC,
+  VPPCOM_PROTO_DTLS,
+  VPPCOM_PROTO_SRTP,
+} vppcom_proto_t;
 
-  typedef enum
-  {
-    VPPCOM_IS_IP6 = 0,
-    VPPCOM_IS_IP4,
-  } vppcom_is_ip4_t;
+typedef enum
+{
+  VPPCOM_IS_IP6 = 0,
+  VPPCOM_IS_IP4,
+} vppcom_is_ip4_t;
 
-  typedef struct vppcom_endpt_t_
-  {
-    uint8_t is_cut_thru;
-    uint8_t is_ip4;
-    uint8_t *ip;
-    uint16_t port;
-    uint64_t parent_handle;
-  } vppcom_endpt_t;
+typedef struct vppcom_endpt_tlv_t_
+{
+  uint32_t data_type;
+  uint32_t data_len;
+  uint8_t data[0];
+} vppcom_endpt_tlv_t;
+
+typedef struct vppcom_endpt_t_
+{
+  uint8_t unused;		/**< unused */
+  uint8_t is_ip4;		/**< flag set if if ip is ipv4 */
+  uint8_t *ip;			/**< pointer to ip address */
+  uint16_t port;		/**< transport port */
+  uint64_t unused2;		/**< unused */
+  uint32_t app_tlv_len;		/**< length of app provided tlvs */
+  vppcom_endpt_tlv_t *app_tlvs;	/**< array of app provided tlvs */
+} vppcom_endpt_t;
+
+#define VCL_UDP_OPTS_BASE (VPPCOM_PROTO_UDP << 16)
+#define VCL_UDP_SEGMENT	  (VCL_UDP_OPTS_BASE + 0)
+
+/* By convention we'll use 127 for IP since we don't support IP as protocol */
+#define VCL_IP_OPTS_BASE (127 << 16)
+#define VCL_IP_PKTINFO	 (VCL_IP_OPTS_BASE + 1)
+
+#define VCL_EP_APP_TLV_LEN(tlv_) (sizeof (vppcom_endpt_tlv_t) + tlv->data_len)
+#define VCL_EP_APP_TLV_POS(ep_, tlv_) ((void *)ep_->app_tlvs - (void *)tlv_)
+#define VCL_EP_APP_TLV_LEN_LEFT(ep_, tlv_)                                    \
+  (ep_->app_tlv_len - VCL_EP_APP_TLV_POS (ep_, tlv_))
+#define VCL_EP_NEXT_APP_TLV(ep_, tlv_)                                        \
+  (VCL_EP_APP_TLV_LEN (tlv_) < VCL_EP_APP_TLV_POS (ep_, tlv_) ? (             \
+       (vppcom_endpt_tlv_t *)((uint8_t *)tlv_ + VCL_EP_APP_TLV_LEN (tlv_)))   \
+                                                              : 0)
 
 typedef uint32_t vcl_session_handle_t;
 
@@ -96,7 +123,12 @@ typedef enum
   VPPCOM_ENOTCONN = -ENOTCONN,
   VPPCOM_ECONNREFUSED = -ECONNREFUSED,
   VPPCOM_ETIMEDOUT = -ETIMEDOUT,
-  VPPCOM_EEXIST = -EEXIST
+  VPPCOM_EEXIST = -EEXIST,
+  VPPCOM_ENOPROTOOPT = -ENOPROTOOPT,
+  VPPCOM_EPIPE = -EPIPE,
+  VPPCOM_ENOENT = -ENOENT,
+  VPPCOM_EADDRINUSE = -EADDRINUSE,
+  VPPCOM_ENOTSUP = -ENOTSUP
 } vppcom_error_t;
 
 typedef enum
@@ -135,12 +167,15 @@ typedef enum
   VPPCOM_ATTR_SET_TCP_KEEPINTVL,
   VPPCOM_ATTR_GET_TCP_USER_MSS,
   VPPCOM_ATTR_SET_TCP_USER_MSS,
-  VPPCOM_ATTR_SET_SHUT,
-  VPPCOM_ATTR_GET_SHUT,
   VPPCOM_ATTR_SET_CONNECTED,
   VPPCOM_ATTR_SET_CKPAIR,
   VPPCOM_ATTR_SET_VRF,
   VPPCOM_ATTR_GET_VRF,
+  VPPCOM_ATTR_GET_DOMAIN,
+  VPPCOM_ATTR_SET_ENDPT_EXT_CFG,
+  VPPCOM_ATTR_SET_DSCP,
+  VPPCOM_ATTR_SET_IP_PKTINFO,
+  VPPCOM_ATTR_GET_IP_PKTINFO,
 } vppcom_attr_op_t;
 
 typedef struct _vcl_poll
@@ -169,6 +204,7 @@ extern int vppcom_app_create (const char *app_name);
 extern void vppcom_app_destroy (void);
 
 extern int vppcom_session_create (uint8_t proto, uint8_t is_nonblocking);
+extern int vppcom_session_shutdown (uint32_t session_handle, int how);
 extern int vppcom_session_close (uint32_t session_handle);
 extern int vppcom_session_bind (uint32_t session_handle, vppcom_endpt_t * ep);
 extern int vppcom_session_listen (uint32_t session_handle, uint32_t q_len);
@@ -257,11 +293,25 @@ extern void vppcom_worker_index_set (int);
  */
 extern int vppcom_worker_mqs_epfd (void);
 
-/* *INDENT-OFF* */
+/**
+ * Returns Session error
+ *
+ * Application can use this API to find the detailed session error
+ */
+extern int vppcom_session_get_error (uint32_t session_handle);
+
+/**
+ * Returns true if current worker is disconnected from vpp
+ *
+ * Application can use this API to check if VPP is disconnected
+ * as long as `use-mq-eventfd` is being set
+ */
+extern int vppcom_worker_is_detached (void);
+
 #ifdef __cplusplus
 }
 #endif
-/* *INDENT-ON* */
+/* clang-format on */
 
 #endif /* included_vppcom_h */
 

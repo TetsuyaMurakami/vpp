@@ -44,7 +44,7 @@ typedef struct
   u32 rcv_buffer_size;		/**< Rcv buffer size */
   u32 prealloc_fifos;		/**< Preallocate fifos */
   u32 private_segment_count;	/**< Number of private segments  */
-  u32 private_segment_size;	/**< Size of private segments  */
+  u64 private_segment_size;	/**< Size of private segments  */
   char *server_uri;		/**< Server URI */
   u32 tls_engine;		/**< TLS engine: mbedtls/openssl */
   u32 ckpair_index;		/**< Cert and key for tls/quic */
@@ -310,7 +310,6 @@ echo_server_attach (u8 * appns_id, u64 appns_flags, u64 appns_secret)
   echo_server_main_t *esm = &echo_server_main;
   vnet_app_attach_args_t _a, *a = &_a;
   u64 options[APP_OPTIONS_N_OPTIONS];
-  u32 segment_size = 512 << 20;
 
   clib_memset (a, 0, sizeof (*a));
   clib_memset (options, 0, sizeof (options));
@@ -325,15 +324,12 @@ echo_server_attach (u8 * appns_id, u64 appns_flags, u64 appns_secret)
     echo_server_session_cb_vft.session_accept_callback =
       quic_echo_server_session_accept_callback;
 
-  if (esm->private_segment_size)
-    segment_size = esm->private_segment_size;
-
   a->api_client_index = ~0;
   a->name = format (0, "echo_server");
   a->session_cb_vft = &echo_server_session_cb_vft;
   a->options = options;
-  a->options[APP_OPTIONS_SEGMENT_SIZE] = segment_size;
-  a->options[APP_OPTIONS_ADD_SEGMENT_SIZE] = segment_size;
+  a->options[APP_OPTIONS_SEGMENT_SIZE] = esm->private_segment_size;
+  a->options[APP_OPTIONS_ADD_SEGMENT_SIZE] = esm->private_segment_size;
   a->options[APP_OPTIONS_RX_FIFO_SIZE] = esm->fifo_size;
   a->options[APP_OPTIONS_TX_FIFO_SIZE] = esm->fifo_size;
   a->options[APP_OPTIONS_PRIVATE_SEGMENT_COUNT] = esm->private_segment_count;
@@ -385,6 +381,13 @@ echo_server_detach (void)
 }
 
 static int
+echo_client_transport_needs_crypto (transport_proto_t proto)
+{
+  return proto == TRANSPORT_PROTO_TLS || proto == TRANSPORT_PROTO_DTLS ||
+	 proto == TRANSPORT_PROTO_QUIC;
+}
+
+static int
 echo_server_listen ()
 {
   i32 rv;
@@ -398,7 +401,12 @@ echo_server_listen ()
       return -1;
     }
   args->app_index = esm->app_index;
-  args->sep_ext.ckpair_index = esm->ckpair_index;
+  if (echo_client_transport_needs_crypto (args->sep_ext.transport_proto))
+    {
+      session_endpoint_alloc_ext_cfg (&args->sep_ext,
+				      TRANSPORT_ENDPT_EXT_CFG_CRYPTO);
+      args->sep_ext.ext_cfg->crypto.ckpair_index = esm->ckpair_index;
+    }
 
   if (args->sep_ext.transport_proto == TRANSPORT_PROTO_UDP)
     {
@@ -407,6 +415,8 @@ echo_server_listen ()
 
   rv = vnet_listen (args);
   esm->listener_handle = args->handle;
+  if (args->sep_ext.ext_cfg)
+    clib_mem_free (args->sep_ext.ext_cfg);
   return rv;
 }
 
@@ -449,19 +459,20 @@ static clib_error_t *
 echo_server_create_command_fn (vlib_main_t * vm, unformat_input_t * input,
 			       vlib_cli_command_t * cmd)
 {
+  session_endpoint_cfg_t sep = SESSION_ENDPOINT_CFG_NULL;
   echo_server_main_t *esm = &echo_server_main;
   u8 server_uri_set = 0, *appns_id = 0;
-  u64 tmp, appns_flags = 0, appns_secret = 0;
+  u64 appns_flags = 0, appns_secret = 0;
   char *default_uri = "tcp://0.0.0.0/1234";
   int rv, is_stop = 0;
-  session_endpoint_cfg_t sep = SESSION_ENDPOINT_CFG_NULL;
+  clib_error_t *error = 0;
 
   esm->no_echo = 0;
   esm->fifo_size = 64 << 10;
   esm->rcv_buffer_size = 128 << 10;
   esm->prealloc_fifos = 0;
   esm->private_segment_count = 0;
-  esm->private_segment_size = 0;
+  esm->private_segment_size = 512 << 20;
   esm->tls_engine = CRYPTO_ENGINE_OPENSSL;
   vec_free (esm->server_uri);
 
@@ -481,13 +492,8 @@ echo_server_create_command_fn (vlib_main_t * vm, unformat_input_t * input,
 			 &esm->private_segment_count))
 	;
       else if (unformat (input, "private-segment-size %U",
-			 unformat_memory_size, &tmp))
-	{
-	  if (tmp >= 0x100000000ULL)
-	    return clib_error_return
-	      (0, "private segment size %lld (%llu) too large", tmp, tmp);
-	  esm->private_segment_size = tmp;
-	}
+			 unformat_memory_size, &esm->private_segment_size))
+	;
       else if (unformat (input, "appns %_%v%_", &appns_id))
 	;
       else if (unformat (input, "all-scope"))
@@ -504,8 +510,11 @@ echo_server_create_command_fn (vlib_main_t * vm, unformat_input_t * input,
       else if (unformat (input, "tls-engine %d", &esm->tls_engine))
 	;
       else
-	return clib_error_return (0, "failed: unknown input `%U'",
-				  format_unformat_error, input);
+	{
+	  error = clib_error_return (0, "failed: unknown input `%U'",
+				     format_unformat_error, input);
+	  goto cleanup;
+	}
     }
 
   if (is_stop)
@@ -513,15 +522,17 @@ echo_server_create_command_fn (vlib_main_t * vm, unformat_input_t * input,
       if (esm->app_index == (u32) ~ 0)
 	{
 	  clib_warning ("server not running");
-	  return clib_error_return (0, "failed: server not running");
+	  error = clib_error_return (0, "failed: server not running");
+	  goto cleanup;
 	}
       rv = echo_server_detach ();
       if (rv)
 	{
 	  clib_warning ("failed: detach");
-	  return clib_error_return (0, "failed: server detach %d", rv);
+	  error = clib_error_return (0, "failed: server detach %d", rv);
+	  goto cleanup;
 	}
-      return 0;
+      goto cleanup;
     }
 
   vnet_session_enable_disable (vm, 1 /* turn on TCP, etc. */ );
@@ -533,19 +544,25 @@ echo_server_create_command_fn (vlib_main_t * vm, unformat_input_t * input,
     }
 
   if ((rv = parse_uri ((char *) esm->server_uri, &sep)))
-    return clib_error_return (0, "Uri parse error: %d", rv);
+    {
+      error = clib_error_return (0, "Uri parse error: %d", rv);
+      goto cleanup;
+    }
   esm->transport_proto = sep.transport_proto;
   esm->is_dgram = (sep.transport_proto == TRANSPORT_PROTO_UDP);
 
   rv = echo_server_create (vm, appns_id, appns_flags, appns_secret);
-  vec_free (appns_id);
   if (rv)
     {
       vec_free (esm->server_uri);
-      return clib_error_return (0, "failed: server_create returned %d", rv);
+      error = clib_error_return (0, "failed: server_create returned %d", rv);
+      goto cleanup;
     }
 
-  return 0;
+cleanup:
+  vec_free (appns_id);
+
+  return error;
 }
 
 /* *INDENT-OFF* */

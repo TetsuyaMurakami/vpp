@@ -4276,6 +4276,11 @@ process_map_request (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  rloc_probe_recv++;
 	  clib_memset (&m, 0, sizeof (m));
 	  u32 mi = gid_dictionary_lookup (&lcm->mapping_index_by_gid, &dst);
+	  if (GID_LOOKUP_MISS == mi)
+	    {
+	      clib_warning ("Cannot find mapping index by gid!");
+	      continue;
+	    }
 
 	  // TODO: select best locator; for now use the first one
 	  dst_loc = &gid_address_ip (&itr_rlocs[0]);
@@ -4830,7 +4835,7 @@ send_map_resolver_service (vlib_main_t * vm,
 	  {
 	    process_expired_mapping (lcm, mi[0]);
 	  }
-	  _vec_len (expired) = 0;
+	  vec_set_len (expired, 0);
 	}
     }
 

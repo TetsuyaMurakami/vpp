@@ -45,7 +45,6 @@
 #include <vppinfra/vec.h>
 #include <vppinfra/random.h>
 #include <vppinfra/error.h>
-#include <vppinfra/bitops.h>	/* for count_set_bits */
 
 typedef uword clib_bitmap_t;
 
@@ -115,6 +114,24 @@ clib_bitmap_is_equal (uword * a, uword * b)
 #define clib_bitmap_validate(v,n_bits) \
   clib_bitmap_vec_validate ((v), ((n_bits) - 1) / BITS (uword))
 
+/** Copy a bitmap
+    @param dst - copy to
+    @param src - copy from
+*/
+static_always_inline void
+clib_bitmap_copy (clib_bitmap_t **dst, const clib_bitmap_t *src)
+{
+  if (vec_len (src))
+    {
+      clib_bitmap_vec_validate (*dst, vec_len (src) - 1);
+      vec_copy (*dst, src);
+    }
+  else
+    {
+      vec_reset_length (*dst);
+    }
+}
+
 /* low-level routine to remove trailing zeros from a bitmap */
 always_inline uword *
 _clib_bitmap_remove_trailing_zeros (uword * a)
@@ -125,7 +142,7 @@ _clib_bitmap_remove_trailing_zeros (uword * a)
       for (i = _vec_len (a) - 1; i >= 0; i--)
 	if (a[i] != 0)
 	  break;
-      _vec_len (a) = i + 1;
+      vec_set_len (a, i + 1);
     }
   return a;
 }
@@ -161,7 +178,7 @@ clib_bitmap_set_no_check (uword * a, uword i, uword new_value)
     @param ai - pointer to the bitmap
     @param i - the bit position to interrogate
     @param value - new value for the bit
-    @returns the old value of the bit
+    @returns the (possibly reallocated) bitmap object pointer
 */
 always_inline uword *
 clib_bitmap_set (uword * ai, uword i, uword value)
@@ -186,6 +203,12 @@ clib_bitmap_set (uword * ai, uword i, uword value)
     ai = _clib_bitmap_remove_trailing_zeros (ai);
 
   return ai;
+}
+
+always_inline u8
+clib_bitmap_will_expand (uword *ai, uword i)
+{
+  return (i / BITS (ai[0])) >= vec_max_len (ai);
 }
 
 /** Gets the ith bit value from a bitmap
@@ -282,7 +305,7 @@ clib_bitmap_set_multiple (uword * bitmap, uword i, uword value, uword n_bits)
   i1 = i % BITS (bitmap[0]);
 
   /* Allocate bitmap. */
-  clib_bitmap_vec_validate (bitmap, (i + n_bits) / BITS (bitmap[0]));
+  clib_bitmap_vec_validate (bitmap, (i + n_bits - 1) / BITS (bitmap[0]));
   l = vec_len (bitmap);
 
   m = ~0;
@@ -316,14 +339,15 @@ clib_bitmap_set_multiple (uword * bitmap, uword i, uword value, uword n_bits)
 always_inline uword *
 clib_bitmap_set_region (uword * bitmap, uword i, uword value, uword n_bits)
 {
-  uword a0, a1, b0;
+  uword a0, a1, b0, b1;
   uword i_end, mask;
 
   a0 = i / BITS (bitmap[0]);
   a1 = i % BITS (bitmap[0]);
 
-  i_end = i + n_bits;
+  i_end = i + n_bits - 1;
   b0 = i_end / BITS (bitmap[0]);
+  b1 = i_end % BITS (bitmap[0]);
 
   clib_bitmap_vec_validate (bitmap, b0);
 
@@ -341,8 +365,7 @@ clib_bitmap_set_region (uword * bitmap, uword i, uword value, uword n_bits)
 
   if (a0 == b0)
     {
-      word n_bits_left = n_bits - (BITS (bitmap[0]) - a1);
-      mask = pow2_mask (n_bits_left);
+      mask = (uword) ~0 >> (BITS (bitmap[0]) - b1 - 1);
       if (value)
 	bitmap[a0] |= mask;
       else
@@ -363,25 +386,6 @@ clib_bitmap_set_region (uword * bitmap, uword i, uword value, uword n_bits)
     for (i = clib_bitmap_first_set (ai);				\
 	 i != ~0;							\
 	 i = clib_bitmap_next_set (ai, i + 1))
-
-#define clib_bitmap_foreach_old(i,ai,body)				\
-do {									\
-  uword __bitmap_i, __bitmap_ai, __bitmap_len, __bitmap_first_set;	\
-  __bitmap_len = vec_len ((ai));					\
-  for (__bitmap_i = 0; __bitmap_i < __bitmap_len; __bitmap_i++)		\
-    {									\
-      __bitmap_ai = (ai)[__bitmap_i];					\
-      while (__bitmap_ai != 0)						\
-	{								\
-	  __bitmap_first_set = first_set (__bitmap_ai);			\
-	  (i) = (__bitmap_i * BITS ((ai)[0])				\
-		 + min_log2 (__bitmap_first_set));			\
-	  do { body; } while (0);					\
-	  __bitmap_ai ^= __bitmap_first_set;				\
-	}								\
-    }									\
-} while (0)
-
 
 /** Return the lowest numbered set bit in a bitmap
     @param ai - pointer to the bitmap
@@ -514,29 +518,32 @@ always_inline uword *clib_bitmap_or (uword * ai, uword * bi);
 always_inline uword *clib_bitmap_xor (uword * ai, uword * bi);
 
 /* ALU function definition macro for functions taking two bitmaps. */
-#define _(name, body, check_zero)				\
-always_inline uword *						\
-clib_bitmap_##name (uword * ai, uword * bi)			\
-{								\
-  uword i, a, b, bi_len, n_trailing_zeros;			\
-								\
-  n_trailing_zeros = 0;						\
-  bi_len = vec_len (bi);					\
-  if (bi_len > 0)						\
-    clib_bitmap_vec_validate (ai, bi_len - 1);			\
-  for (i = 0; i < vec_len (ai); i++)				\
-    {								\
-      a = ai[i];						\
-      b = i < bi_len ? bi[i] : 0;				\
-      do { body; } while (0);					\
-      ai[i] = a;						\
-      if (check_zero)						\
-	n_trailing_zeros = a ? 0 : (n_trailing_zeros + 1);	\
-    }								\
-  if (check_zero)						\
-    _vec_len (ai) -= n_trailing_zeros;				\
-  return ai;							\
-}
+#define _(name, body, check_zero)                                             \
+  always_inline uword *clib_bitmap_##name (uword *ai, uword *bi)              \
+  {                                                                           \
+    uword i, a, b, bi_len, n_trailing_zeros;                                  \
+                                                                              \
+    n_trailing_zeros = 0;                                                     \
+    bi_len = vec_len (bi);                                                    \
+    if (bi_len > 0)                                                           \
+      clib_bitmap_vec_validate (ai, bi_len - 1);                              \
+    for (i = 0; i < vec_len (ai); i++)                                        \
+      {                                                                       \
+	a = ai[i];                                                            \
+	b = i < bi_len ? bi[i] : 0;                                           \
+	do                                                                    \
+	  {                                                                   \
+	    body;                                                             \
+	  }                                                                   \
+	while (0);                                                            \
+	ai[i] = a;                                                            \
+	if (check_zero)                                                       \
+	  n_trailing_zeros = a ? 0 : (n_trailing_zeros + 1);                  \
+      }                                                                       \
+    if (check_zero)                                                           \
+      vec_dec_len (ai, n_trailing_zeros);                                     \
+    return ai;                                                                \
+  }
 
 /* ALU functions: */
 /* *INDENT-OFF* */
@@ -735,133 +742,16 @@ clib_bitmap_next_clear (uword * ai, uword i)
 	    return log2_first_set (t) + i0 * BITS (ai[0]);
 	}
 
-      /* no clear bit left in bitmap, return bit just beyond bitmap */
-      return (i0 * BITS (ai[0])) + 1;
+      return i0 * BITS (ai[0]);
     }
   return i;
 }
 
-/** unformat an any sized hexadecimal bitmask into a bitmap
+uword unformat_bitmap_mask (unformat_input_t *input, va_list *va);
+uword unformat_bitmap_list (unformat_input_t *input, va_list *va);
+u8 *format_bitmap_hex (u8 *s, va_list *args);
+u8 *format_bitmap_list (u8 *s, va_list *args);
 
-    uword * bitmap;
-    rv = unformat ("%U", unformat_bitmap_mask, &bitmap);
-
-    Standard unformat_function_t arguments
-
-    @param input - pointer an unformat_input_t
-    @param va - varargs list comprising a single uword **
-    @returns 1 on success, 0 on failure
-*/
-static inline uword
-unformat_bitmap_mask (unformat_input_t * input, va_list * va)
-{
-  u8 *v = 0;			/* hexadecimal vector */
-  uword **bitmap_return = va_arg (*va, uword **);
-  uword *bitmap = 0;
-
-  if (unformat (input, "%U", unformat_hex_string, &v))
-    {
-      int i, s = vec_len (v) - 1;	/* 's' for significance or shift */
-
-      /* v[0] holds the most significant byte */
-      for (i = 0; s >= 0; i++, s--)
-	bitmap = clib_bitmap_set_multiple (bitmap,
-					   s * BITS (v[i]), v[i],
-					   BITS (v[i]));
-
-      vec_free (v);
-      *bitmap_return = bitmap;
-      return 1;
-    }
-
-  return 0;
-}
-
-/** unformat a list of bit ranges into a bitmap (eg "0-3,5-7,11" )
-
-    uword * bitmap;
-    rv = unformat ("%U", unformat_bitmap_list, &bitmap);
-
-    Standard unformat_function_t arguments
-
-    @param input - pointer an unformat_input_t
-    @param va - varargs list comprising a single uword **
-    @returns 1 on success, 0 on failure
-*/
-static inline uword
-unformat_bitmap_list (unformat_input_t * input, va_list * va)
-{
-  uword **bitmap_return = va_arg (*va, uword **);
-  uword *bitmap = 0;
-
-  u32 a, b;
-
-  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
-    {
-      int i;
-      if (unformat (input, "%u-%u,", &a, &b))
-	;
-      else if (unformat (input, "%u,", &a))
-	b = a;
-      else if (unformat (input, "%u-%u", &a, &b))
-	;
-      else if (unformat (input, "%u", &a))
-	b = a;
-      else if (bitmap)
-	{
-	  unformat_put_input (input);
-	  break;
-	}
-      else
-	goto error;
-
-      if (b < a)
-	goto error;
-
-      for (i = a; i <= b; i++)
-	bitmap = clib_bitmap_set (bitmap, i, 1);
-    }
-  *bitmap_return = bitmap;
-  return 1;
-error:
-  clib_bitmap_free (bitmap);
-  return 0;
-}
-
-/** Format a bitmap as a string of hex bytes
-
-    uword * bitmap;
-    s = format ("%U", format_bitmap_hex, bitmap);
-
-    Standard format_function_t arguments
-
-    @param s - string under construction
-    @param args - varargs list comprising a single uword *
-    @returns string under construction
-*/
-static inline u8 *
-format_bitmap_hex (u8 * s, va_list * args)
-{
-  uword *bitmap = va_arg (*args, uword *);
-  int i, is_trailing_zero = 1;
-
-  if (!bitmap)
-    return format (s, "0");
-
-  i = vec_bytes (bitmap) * 2;
-
-  while (i > 0)
-    {
-      u8 x = clib_bitmap_get_multiple (bitmap, --i * 4, 4);
-
-      if (x && is_trailing_zero)
-	is_trailing_zero = 0;
-
-      if (x || !is_trailing_zero)
-	s = format (s, "%x", x);
-    }
-  return s;
-}
 #endif /* included_clib_bitmap_h */
 
 /*

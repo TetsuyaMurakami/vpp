@@ -98,7 +98,7 @@ ipsec_sa_add_del_command_fn (vlib_main_t * vm,
   u16 udp_src, udp_dst;
   int is_add, rv;
   u32 m_args = 0;
-  tunnel_t tun;
+  tunnel_t tun = {};
 
   salt = 0;
   error = NULL;
@@ -143,7 +143,7 @@ ipsec_sa_add_del_command_fn (vlib_main_t * vm,
       else if (unformat (line_input, "integ-alg %U",
 			 unformat_ipsec_integ_alg, &integ_alg))
 	;
-      else if (unformat (line_input, " %U", unformat_tunnel, &tun))
+      else if (unformat (line_input, "%U", unformat_tunnel, &tun))
 	{
 	  flags |= IPSEC_SA_FLAG_IS_TUNNEL;
 	  if (AF_IP6 == tunnel_get_af (&tun))
@@ -161,18 +161,14 @@ ipsec_sa_add_del_command_fn (vlib_main_t * vm,
 	flags |= IPSEC_SA_FLAG_USE_ESN;
       else if (unformat (line_input, "udp-encap"))
 	flags |= IPSEC_SA_FLAG_UDP_ENCAP;
+      else if (unformat (line_input, "async"))
+	flags |= IPSEC_SA_FLAG_IS_ASYNC;
       else
 	{
 	  error = clib_error_return (0, "parse error: '%U'",
 				     format_unformat_error, line_input);
 	  goto done;
 	}
-    }
-  if ((flags & IPSEC_SA_FLAG_IS_INBOUND)
-      && !(flags & IPSEC_SA_FLAG_IS_TUNNEL))
-    {
-      error = clib_error_return (0, "inbound specified on non-tunnel SA");
-      goto done;
     }
 
   if (!(m_args & 1))
@@ -198,7 +194,7 @@ ipsec_sa_add_del_command_fn (vlib_main_t * vm,
     }
 
   if (rv)
-    error = clib_error_return (0, "failed");
+    error = clib_error_return (0, "failed: %d", rv);
 
 done:
   unformat_free (line_input);
@@ -283,6 +279,7 @@ ipsec_policy_add_del_command_fn (vlib_main_t * vm,
   clib_memset (&p, 0, sizeof (p));
   p.lport.stop = p.rport.stop = ~0;
   remote_range_set = local_range_set = is_outbound = 0;
+  p.protocol = IPSEC_POLICY_PROTOCOL_ANY;
 
   if (!unformat_user (input, unformat_line_input, line_input))
     return 0;
@@ -414,10 +411,11 @@ ipsec_sa_show_all (vlib_main_t * vm, ipsec_main_t * im, u8 detail)
   u32 sai;
 
   /* *INDENT-OFF* */
-  pool_foreach_index (sai, im->sad)  {
-    vlib_cli_output(vm, "%U", format_ipsec_sa, sai,
-                    (detail ? IPSEC_FORMAT_DETAIL : IPSEC_FORMAT_BRIEF));
-  }
+  pool_foreach_index (sai, ipsec_sa_pool)
+    {
+      vlib_cli_output (vm, "%U", format_ipsec_sa, sai,
+		       (detail ? IPSEC_FORMAT_DETAIL : IPSEC_FORMAT_BRIEF));
+    }
   /* *INDENT-ON* */
 }
 
@@ -430,6 +428,15 @@ ipsec_spd_show_all (vlib_main_t * vm, ipsec_main_t * im)
   pool_foreach_index (spdi, im->spds)  {
     vlib_cli_output(vm, "%U", format_ipsec_spd, spdi);
   }
+
+  if (im->output_flow_cache_flag)
+    {
+      vlib_cli_output (vm, "%U", format_ipsec_out_spd_flow_cache);
+    }
+  if (im->input_flow_cache_flag)
+    {
+      vlib_cli_output (vm, "%U", format_ipsec_in_spd_flow_cache);
+    }
   /* *INDENT-ON* */
 }
 
@@ -521,7 +528,6 @@ static clib_error_t *
 clear_ipsec_sa_command_fn (vlib_main_t * vm,
 			   unformat_input_t * input, vlib_cli_command_t * cmd)
 {
-  ipsec_main_t *im = &ipsec_main;
   u32 sai = ~0;
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
@@ -535,14 +541,15 @@ clear_ipsec_sa_command_fn (vlib_main_t * vm,
   if (~0 == sai)
     {
       /* *INDENT-OFF* */
-      pool_foreach_index (sai, im->sad)  {
-        ipsec_sa_clear(sai);
-      }
+      pool_foreach_index (sai, ipsec_sa_pool)
+	{
+	  ipsec_sa_clear (sai);
+	}
       /* *INDENT-ON* */
     }
   else
     {
-      if (pool_is_free_index (im->sad, sai))
+      if (pool_is_free_index (ipsec_sa_pool, sai))
 	return clib_error_return (0, "unknown SA index: %d", sai);
       else
 	ipsec_sa_clear (sai);
@@ -650,7 +657,7 @@ ipsec_show_backends_command_fn (vlib_main_t * vm,
   }
   /* *INDENT-ON* */
   vlib_cli_output (vm, "%v", s);
-  _vec_len (s) = 0;
+  vec_set_len (s, 0);
   vlib_cli_output (vm, "IPsec ESP backends available:");
   s = format (s, "%=25s %=25s %=10s\n", "Name", "Index", "Active");
   ipsec_esp_backend_t *eb;
@@ -762,6 +769,8 @@ clear_ipsec_counters_command_fn (vlib_main_t * vm,
 {
   vlib_clear_combined_counters (&ipsec_spd_policy_counters);
   vlib_clear_combined_counters (&ipsec_sa_counters);
+  for (int i = 0; i < IPSEC_SA_N_ERRORS; i++)
+    vlib_clear_simple_counters (&ipsec_sa_err_counters[i]);
 
   return (NULL);
 }
@@ -939,7 +948,6 @@ set_async_mode_command_fn (vlib_main_t * vm, unformat_input_t * input,
 				   format_unformat_error, line_input));
     }
 
-  vnet_crypto_request_async_mode (async_enable);
   ipsec_set_async_mode (async_enable);
 
   unformat_free (line_input);

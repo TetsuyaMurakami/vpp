@@ -17,6 +17,7 @@
 
 #include <openssl/hmac.h>
 #include <wireguard/wireguard.h>
+#include <wireguard/wireguard_chachapoly.h>
 
 /* This implements Noise_IKpsk2:
  *
@@ -32,11 +33,13 @@ noise_local_t *noise_local_pool;
 static noise_keypair_t *noise_remote_keypair_allocate (noise_remote_t *);
 static void noise_remote_keypair_free (vlib_main_t * vm, noise_remote_t *,
 				       noise_keypair_t **);
-static uint32_t noise_remote_handshake_index_get (noise_remote_t *);
-static void noise_remote_handshake_index_drop (noise_remote_t *);
+static uint32_t noise_remote_handshake_index_get (vlib_main_t *vm,
+						  noise_remote_t *);
+static void noise_remote_handshake_index_drop (vlib_main_t *vm,
+					       noise_remote_t *);
 
 static uint64_t noise_counter_send (noise_counter_t *);
-static bool noise_counter_recv (noise_counter_t *, uint64_t);
+bool noise_counter_recv (noise_counter_t *, uint64_t);
 
 static void noise_kdf (uint8_t *, uint8_t *, uint8_t *, const uint8_t *,
 		       size_t, size_t, size_t, size_t,
@@ -67,8 +70,6 @@ static void noise_msg_ephemeral (uint8_t[NOISE_HASH_LEN],
 
 static void noise_tai64n_now (uint8_t[NOISE_TIMESTAMP_LEN]);
 
-static void secure_zero_memory (void *v, size_t n);
-
 /* Set/Get noise parameters */
 void
 noise_local_init (noise_local_t * l, struct noise_upcall *upcall)
@@ -87,7 +88,7 @@ noise_local_set_private (noise_local_t * l,
 }
 
 void
-noise_remote_init (noise_remote_t * r, uint32_t peer_pool_idx,
+noise_remote_init (vlib_main_t *vm, noise_remote_t *r, uint32_t peer_pool_idx,
 		   const uint8_t public[NOISE_PUBLIC_KEY_LEN],
 		   u32 noise_local_idx)
 {
@@ -98,19 +99,19 @@ noise_remote_init (noise_remote_t * r, uint32_t peer_pool_idx,
   r->r_local_idx = noise_local_idx;
   r->r_handshake.hs_state = HS_ZEROED;
 
-  noise_remote_precompute (r);
+  noise_remote_precompute (vm, r);
 }
 
 void
-noise_remote_precompute (noise_remote_t * r)
+noise_remote_precompute (vlib_main_t *vm, noise_remote_t *r)
 {
   noise_local_t *l = noise_local_get (r->r_local_idx);
 
   if (!curve25519_gen_shared (r->r_ss, l->l_private, r->r_public))
     clib_memset (r->r_ss, 0, NOISE_PUBLIC_KEY_LEN);
 
-  noise_remote_handshake_index_drop (r);
-  secure_zero_memory (&r->r_handshake, sizeof (r->r_handshake));
+  noise_remote_handshake_index_drop (vm, r);
+  wg_secure_zero_memory (&r->r_handshake, sizeof (r->r_handshake));
 }
 
 /* Handshake functions */
@@ -122,7 +123,7 @@ noise_create_initiation (vlib_main_t * vm, noise_remote_t * r,
 {
   noise_handshake_t *hs = &r->r_handshake;
   noise_local_t *l = noise_local_get (r->r_local_idx);
-  uint8_t _key[NOISE_SYMMETRIC_KEY_LEN];
+  uint8_t _key[NOISE_SYMMETRIC_KEY_LEN] = { 0 };
   uint32_t key_idx;
   uint8_t *key;
   int ret = false;
@@ -155,13 +156,13 @@ noise_create_initiation (vlib_main_t * vm, noise_remote_t * r,
   /* {t} */
   noise_tai64n_now (ets);
   noise_msg_encrypt (vm, ets, ets, NOISE_TIMESTAMP_LEN, key_idx, hs->hs_hash);
-  noise_remote_handshake_index_drop (r);
+  noise_remote_handshake_index_drop (vm, r);
   hs->hs_state = CREATED_INITIATION;
-  hs->hs_local_index = noise_remote_handshake_index_get (r);
+  hs->hs_local_index = noise_remote_handshake_index_get (vm, r);
   *s_idx = hs->hs_local_index;
   ret = true;
 error:
-  secure_zero_memory (key, NOISE_SYMMETRIC_KEY_LEN);
+  wg_secure_zero_memory (key, NOISE_SYMMETRIC_KEY_LEN);
   vnet_crypto_key_del (vm, key_idx);
   return ret;
 }
@@ -177,9 +178,9 @@ noise_consume_initiation (vlib_main_t * vm, noise_local_t * l,
 {
   noise_remote_t *r;
   noise_handshake_t hs;
-  uint8_t _key[NOISE_SYMMETRIC_KEY_LEN];
-  uint8_t r_public[NOISE_PUBLIC_KEY_LEN];
-  uint8_t timestamp[NOISE_TIMESTAMP_LEN];
+  uint8_t _key[NOISE_SYMMETRIC_KEY_LEN] = { 0 };
+  uint8_t r_public[NOISE_PUBLIC_KEY_LEN] = { 0 };
+  uint8_t timestamp[NOISE_TIMESTAMP_LEN] = { 0 };
   u32 key_idx;
   uint8_t *key;
   int ret = false;
@@ -238,15 +239,15 @@ noise_consume_initiation (vlib_main_t * vm, noise_local_t * l,
     goto error;
 
   /* Ok, we're happy to accept this initiation now */
-  noise_remote_handshake_index_drop (r);
+  noise_remote_handshake_index_drop (vm, r);
   r->r_handshake = hs;
   *rp = r;
   ret = true;
 
 error:
-  secure_zero_memory (key, NOISE_SYMMETRIC_KEY_LEN);
+  wg_secure_zero_memory (key, NOISE_SYMMETRIC_KEY_LEN);
   vnet_crypto_key_del (vm, key_idx);
-  secure_zero_memory (&hs, sizeof (hs));
+  wg_secure_zero_memory (&hs, sizeof (hs));
   return ret;
 }
 
@@ -256,8 +257,8 @@ noise_create_response (vlib_main_t * vm, noise_remote_t * r, uint32_t * s_idx,
 		       uint8_t en[0 + NOISE_AUTHTAG_LEN])
 {
   noise_handshake_t *hs = &r->r_handshake;
-  uint8_t _key[NOISE_SYMMETRIC_KEY_LEN];
-  uint8_t e[NOISE_PUBLIC_KEY_LEN];
+  uint8_t _key[NOISE_SYMMETRIC_KEY_LEN] = { 0 };
+  uint8_t e[NOISE_PUBLIC_KEY_LEN] = { 0 };
   uint32_t key_idx;
   uint8_t *key;
   int ret = false;
@@ -292,14 +293,14 @@ noise_create_response (vlib_main_t * vm, noise_remote_t * r, uint32_t * s_idx,
 
 
   hs->hs_state = CREATED_RESPONSE;
-  hs->hs_local_index = noise_remote_handshake_index_get (r);
+  hs->hs_local_index = noise_remote_handshake_index_get (vm, r);
   *r_idx = hs->hs_remote_index;
   *s_idx = hs->hs_local_index;
   ret = true;
 error:
-  secure_zero_memory (key, NOISE_SYMMETRIC_KEY_LEN);
+  wg_secure_zero_memory (key, NOISE_SYMMETRIC_KEY_LEN);
   vnet_crypto_key_del (vm, key_idx);
-  secure_zero_memory (e, NOISE_PUBLIC_KEY_LEN);
+  wg_secure_zero_memory (e, NOISE_PUBLIC_KEY_LEN);
   return ret;
 }
 
@@ -310,8 +311,8 @@ noise_consume_response (vlib_main_t * vm, noise_remote_t * r, uint32_t s_idx,
 {
   noise_local_t *l = noise_local_get (r->r_local_idx);
   noise_handshake_t hs;
-  uint8_t _key[NOISE_SYMMETRIC_KEY_LEN];
-  uint8_t preshared_key[NOISE_PUBLIC_KEY_LEN];
+  uint8_t _key[NOISE_SYMMETRIC_KEY_LEN] = { 0 };
+  uint8_t preshared_key[NOISE_PUBLIC_KEY_LEN] = { 0 };
   uint32_t key_idx;
   uint8_t *key;
   int ret = false;
@@ -358,8 +359,8 @@ noise_consume_response (vlib_main_t * vm, noise_remote_t * r, uint32_t s_idx,
       ret = true;
     }
 error:
-  secure_zero_memory (&hs, sizeof (hs));
-  secure_zero_memory (key, NOISE_SYMMETRIC_KEY_LEN);
+  wg_secure_zero_memory (&hs, sizeof (hs));
+  wg_secure_zero_memory (key, NOISE_SYMMETRIC_KEY_LEN);
   vnet_crypto_key_del (vm, key_idx);
   return ret;
 }
@@ -407,6 +408,8 @@ noise_remote_begin_session (vlib_main_t * vm, noise_remote_t * r)
 
   /* Now we need to add_new_keypair */
   clib_rwlock_writer_lock (&r->r_keypair_lock);
+  /* Activate barrier to synchronization keys between threads */
+  vlib_worker_thread_barrier_sync (vm);
   next = r->r_next;
   current = r->r_current;
   previous = r->r_previous;
@@ -438,19 +441,20 @@ noise_remote_begin_session (vlib_main_t * vm, noise_remote_t * r)
       r->r_next = noise_remote_keypair_allocate (r);
       *r->r_next = kp;
     }
+  vlib_worker_thread_barrier_release (vm);
   clib_rwlock_writer_unlock (&r->r_keypair_lock);
 
-  secure_zero_memory (&r->r_handshake, sizeof (r->r_handshake));
+  wg_secure_zero_memory (&r->r_handshake, sizeof (r->r_handshake));
 
-  secure_zero_memory (&kp, sizeof (kp));
+  wg_secure_zero_memory (&kp, sizeof (kp));
   return true;
 }
 
 void
 noise_remote_clear (vlib_main_t * vm, noise_remote_t * r)
 {
-  noise_remote_handshake_index_drop (r);
-  secure_zero_memory (&r->r_handshake, sizeof (r->r_handshake));
+  noise_remote_handshake_index_drop (vm, r);
+  wg_secure_zero_memory (&r->r_handshake, sizeof (r->r_handshake));
 
   clib_rwlock_writer_lock (&r->r_keypair_lock);
   noise_remote_keypair_free (vm, r, &r->r_next);
@@ -492,54 +496,6 @@ noise_remote_ready (noise_remote_t * r)
   return ret;
 }
 
-static bool
-chacha20poly1305_calc (vlib_main_t * vm,
-		       u8 * src,
-		       u32 src_len,
-		       u8 * dst,
-		       u8 * aad,
-		       u32 aad_len,
-		       u64 nonce,
-		       vnet_crypto_op_id_t op_id,
-		       vnet_crypto_key_index_t key_index)
-{
-  vnet_crypto_op_t _op, *op = &_op;
-  u8 iv[12];
-  u8 tag_[NOISE_AUTHTAG_LEN] = { };
-  u8 src_[] = { };
-
-  clib_memset (iv, 0, 12);
-  clib_memcpy (iv + 4, &nonce, sizeof (nonce));
-
-  vnet_crypto_op_init (op, op_id);
-
-  op->tag_len = NOISE_AUTHTAG_LEN;
-  if (op_id == VNET_CRYPTO_OP_CHACHA20_POLY1305_DEC)
-    {
-      op->tag = src + src_len - NOISE_AUTHTAG_LEN;
-      src_len -= NOISE_AUTHTAG_LEN;
-    }
-  else
-    op->tag = tag_;
-
-  op->src = !src ? src_ : src;
-  op->len = src_len;
-
-  op->dst = dst;
-  op->key_index = key_index;
-  op->aad = aad;
-  op->aad_len = aad_len;
-  op->iv = iv;
-
-  vnet_crypto_process_ops (vm, op, 1);
-  if (op_id == VNET_CRYPTO_OP_CHACHA20_POLY1305_ENC)
-    {
-      clib_memcpy (dst + src_len, op->tag, NOISE_AUTHTAG_LEN);
-    }
-
-  return (op->status == VNET_CRYPTO_OP_STATUS_COMPLETED);
-}
-
 enum noise_state_crypt
 noise_remote_encrypt (vlib_main_t * vm, noise_remote_t * r, uint32_t * r_idx,
 		      uint64_t * nonce, uint8_t * src, size_t srclen,
@@ -548,7 +504,6 @@ noise_remote_encrypt (vlib_main_t * vm, noise_remote_t * r, uint32_t * r_idx,
   noise_keypair_t *kp;
   enum noise_state_crypt ret = SC_FAILED;
 
-  clib_rwlock_reader_lock (&r->r_keypair_lock);
   if ((kp = r->r_current) == NULL)
     goto error;
 
@@ -569,9 +524,9 @@ noise_remote_encrypt (vlib_main_t * vm, noise_remote_t * r, uint32_t * r_idx,
    * are passed back out to the caller through the provided data pointer. */
   *r_idx = kp->kp_remote_index;
 
-  chacha20poly1305_calc (vm, src, srclen, dst, NULL, 0, *nonce,
-			 VNET_CRYPTO_OP_CHACHA20_POLY1305_ENC,
-			 kp->kp_send_index);
+  wg_chacha20poly1305_calc (vm, src, srclen, dst, NULL, 0, *nonce,
+			    VNET_CRYPTO_OP_CHACHA20_POLY1305_ENC,
+			    kp->kp_send_index);
 
   /* If our values are still within tolerances, but we are approaching
    * the tolerances, we notify the caller with ESTALE that they should
@@ -588,94 +543,6 @@ noise_remote_encrypt (vlib_main_t * vm, noise_remote_t * r, uint32_t * r_idx,
 
   ret = SC_OK;
 error:
-  clib_rwlock_reader_unlock (&r->r_keypair_lock);
-  return ret;
-}
-
-enum noise_state_crypt
-noise_remote_decrypt (vlib_main_t * vm, noise_remote_t * r, uint32_t r_idx,
-		      uint64_t nonce, uint8_t * src, size_t srclen,
-		      uint8_t * dst)
-{
-  noise_keypair_t *kp;
-  enum noise_state_crypt ret = SC_FAILED;
-  clib_rwlock_reader_lock (&r->r_keypair_lock);
-
-  if (r->r_current != NULL && r->r_current->kp_local_index == r_idx)
-    {
-      kp = r->r_current;
-    }
-  else if (r->r_previous != NULL && r->r_previous->kp_local_index == r_idx)
-    {
-      kp = r->r_previous;
-    }
-  else if (r->r_next != NULL && r->r_next->kp_local_index == r_idx)
-    {
-      kp = r->r_next;
-    }
-  else
-    {
-      goto error;
-    }
-
-  /* We confirm that our values are within our tolerances. These values
-   * are the same as the encrypt routine.
-   *
-   * kp_ctr isn't locked here, we're happy to accept a racy read. */
-  if (wg_birthdate_has_expired (kp->kp_birthdate, REJECT_AFTER_TIME) ||
-      kp->kp_ctr.c_recv >= REJECT_AFTER_MESSAGES)
-    goto error;
-
-  /* Decrypt, then validate the counter. We don't want to validate the
-   * counter before decrypting as we do not know the message is authentic
-   * prior to decryption. */
-  if (!chacha20poly1305_calc (vm, src, srclen, dst, NULL, 0, nonce,
-			      VNET_CRYPTO_OP_CHACHA20_POLY1305_DEC,
-			      kp->kp_recv_index))
-    goto error;
-
-  if (!noise_counter_recv (&kp->kp_ctr, nonce))
-    goto error;
-
-  /* If we've received the handshake confirming data packet then move the
-   * next keypair into current. If we do slide the next keypair in, then
-   * we skip the REKEY_AFTER_TIME_RECV check. This is safe to do as a
-   * data packet can't confirm a session that we are an INITIATOR of. */
-  if (kp == r->r_next)
-    {
-      clib_rwlock_reader_unlock (&r->r_keypair_lock);
-      clib_rwlock_writer_lock (&r->r_keypair_lock);
-      if (kp == r->r_next && kp->kp_local_index == r_idx)
-	{
-	  noise_remote_keypair_free (vm, r, &r->r_previous);
-	  r->r_previous = r->r_current;
-	  r->r_current = r->r_next;
-	  r->r_next = NULL;
-
-	  ret = SC_CONN_RESET;
-	  clib_rwlock_writer_unlock (&r->r_keypair_lock);
-	  clib_rwlock_reader_lock (&r->r_keypair_lock);
-	  goto error;
-	}
-      clib_rwlock_writer_unlock (&r->r_keypair_lock);
-      clib_rwlock_reader_lock (&r->r_keypair_lock);
-    }
-
-  /* Similar to when we encrypt, we want to notify the caller when we
-   * are approaching our tolerances. We notify if:
-   *  - we're the initiator and the current keypair is older than
-   *    REKEY_AFTER_TIME_RECV seconds. */
-  ret = SC_KEEP_KEY_FRESH;
-  kp = r->r_current;
-  if (kp != NULL &&
-      kp->kp_valid &&
-      kp->kp_is_initiator &&
-      wg_birthdate_has_expired (kp->kp_birthdate, REKEY_AFTER_TIME_RECV))
-    goto error;
-
-  ret = SC_OK;
-error:
-  clib_rwlock_reader_unlock (&r->r_keypair_lock);
   return ret;
 }
 
@@ -689,86 +556,22 @@ noise_remote_keypair_allocate (noise_remote_t * r)
   return kp;
 }
 
-static void
-noise_remote_keypair_free (vlib_main_t * vm, noise_remote_t * r,
-			   noise_keypair_t ** kp)
-{
-  noise_local_t *local = noise_local_get (r->r_local_idx);
-  struct noise_upcall *u = &local->l_upcall;
-  if (*kp)
-    {
-      u->u_index_drop ((*kp)->kp_local_index);
-      vnet_crypto_key_del (vm, (*kp)->kp_send_index);
-      vnet_crypto_key_del (vm, (*kp)->kp_recv_index);
-      clib_mem_free (*kp);
-    }
-}
-
 static uint32_t
-noise_remote_handshake_index_get (noise_remote_t * r)
+noise_remote_handshake_index_get (vlib_main_t *vm, noise_remote_t *r)
 {
   noise_local_t *local = noise_local_get (r->r_local_idx);
   struct noise_upcall *u = &local->l_upcall;
-  return u->u_index_set (r);
+  return u->u_index_set (vm, r);
 }
 
 static void
-noise_remote_handshake_index_drop (noise_remote_t * r)
+noise_remote_handshake_index_drop (vlib_main_t *vm, noise_remote_t *r)
 {
   noise_handshake_t *hs = &r->r_handshake;
   noise_local_t *local = noise_local_get (r->r_local_idx);
   struct noise_upcall *u = &local->l_upcall;
   if (hs->hs_state != HS_ZEROED)
-    u->u_index_drop (hs->hs_local_index);
-}
-
-static uint64_t
-noise_counter_send (noise_counter_t * ctr)
-{
-  uint64_t ret;
-  ret = ctr->c_send++;
-  return ret;
-}
-
-static bool
-noise_counter_recv (noise_counter_t * ctr, uint64_t recv)
-{
-  uint64_t i, top, index_recv, index_ctr;
-  unsigned long bit;
-  bool ret = false;
-
-  /* Check that the recv counter is valid */
-  if (ctr->c_recv >= REJECT_AFTER_MESSAGES || recv >= REJECT_AFTER_MESSAGES)
-    goto error;
-
-  /* If the packet is out of the window, invalid */
-  if (recv + COUNTER_WINDOW_SIZE < ctr->c_recv)
-    goto error;
-
-  /* If the new counter is ahead of the current counter, we'll need to
-   * zero out the bitmap that has previously been used */
-  index_recv = recv / COUNTER_BITS;
-  index_ctr = ctr->c_recv / COUNTER_BITS;
-
-  if (recv > ctr->c_recv)
-    {
-      top = clib_min (index_recv - index_ctr, COUNTER_NUM);
-      for (i = 1; i <= top; i++)
-	ctr->c_backtrack[(i + index_ctr) & (COUNTER_NUM - 1)] = 0;
-      ctr->c_recv = recv;
-    }
-
-  index_recv %= COUNTER_NUM;
-  bit = 1ul << (recv % COUNTER_BITS);
-
-  if (ctr->c_backtrack[index_recv] & bit)
-    goto error;
-
-  ctr->c_backtrack[index_recv] |= bit;
-
-  ret = true;
-error:
-  return ret;
+    u->u_index_drop (vm, hs->hs_local_index);
 }
 
 static void
@@ -815,8 +618,8 @@ noise_kdf (uint8_t * a, uint8_t * b, uint8_t * c, const uint8_t * x,
 
 out:
   /* Clear sensitive data from stack */
-  secure_zero_memory (sec, BLAKE2S_HASH_SIZE);
-  secure_zero_memory (out, BLAKE2S_HASH_SIZE + 1);
+  wg_secure_zero_memory (sec, BLAKE2S_HASH_SIZE);
+  wg_secure_zero_memory (out, BLAKE2S_HASH_SIZE + 1);
 }
 
 static bool
@@ -831,7 +634,7 @@ noise_mix_dh (uint8_t ck[NOISE_HASH_LEN],
   noise_kdf (ck, key, NULL, dh,
 	     NOISE_HASH_LEN, NOISE_SYMMETRIC_KEY_LEN, 0, NOISE_PUBLIC_KEY_LEN,
 	     ck);
-  secure_zero_memory (dh, NOISE_PUBLIC_KEY_LEN);
+  wg_secure_zero_memory (dh, NOISE_PUBLIC_KEY_LEN);
   return true;
 }
 
@@ -872,7 +675,7 @@ noise_mix_psk (uint8_t ck[NOISE_HASH_LEN], uint8_t hash[NOISE_HASH_LEN],
 	     NOISE_HASH_LEN, NOISE_HASH_LEN, NOISE_SYMMETRIC_KEY_LEN,
 	     NOISE_SYMMETRIC_KEY_LEN, ck);
   noise_mix_hash (hash, tmp, NOISE_HASH_LEN);
-  secure_zero_memory (tmp, NOISE_HASH_LEN);
+  wg_secure_zero_memory (tmp, NOISE_HASH_LEN);
 }
 
 static void
@@ -899,8 +702,8 @@ noise_msg_encrypt (vlib_main_t * vm, uint8_t * dst, uint8_t * src,
 		   uint8_t hash[NOISE_HASH_LEN])
 {
   /* Nonce always zero for Noise_IK */
-  chacha20poly1305_calc (vm, src, src_len, dst, hash, NOISE_HASH_LEN, 0,
-			 VNET_CRYPTO_OP_CHACHA20_POLY1305_ENC, key_idx);
+  wg_chacha20poly1305_calc (vm, src, src_len, dst, hash, NOISE_HASH_LEN, 0,
+			    VNET_CRYPTO_OP_CHACHA20_POLY1305_ENC, key_idx);
   noise_mix_hash (hash, dst, src_len + NOISE_AUTHTAG_LEN);
 }
 
@@ -910,8 +713,9 @@ noise_msg_decrypt (vlib_main_t * vm, uint8_t * dst, uint8_t * src,
 		   uint8_t hash[NOISE_HASH_LEN])
 {
   /* Nonce always zero for Noise_IK */
-  if (!chacha20poly1305_calc (vm, src, src_len, dst, hash, NOISE_HASH_LEN, 0,
-			      VNET_CRYPTO_OP_CHACHA20_POLY1305_DEC, key_idx))
+  if (!wg_chacha20poly1305_calc (vm, src, src_len, dst, hash, NOISE_HASH_LEN,
+				 0, VNET_CRYPTO_OP_CHACHA20_POLY1305_DEC,
+				 key_idx))
     return false;
   noise_mix_hash (hash, src, src_len);
   return true;
@@ -947,13 +751,6 @@ noise_tai64n_now (uint8_t output[NOISE_TIMESTAMP_LEN])
   /* memcpy to output buffer, assuming output could be unaligned. */
   clib_memcpy (output, &sec, sizeof (sec));
   clib_memcpy (output + sizeof (sec), &nsec, sizeof (nsec));
-}
-
-static void
-secure_zero_memory (void *v, size_t n)
-{
-  static void *(*const volatile memset_v) (void *, int, size_t) = &memset;
-  memset_v (v, 0, n);
 }
 
 /*

@@ -146,112 +146,19 @@ u64x2_interleave_lo (u64x2 a, u64x2 b)
   return (u64x2) _mm_unpacklo_epi64 ((__m128i) a, (__m128i) b);
 }
 
-/* 64 bit interleaves. */
-always_inline u8x8
-u8x8_interleave_hi (u8x8 a, u8x8 b)
-{
-  return (u8x8) _m_punpckhbw ((__m64) a, (__m64) b);
-}
-
-always_inline u8x8
-u8x8_interleave_lo (u8x8 a, u8x8 b)
-{
-  return (u8x8) _m_punpcklbw ((__m64) a, (__m64) b);
-}
-
-always_inline u16x4
-u16x4_interleave_hi (u16x4 a, u16x4 b)
-{
-  return (u16x4) _m_punpckhwd ((__m64) a, (__m64) b);
-}
-
-always_inline u16x4
-u16x4_interleave_lo (u16x4 a, u16x4 b)
-{
-  return (u16x4) _m_punpcklwd ((__m64) a, (__m64) b);
-}
-
-always_inline u32x2
-u32x2_interleave_hi (u32x2 a, u32x2 b)
-{
-  return (u32x2) _m_punpckhdq ((__m64) a, (__m64) b);
-}
-
-always_inline u32x2
-u32x2_interleave_lo (u32x2 a, u32x2 b)
-{
-  return (u32x2) _m_punpckldq ((__m64) a, (__m64) b);
-}
-
 /* 128 bit packs. */
-always_inline u8x16
-u16x8_pack (u16x8 lo, u16x8 hi)
-{
-  return (u8x16) _mm_packus_epi16 ((__m128i) lo, (__m128i) hi);
-}
+#define _(f, t, fn)                                                           \
+  always_inline t t##_pack (f lo, f hi)                                       \
+  {                                                                           \
+    return (t) fn ((__m128i) lo, (__m128i) hi);                               \
+  }
 
-always_inline i8x16
-i16x8_pack (i16x8 lo, i16x8 hi)
-{
-  return (i8x16) _mm_packs_epi16 ((__m128i) lo, (__m128i) hi);
-}
+_ (i16x8, i8x16, _mm_packs_epi16)
+_ (i16x8, u8x16, _mm_packus_epi16)
+_ (i32x4, i16x8, _mm_packs_epi32)
+_ (i32x4, u16x8, _mm_packus_epi32)
 
-always_inline u16x8
-u32x4_pack (u32x4 lo, u32x4 hi)
-{
-  return (u16x8) _mm_packs_epi32 ((__m128i) lo, (__m128i) hi);
-}
-
-/* 64 bit packs. */
-always_inline u8x8
-u16x4_pack (u16x4 lo, u16x4 hi)
-{
-  return (u8x8) _m_packuswb ((__m64) lo, (__m64) hi);
-}
-
-always_inline i8x8
-i16x4_pack (i16x4 lo, i16x4 hi)
-{
-  return (i8x8) _m_packsswb ((__m64) lo, (__m64) hi);
-}
-
-always_inline u16x4
-u32x2_pack (u32x2 lo, u32x2 hi)
-{
-  return (u16x4) _m_packssdw ((__m64) lo, (__m64) hi);
-}
-
-always_inline i16x4
-i32x2_pack (i32x2 lo, i32x2 hi)
-{
-  return (i16x4) _m_packssdw ((__m64) lo, (__m64) hi);
-}
-
-#ifndef __ICC
-always_inline u64x2
-u64x2_read_lo (u64x2 x, u64 * a)
-{
-  return (u64x2) _mm_loadl_pi ((__m128) x, (__m64 *) a);
-}
-
-always_inline u64x2
-u64x2_read_hi (u64x2 x, u64 * a)
-{
-  return (u64x2) _mm_loadh_pi ((__m128) x, (__m64 *) a);
-}
-
-always_inline void
-u64x2_write_lo (u64x2 x, u64 * a)
-{
-  _mm_storel_pi ((__m64 *) a, (__m128) x);
-}
-
-always_inline void
-u64x2_write_hi (u64x2 x, u64 * a)
-{
-  _mm_storeh_pi ((__m64 *) a, (__m128) x);
-}
-#endif
+#undef _
 
 #define _signed_binop(n,m,f,g)                                         \
   /* Unsigned */                                                       \
@@ -311,54 +218,6 @@ _(i, 16, 8, left, sll)
 _(i, 32, 4, left, sll)
 _(i, 64, 2, left, sll) _(i, 16, 8, right, sra) _(i, 32, 4, right, sra)
 #undef _
-/* 64 bit shifts. */
-  always_inline u16x4
-u16x4_shift_left (u16x4 x, u16x4 i)
-{
-  return (u16x4) _m_psllw ((__m64) x, (__m64) i);
-};
-
-always_inline u32x2
-u32x2_shift_left (u32x2 x, u32x2 i)
-{
-  return (u32x2) _m_pslld ((__m64) x, (__m64) i);
-};
-
-always_inline u16x4
-u16x4_shift_right (u16x4 x, u16x4 i)
-{
-  return (u16x4) _m_psrlw ((__m64) x, (__m64) i);
-};
-
-always_inline u32x2
-u32x2_shift_right (u32x2 x, u32x2 i)
-{
-  return (u32x2) _m_psrld ((__m64) x, (__m64) i);
-};
-
-always_inline i16x4
-i16x4_shift_left (i16x4 x, i16x4 i)
-{
-  return (i16x4) _m_psllw ((__m64) x, (__m64) i);
-};
-
-always_inline i32x2
-i32x2_shift_left (i32x2 x, i32x2 i)
-{
-  return (i32x2) _m_pslld ((__m64) x, (__m64) i);
-};
-
-always_inline i16x4
-i16x4_shift_right (i16x4 x, i16x4 i)
-{
-  return (i16x4) _m_psraw ((__m64) x, (__m64) i);
-};
-
-always_inline i32x2
-i32x2_shift_right (i32x2 x, i32x2 i)
-{
-  return (i32x2) _m_psrad ((__m64) x, (__m64) i);
-};
 
 #define u8x16_word_shift_left(a,n)  (u8x16) _mm_slli_si128((__m128i) a, n)
 #define u8x16_word_shift_right(a,n) (u8x16) _mm_srli_si128((__m128i) a, n)
@@ -421,118 +280,6 @@ _(u64, 2, left, right);
 _(u64, 2, right, left);
 
 #undef _
-
-#ifndef __clang__
-#define _(t,n,lr1,lr2)						\
-  always_inline t##x##n						\
-  t##x##n##_word_rotate2_##lr1 (t##x##n w0, t##x##n w1, int i)	\
-  {								\
-    int m = sizeof (t##x##n) / sizeof (t);			\
-    ASSERT (i >= 0 && i < m);					\
-    return (t##x##n##_word_shift_##lr1 (w0, i)			\
-	    | t##x##n##_word_shift_##lr2 (w1, m - i));		\
-  }								\
-								\
-  always_inline t##x##n						\
-  t##x##n##_word_rotate_##lr1 (t##x##n w0, int i)		\
-  { return t##x##n##_word_rotate2_##lr1 (w0, w0, i); }
-
-_(u8, 16, left, right);
-_(u8, 16, right, left);
-_(u16, 8, left, right);
-_(u16, 8, right, left);
-_(u32, 4, left, right);
-_(u32, 4, right, left);
-_(u64, 2, left, right);
-_(u64, 2, right, left);
-
-#undef _
-#endif
-
-#define u32x4_select(A,MASK)						\
-({									\
-  u32x4 _x, _y;								\
-  _x = (A);								\
-  asm volatile ("pshufd %[mask], %[x], %[y]"				\
-		: /* outputs */ [y] "=x" (_y)				\
-		: /* inputs */  [x] "x" (_x), [mask] "i" (MASK));	\
-  _y;									\
-})
-
-#define u32x4_splat_word(x,i)			\
-  u32x4_select ((x), (((i) << (2*0))		\
-		      | ((i) << (2*1))		\
-		      | ((i) << (2*2))		\
-		      | ((i) << (2*3))))
-
-/* Extract low order 32 bit word. */
-always_inline u32
-u32x4_get0 (u32x4 x)
-{
-  u32 result;
-  asm volatile ("movd %[x], %[result]": /* outputs */ [result] "=r" (result)
-		: /* inputs */ [x] "x" (x));
-  return result;
-}
-
-always_inline u32x4
-u32x4_set0 (u32 x)
-{
-  u32x4 result;
-  asm volatile ("movd %[x], %[result]": /* outputs */ [result] "=x" (result)
-		: /* inputs */ [x] "r" (x));
-  return result;
-}
-
-always_inline i32x4
-i32x4_set0 (i32 x)
-{
-  return (i32x4) u32x4_set0 ((u32) x);
-}
-
-always_inline i32
-i32x4_get0 (i32x4 x)
-{
-  return (i32) u32x4_get0 ((u32x4) x);
-}
-
-/* Converts all ones/zeros compare mask to bitmap. */
-always_inline u32
-u8x16_compare_byte_mask (u8x16 x)
-{
-  return _mm_movemask_epi8 ((__m128i) x);
-}
-
-extern u8 u32x4_compare_word_mask_table[256];
-
-always_inline u32
-u32x4_compare_word_mask (u32x4 x)
-{
-  u32 m = u8x16_compare_byte_mask ((u8x16) x);
-  return (u32x4_compare_word_mask_table[(m >> 0) & 0xff]
-	  | (u32x4_compare_word_mask_table[(m >> 8) & 0xff] << 2));
-}
-
-always_inline u32
-u8x16_zero_byte_mask (u8x16 x)
-{
-  u8x16 zero = { 0 };
-  return u8x16_compare_byte_mask (x == zero);
-}
-
-always_inline u32
-u16x8_zero_byte_mask (u16x8 x)
-{
-  u16x8 zero = { 0 };
-  return u8x16_compare_byte_mask ((u8x16) (x == zero));
-}
-
-always_inline u32
-u32x4_zero_byte_mask (u32x4 x)
-{
-  u32x4 zero = { 0 };
-  return u8x16_compare_byte_mask ((u8x16) (x == zero));
-}
 
 always_inline u32
 u8x16_max_scalar (u8x16 x)
@@ -613,6 +360,12 @@ u8x16_msb_mask (u8x16 v)
   return _mm_movemask_epi8 ((__m128i) v);
 }
 
+static_always_inline u16
+i8x16_msb_mask (i8x16 v)
+{
+  return _mm_movemask_epi8 ((__m128i) v);
+}
+
 #define CLIB_HAVE_VEC128_MSB_MASK
 
 #undef _signed_binop
@@ -656,24 +409,6 @@ u32x4_sum_elts (u32x4 sum4)
   sum4 += (u32x4) u8x16_align_right (sum4, sum4, 8);
   sum4 += (u32x4) u8x16_align_right (sum4, sum4, 4);
   return sum4[0];
-}
-
-static_always_inline u8x16
-u8x16_shuffle (u8x16 v, u8x16 m)
-{
-  return (u8x16) _mm_shuffle_epi8 ((__m128i) v, (__m128i) m);
-}
-
-static_always_inline u32x4
-u32x4_shuffle (u32x4 v, const int a, const int b, const int c, const int d)
-{
-#if defined(__clang__) || !__OPTIMIZE__
-  u32x4 r = { v[a], v[b], v[c], v[d] };
-  return r;
-#else
-  return (u32x4) _mm_shuffle_epi32 ((__m128i) v,
-				    a | b << 2 | c << 4 | d << 6);
-#endif
 }
 
 /* _from_ */
@@ -743,12 +478,6 @@ u32x4_scatter_one (u32x4 r, int index, void *p)
 }
 
 static_always_inline u8x16
-u8x16_is_greater (u8x16 v1, u8x16 v2)
-{
-  return (u8x16) _mm_cmpgt_epi8 ((__m128i) v1, (__m128i) v2);
-}
-
-static_always_inline u8x16
 u8x16_blend (u8x16 v1, u8x16 v2, u8x16 mask)
 {
   return (u8x16) _mm_blendv_epi8 ((__m128i) v1, (__m128i) v2, (__m128i) mask);
@@ -764,13 +493,67 @@ u8x16_xor3 (u8x16 a, u8x16 b, u8x16 c)
   return a ^ b ^ c;
 }
 
-#ifdef __AVX512F__
 static_always_inline u8x16
-u8x16_mask_load (u8x16 a, void *p, u16 mask)
+u8x16_load_partial (u8 *data, uword n)
 {
-  return (u8x16) _mm_mask_loadu_epi8 ((__m128i) a, mask, p);
-}
+  u8x16 r = {};
+#if defined(CLIB_HAVE_VEC128_MASK_LOAD_STORE)
+  return u8x16_mask_load_zero (data, pow2_mask (n));
 #endif
+  if (n > 7)
+    {
+      u64x2 r;
+      r[1] = *(u64u *) (data + n - 8);
+      r >>= (16 - n) * 8;
+      r[0] = *(u64u *) data;
+      return (u8x16) r;
+    }
+  else if (n > 3)
+    {
+      u32x4 r = {};
+      r[1] = *(u32u *) (data + n - 4);
+      r >>= (8 - n) * 8;
+      r[0] = *(u32u *) data;
+      return (u8x16) r;
+    }
+  else if (n > 1)
+    {
+      u16x8 r = {};
+      r[1] = *(u16u *) (data + n - 2);
+      r >>= (4 - n) * 8;
+      r[0] = *(u16u *) data;
+      return (u8x16) r;
+    }
+  else if (n > 0)
+    r[0] = *data;
+  return r;
+}
+
+static_always_inline void
+u8x16_store_partial (u8x16 r, u8 *data, uword n)
+{
+#if defined(CLIB_HAVE_VEC256_MASK_LOAD_STORE)
+  u8x16_mask_store (r, data, pow2_mask (n));
+#else
+  if (n > 7)
+    {
+      *(u64u *) (data + n - 8) = ((u64x2) r)[1] << ((16 - n) * 8);
+      *(u64u *) data = ((u64x2) r)[0];
+    }
+  else if (n > 3)
+    {
+      *(u32u *) (data + n - 4) = ((u32x4) r)[1] << ((8 - n) * 8);
+      *(u32u *) data = ((u32x4) r)[0];
+    }
+  else if (n > 1)
+    {
+      *(u16u *) (data + n - 2) = ((u16x8) r)[1] << ((4 - n) * 8);
+      *(u16u *) data = ((u16x8) r)[0];
+    }
+  else if (n > 0)
+    data[0] = r[0];
+#endif
+}
 
 #endif /* included_vector_sse2_h */
 

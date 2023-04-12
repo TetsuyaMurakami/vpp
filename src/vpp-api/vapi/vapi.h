@@ -44,7 +44,7 @@ extern "C"
  * process). It's not recommended to mix the higher and lower level APIs. Due
  * to version issues, the higher-level APIs are not part of the shared library.
  */
-  typedef struct vapi_ctx_s *vapi_ctx_t;
+typedef struct vapi_ctx_s *vapi_ctx_t;
 
 /**
  * @brief allocate vapi message of given size
@@ -56,7 +56,7 @@ extern "C"
  *
  * @return pointer to message or NULL if out of memory
  */
-  void *vapi_msg_alloc (vapi_ctx_t ctx, size_t size);
+void *vapi_msg_alloc (vapi_ctx_t ctx, size_t size);
 
 /**
  * @brief free a vapi message
@@ -66,7 +66,7 @@ extern "C"
  * @param ctx opaque vapi context
  * @param msg message to be freed
  */
-  void vapi_msg_free (vapi_ctx_t ctx, void *msg);
+void vapi_msg_free (vapi_ctx_t ctx, void *msg);
 
 /**
  * @brief allocate vapi context
@@ -75,18 +75,18 @@ extern "C"
  *
  * @return VAPI_OK on success, other error code on error
  */
-  vapi_error_e vapi_ctx_alloc (vapi_ctx_t * result);
+vapi_error_e vapi_ctx_alloc (vapi_ctx_t *result);
 
 /**
  * @brief free vapi context
  */
-  void vapi_ctx_free (vapi_ctx_t ctx);
+void vapi_ctx_free (vapi_ctx_t ctx);
 
 /**
  * @brief check if message identified by it's message id is known by the vpp to
  * which the connection is open
  */
-  bool vapi_is_msg_available (vapi_ctx_t ctx, vapi_msg_id_t type);
+bool vapi_is_msg_available (vapi_ctx_t ctx, vapi_msg_id_t type);
 
 /**
  * @brief connect to vpp
@@ -101,11 +101,30 @@ extern "C"
  *
  * @return VAPI_OK on success, other error code on error
  */
-  vapi_error_e vapi_connect (vapi_ctx_t ctx, const char *name,
-			     const char *chroot_prefix,
-			     int max_outstanding_requests,
-			     int response_queue_size, vapi_mode_e mode,
-			     bool handle_keepalives);
+vapi_error_e vapi_connect (vapi_ctx_t ctx, const char *name,
+			   const char *chroot_prefix,
+			   int max_outstanding_requests,
+			   int response_queue_size, vapi_mode_e mode,
+			   bool handle_keepalives);
+
+/**
+ * @brief connect to vpp from a client in same process
+ * @remark This MUST be called from a separate thread. If called
+ *         from the main thread, it will deadlock.
+ *
+ * @param ctx opaque vapi context, must be allocated using vapi_ctx_alloc first
+ * @param name application name
+ * @param max_outstanding_requests max number of outstanding requests queued
+ * @param response_queue_size size of the response queue
+ * @param mode mode of operation - blocking or nonblocking
+ * @param handle_keepalives - if true, automatically handle memclnt_keepalive
+ *
+ * @return VAPI_OK on success, other error code on error
+ */
+vapi_error_e vapi_connect_from_vpp (vapi_ctx_t ctx, const char *name,
+				    int max_outstanding_requests,
+				    int response_queue_size, vapi_mode_e mode,
+				    bool handle_keepalives);
 
 /**
  * @brief disconnect from vpp
@@ -114,7 +133,8 @@ extern "C"
  *
  * @return VAPI_OK on success, other error code on error
  */
-  vapi_error_e vapi_disconnect (vapi_ctx_t ctx);
+vapi_error_e vapi_disconnect (vapi_ctx_t ctx);
+vapi_error_e vapi_disconnect_from_vpp (vapi_ctx_t ctx);
 
 /**
  * @brief get event file descriptor
@@ -127,7 +147,7 @@ extern "C"
  *
  * @return VAPI_OK on success, other error code on error
  */
-  vapi_error_e vapi_get_fd (vapi_ctx_t ctx, int *fd);
+vapi_error_e vapi_get_fd (vapi_ctx_t ctx, int *fd);
 
 /**
  * @brief low-level api for sending messages to vpp
@@ -140,7 +160,7 @@ extern "C"
  *
  * @return VAPI_OK on success, other error code on error
  */
-  vapi_error_e vapi_send (vapi_ctx_t ctx, void *msg);
+vapi_error_e vapi_send (vapi_ctx_t ctx, void *msg);
 
 /**
  * @brief low-level api for atomically sending two messages to vpp - either
@@ -155,7 +175,7 @@ extern "C"
  *
  * @return VAPI_OK on success, other error code on error
  */
-  vapi_error_e vapi_send2 (vapi_ctx_t ctx, void *msg1, void *msg2);
+vapi_error_e vapi_send2 (vapi_ctx_t ctx, void *msg1, void *msg2);
 
 /**
  * @brief low-level api for reading messages from vpp
@@ -171,25 +191,24 @@ extern "C"
  *
  * @return VAPI_OK on success, other error code on error
  */
-  vapi_error_e vapi_recv (vapi_ctx_t ctx, void **msg, size_t * msg_size,
-			  svm_q_conditional_wait_t cond, u32 time);
+vapi_error_e vapi_recv (vapi_ctx_t ctx, void **msg, size_t *msg_size,
+			svm_q_conditional_wait_t cond, u32 time);
 
 /**
- * @brief wait for connection to become readable or writable
+ * @brief wait for connection to become readable
  *
  * @param ctx opaque vapi context
- * @param mode type of property to wait for - readability, writability or both
  *
  * @return VAPI_OK on success, other error code on error
  */
-  vapi_error_e vapi_wait (vapi_ctx_t ctx, vapi_wait_mode_e mode);
+vapi_error_e vapi_wait (vapi_ctx_t ctx);
 
 /**
  * @brief pick next message sent by vpp and call the appropriate callback
  *
  * @return VAPI_OK on success, other error code on error
  */
-  vapi_error_e vapi_dispatch_one (vapi_ctx_t ctx);
+vapi_error_e vapi_dispatch_one (vapi_ctx_t ctx);
 
 /**
  * @brief loop vapi_dispatch_one until responses to all currently outstanding
@@ -205,11 +224,11 @@ extern "C"
  *
  * @return VAPI_OK on success, other error code on error
  */
-  vapi_error_e vapi_dispatch (vapi_ctx_t ctx);
+vapi_error_e vapi_dispatch (vapi_ctx_t ctx);
 
 /** generic vapi event callback */
-  typedef vapi_error_e (*vapi_event_cb) (vapi_ctx_t ctx, void *callback_ctx,
-					 void *payload);
+typedef vapi_error_e (*vapi_event_cb) (vapi_ctx_t ctx, void *callback_ctx,
+				       void *payload);
 
 /**
  * @brief set event callback to call when message with given id is dispatched
@@ -219,8 +238,8 @@ extern "C"
  * @param callback callback
  * @param callback_ctx context pointer stored and passed to callback
  */
-  void vapi_set_event_cb (vapi_ctx_t ctx, vapi_msg_id_t id,
-			  vapi_event_cb callback, void *callback_ctx);
+void vapi_set_event_cb (vapi_ctx_t ctx, vapi_msg_id_t id,
+			vapi_event_cb callback, void *callback_ctx);
 
 /**
  * @brief clear event callback for given message id
@@ -228,12 +247,12 @@ extern "C"
  * @param ctx opaque vapi context
  * @param id message id
  */
-  void vapi_clear_event_cb (vapi_ctx_t ctx, vapi_msg_id_t id);
+void vapi_clear_event_cb (vapi_ctx_t ctx, vapi_msg_id_t id);
 
 /** generic vapi event callback */
-  typedef vapi_error_e (*vapi_generic_event_cb) (vapi_ctx_t ctx,
-						 void *callback_ctx,
-						 vapi_msg_id_t id, void *msg);
+typedef vapi_error_e (*vapi_generic_event_cb) (vapi_ctx_t ctx,
+					       void *callback_ctx,
+					       vapi_msg_id_t id, void *msg);
 /**
  * @brief set generic event callback
  *
@@ -244,16 +263,29 @@ extern "C"
  * @param callback callback
  * @param callback_ctx context pointer stored and passed to callback
  */
-  void vapi_set_generic_event_cb (vapi_ctx_t ctx,
-				  vapi_generic_event_cb callback,
-				  void *callback_ctx);
+void vapi_set_generic_event_cb (vapi_ctx_t ctx, vapi_generic_event_cb callback,
+				void *callback_ctx);
 
 /**
  * @brief clear generic event callback
  *
  * @param ctx opaque vapi context
  */
-  void vapi_clear_generic_event_cb (vapi_ctx_t ctx);
+void vapi_clear_generic_event_cb (vapi_ctx_t ctx);
+
+/**
+ * @brief signal RX thread to exit
+ *
+ * @note This adds a message to the client input queue that indicates that
+ * an RX thread should stop processing incoming messages and exit. If an
+ * application has an RX thread which sleeps while waiting for incoming
+ * messages using vapi_wait(), this call will allow the application to
+ * wake up from the vapi_wait() call and figure out that it should stop
+ * running.
+ *
+ * @param ctx opaque vapi context
+ */
+void vapi_stop_rx_thread (vapi_ctx_t ctx);
 
 #ifdef __cplusplus
 }

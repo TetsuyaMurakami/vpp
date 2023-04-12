@@ -55,12 +55,15 @@
 typedef struct
 {
   u32 len; /**< Number of elements in vector (NOT its allocated length). */
-  u8 numa_id; /**< NUMA id */
-  u8 vpad[3]; /**< pad to 8 bytes */
+  u8 hdr_size;	      /**< header size divided by VEC_MIN_ALIGN */
+  u8 log2_align : 7;  /**< data alignment */
+  u8 default_heap : 1; /**< vector uses default heap */
+  u8 grow_elts;	       /**< number of elts vector can grow without realloc */
+  u8 vpad[1];	       /**< pad to 8 bytes */
   u8 vector_data[0];  /**< Vector data . */
 } vec_header_t;
 
-#define VEC_NUMA_UNSPECIFIED (0xFF)
+#define VEC_MIN_ALIGN 8
 
 /** \brief Find the vector header
 
@@ -71,15 +74,23 @@ typedef struct
     @return pointer to the vector's vector_header_t
 */
 #define _vec_find(v)	((vec_header_t *) (v) - 1)
+#define _vec_heap(v)	(((void **) (_vec_find (v)))[-1])
+
+always_inline uword __vec_align (uword data_align, uword configuered_align);
+always_inline uword __vec_elt_sz (uword elt_sz, int is_void);
 
 #define _vec_round_size(s) \
   (((s) + sizeof (uword) - 1) &~ (sizeof (uword) - 1))
+#define _vec_is_void(P)                                                       \
+  __builtin_types_compatible_p (__typeof__ ((P)[0]), void)
+#define _vec_elt_sz(V)	 __vec_elt_sz (sizeof ((V)[0]), _vec_is_void (V))
+#define _vec_align(V, A) __vec_align (__alignof__((V)[0]), A)
 
-always_inline uword
-vec_header_bytes (uword header_bytes)
+always_inline __clib_nosanitize_addr uword
+vec_get_header_size (void *v)
 {
-  return round_pow2 (header_bytes + sizeof (vec_header_t),
-		     sizeof (vec_header_t));
+  uword header_size = _vec_find (v)->hdr_size * VEC_MIN_ALIGN;
+  return header_size;
 }
 
 /** \brief Find a user vector header
@@ -89,9 +100,9 @@ vec_header_bytes (uword header_bytes)
 */
 
 always_inline void *
-vec_header (void *v, uword header_bytes)
+vec_header (void *v)
 {
-  return v - vec_header_bytes (header_bytes);
+  return v ? v - vec_get_header_size (v) : 0;
 }
 
 /** \brief Find the end of user vector header
@@ -101,37 +112,10 @@ vec_header (void *v, uword header_bytes)
 */
 
 always_inline void *
-vec_header_end (void *v, uword header_bytes)
+vec_header_end (void *v)
 {
-  return v + vec_header_bytes (header_bytes);
+  return v + vec_get_header_size (v);
 }
-
-always_inline uword
-vec_aligned_header_bytes (uword header_bytes, uword align)
-{
-  return round_pow2 (header_bytes + sizeof (vec_header_t), align);
-}
-
-always_inline void *
-vec_aligned_header (void *v, uword header_bytes, uword align)
-{
-  return v - vec_aligned_header_bytes (header_bytes, align);
-}
-
-always_inline void *
-vec_aligned_header_end (void *v, uword header_bytes, uword align)
-{
-  return v + vec_aligned_header_bytes (header_bytes, align);
-}
-
-
-/** \brief Number of elements in vector (lvalue-capable)
-
-   _vec_len (v) does not check for null, but can be used as an lvalue
-   (e.g. _vec_len (v) = 99).
-*/
-
-#define _vec_len(v)	(_vec_find(v)->len)
 
 /** \brief Number of elements in vector (rvalue-only, NULL tolerant)
 
@@ -139,54 +123,83 @@ vec_aligned_header_end (void *v, uword header_bytes, uword align)
     If in doubt, use vec_len...
 */
 
+static_always_inline u32
+__vec_len (void *v)
+{
+  return _vec_find (v)->len;
+}
+
+#define _vec_len(v)	__vec_len ((void *) (v))
 #define vec_len(v)	((v) ? _vec_len(v) : 0)
+
 u32 vec_len_not_inline (void *v);
-
-/** \brief Vector's NUMA id (lvalue-capable)
-
-    _vec_numa(v) does not check for null, but can be used as an lvalue
-    (e.g. _vec_numa(v) = 1).
-*/
-
-#define _vec_numa(v) (_vec_find(v)->numa_id)
-
-/** \brief Return vector's NUMA ID (rvalue-only, NULL tolerant)
-    vec_numa(v) checks for NULL, but cannot be used as an lvalue.
-*/
-#define vec_numa(v) ((v) ? _vec_numa(v) : 0)
-
 
 /** \brief Number of data bytes in vector. */
 
 #define vec_bytes(v) (vec_len (v) * sizeof (v[0]))
 
-/** \brief Total number of bytes that can fit in vector with current allocation. */
+/**
+ * Return size of memory allocated for the vector
+ *
+ * @param v vector
+ * @return memory size allocated for the vector
+ */
 
-#define vec_capacity(v,b)							\
-({										\
-  void * _vec_capacity_v = (void *) (v);					\
-  uword _vec_capacity_b = (b);							\
-  _vec_capacity_b = sizeof (vec_header_t) + _vec_round_size (_vec_capacity_b);	\
-  _vec_capacity_v ? clib_mem_size (_vec_capacity_v - _vec_capacity_b) : 0;	\
-})
+uword vec_mem_size (void *v);
 
-/** \brief Total number of elements that can fit into vector. */
-#define vec_max_len(v) 								\
-  ((v) ? (vec_capacity (v,0) - vec_header_bytes (0)) / sizeof (v[0]) : 0)
+/**
+ * Number of elements that can fit into generic vector
+ *
+ * @param v vector
+ * @param b extra header bytes
+ * @return number of elements that can fit into vector
+ */
 
-/** \brief Set vector length to a user-defined value */
-#ifndef __COVERITY__		/* Coverity gets confused by ASSERT() */
-#define vec_set_len(v, l) do {     \
-    ASSERT(v);                     \
-    ASSERT((l) <= vec_max_len(v)); \
-    CLIB_MEM_POISON_LEN((void *)(v), _vec_len(v) * sizeof((v)[0]), (l) * sizeof((v)[0])); \
-    _vec_len(v) = (l);             \
-} while (0)
-#else /* __COVERITY__ */
-#define vec_set_len(v, l) do {     \
-    _vec_len(v) = (l);             \
-} while (0)
-#endif /* __COVERITY__ */
+always_inline uword
+vec_max_bytes (void *v)
+{
+  return v ? vec_mem_size (v) - vec_get_header_size (v) : 0;
+}
+
+always_inline uword
+_vec_max_len (void *v, uword elt_sz)
+{
+  return vec_max_bytes (v) / elt_sz;
+}
+
+#define vec_max_len(v) _vec_max_len (v, _vec_elt_sz (v))
+
+static_always_inline void
+_vec_set_grow_elts (void *v, uword n_elts)
+{
+  uword max = pow2_mask (BITS (_vec_find (0)->grow_elts));
+
+  if (PREDICT_FALSE (n_elts > max))
+    n_elts = max;
+
+  _vec_find (v)->grow_elts = n_elts;
+}
+
+always_inline void
+_vec_set_len (void *v, uword len, uword elt_sz)
+{
+  ASSERT (v);
+  ASSERT (len <= _vec_max_len (v, elt_sz));
+  uword old_len = _vec_len (v);
+  uword grow_elts = _vec_find (v)->grow_elts;
+
+  if (len > old_len)
+    clib_mem_unpoison (v + old_len * elt_sz, (len - old_len) * elt_sz);
+  else if (len < old_len)
+    clib_mem_poison (v + len * elt_sz, (old_len - len) * elt_sz);
+
+  _vec_set_grow_elts (v, old_len + grow_elts - len);
+  _vec_find (v)->len = len;
+}
+
+#define vec_set_len(v, l) _vec_set_len ((void *) v, l, _vec_elt_sz (v))
+#define vec_inc_len(v, l) vec_set_len (v, _vec_len (v) + (l))
+#define vec_dec_len(v, l) vec_set_len (v, _vec_len (v) - (l))
 
 /** \brief Reset vector length to zero
     NULL-pointer tolerant
@@ -213,26 +226,17 @@ u32 vec_len_not_inline (void *v);
 #define vec_foreach(var,vec) for (var = (vec); var < vec_end (vec); var++)
 
 /** \brief Vector iterator (reverse) */
-#define vec_foreach_backwards(var,vec) \
-for (var = vec_end (vec) - 1; var >= (vec); var--)
+#define vec_foreach_backwards(var, vec)                                       \
+  if (vec)                                                                    \
+    for (var = vec_end (vec) - 1; var >= (vec); var--)
 
 /** \brief Iterate over vector indices. */
 #define vec_foreach_index(var,v) for ((var) = 0; (var) < vec_len (v); (var)++)
 
 /** \brief Iterate over vector indices (reverse). */
-#define vec_foreach_index_backwards(var,v) \
-  for ((var) = vec_len((v)) - 1; (var) >= 0; (var)--)
-
-/** \brief return the NUMA index for a vector */
-always_inline uword
-vec_get_numa (void *v)
-{
-  vec_header_t *vh;
-  if (v == 0)
-    return 0;
-  vh = _vec_find (v);
-  return vh->numa_id;
-}
+#define vec_foreach_index_backwards(var, v)                                   \
+  if (v)                                                                      \
+    for ((var) = vec_len ((v)) - 1; (var) >= 0; (var)--)
 
 #endif /* included_clib_vec_bootstrap_h */
 

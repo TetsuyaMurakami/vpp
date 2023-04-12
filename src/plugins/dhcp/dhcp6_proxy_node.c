@@ -136,8 +136,8 @@ dhcpv6_proxy_to_server_input (vlib_main_t * vm,
   dhcp_proxy_main_t *dpm = &dhcp_proxy_main;
   from = vlib_frame_vector_args (from_frame);
   n_left_from = from_frame->n_vectors;
-  u32 pkts_to_server = 0, pkts_to_client = 0, pkts_no_server = 0;
-  u32 pkts_no_interface_address = 0, pkts_no_exceeding_max_hop = 0;
+  u32 pkts_to_server = 0, pkts_to_client = 0;
+  u32 pkts_no_interface_address = 0;
   u32 pkts_no_src_address = 0;
   u32 pkts_wrong_msg_type = 0;
   u32 pkts_too_big = 0;
@@ -236,7 +236,6 @@ dhcpv6_proxy_to_server_input (vlib_main_t * vm,
 	    {
 	      error0 = DHCPV6_PROXY_ERROR_NO_SERVER;
 	      next0 = DHCPV6_PROXY_TO_SERVER_INPUT_NEXT_DROP;
-	      pkts_no_server++;
 	      goto do_trace;
 	    }
 
@@ -274,7 +273,6 @@ dhcpv6_proxy_to_server_input (vlib_main_t * vm,
 	    {
 	      error0 = DHCPV6_RELAY_PKT_DROP_MAX_HOPS;
 	      next0 = DHCPV6_PROXY_TO_SERVER_INPUT_NEXT_DROP;
-	      pkts_no_exceeding_max_hop++;
 	      goto do_trace;
 	    }
 
@@ -443,7 +441,6 @@ dhcpv6_proxy_to_server_input (vlib_main_t * vm,
 			 DHCPV6_PROXY_ERROR_ALLOC_FAIL, 1);
 		      continue;
 		    }
-		  VLIB_BUFFER_TRACE_TRAJECTORY_INIT (c0);
 		  ci0 = vlib_get_buffer_index (vm, c0);
 		  server = &proxy->dhcp_servers[ii];
 
@@ -584,7 +581,7 @@ dhcpv6_proxy_to_client_input (vlib_main_t * vm,
       udp_header_t *u0, *u1 = 0;
       dhcpv6_relay_hdr_t *h0;
       ip6_header_t *ip1 = 0, *ip0;
-      ip6_address_t _ia0, *ia0 = &_ia0;
+      ip6_address_t *ia0 = 0;
       ip6_address_t client_address;
       ethernet_interface_t *ei0;
       ethernet_header_t *mac0;
@@ -928,9 +925,9 @@ dhcp6_proxy_set_server (ip46_address_t * addr,
       if (dhcp_proxy_server_add (FIB_PROTOCOL_IP6, addr, src_addr,
 				 rx_fib_index, server_table_id))
 	{
-	  mfib_table_entry_path_update (rx_fib_index,
-					&all_dhcp_servers,
-					MFIB_SOURCE_DHCP, &path_for_us);
+	  mfib_table_entry_path_update (rx_fib_index, &all_dhcp_servers,
+					MFIB_SOURCE_DHCP, MFIB_ENTRY_FLAG_NONE,
+					&path_for_us);
 	  /*
 	   * Each interface that is enabled in this table, needs to be added
 	   * as an accepting interface, but this is not easily doable in VPP.

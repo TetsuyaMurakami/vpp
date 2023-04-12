@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 #include "vat.h"
+#include <dlfcn.h>
 #include "plugin.h"
 #include <signal.h>
 #include <limits.h>
@@ -44,22 +45,7 @@ connect_to_vpe (char *name)
 
 /* *INDENT-OFF* */
 
-
-vlib_main_t vlib_global_main;
-
-static struct
-{
-  vec_header_t h;
-  vlib_main_t *vm;
-} __attribute__ ((packed)) __bootstrap_vlib_main_vector
-__attribute__ ((aligned (CLIB_CACHE_LINE_BYTES))) =
-{
-  .h.len = 1,
-  .vm = &vlib_global_main,
-};
-/* *INDENT-ON* */
-
-vlib_main_t **vlib_mains = &__bootstrap_vlib_main_vector.vm;
+vlib_global_main_t vlib_global_main;
 
 void
 vlib_cli_output (struct vlib_main_t *vm, char *fmt, ...)
@@ -112,7 +98,7 @@ do_one_file (vat_main_t * vam)
 	    rv = write (1, "exec# ", 6);
 	}
 
-      _vec_len (vam->inbuf) = 4096;
+      vec_set_len (vam->inbuf, 4096);
 
       if (vam->do_exit ||
 	  fgets ((char *) vam->inbuf, vec_len (vam->inbuf), vam->ifp) == 0)
@@ -196,7 +182,7 @@ do_one_file (vat_main_t * vam)
       if (vam->regenerate_interface_table)
 	{
 	  vam->regenerate_interface_table = 0;
-	  api_sw_interface_dump (vam);
+	  vam->api_sw_interface_dump (vam);
 	}
 
       /* Hack to pick up new client index after memfd_segment_create pivot */
@@ -281,6 +267,7 @@ setup_signal_handlers (void)
 	  /* these signals take the default action */
 	case SIGABRT:
 	case SIGKILL:
+	case SIGCONT:
 	case SIGSTOP:
 	case SIGUSR1:
 	case SIGUSR2:
@@ -328,8 +315,7 @@ vat_find_plugin_path ()
     return;
   *p = 0;
 
-  s = format (0, "%s/lib/" CLIB_TARGET_TRIPLET "/vpp_api_test_plugins:"
-	      "%s/lib/vpp_api_test_plugins", path, path);
+  s = format (0, "%s/" CLIB_LIB_DIR "/vpp_api_test_plugins", path, path);
   vec_add1 (s, 0);
   vat_plugin_path = (char *) s;
 }
@@ -355,12 +341,15 @@ load_features (void)
 }
 
 static inline clib_error_t *
-call_init_exit_functions_internal (vlib_main_t * vm,
-				   _vlib_init_function_list_elt_t ** headp,
-				   int call_once, int do_sort)
+call_init_exit_functions_internal (vlib_main_t *vm,
+				   _vlib_init_function_list_elt_t **headp,
+				   int call_once, int do_sort, int is_global)
 {
+  vlib_global_main_t *vgm = vlib_get_global_main ();
   clib_error_t *error = 0;
   _vlib_init_function_list_elt_t *i;
+
+  ASSERT (is_global == 1);
 
 #if 0
   /* Not worth copying the topological sort code */
@@ -371,10 +360,10 @@ call_init_exit_functions_internal (vlib_main_t * vm,
   i = *headp;
   while (i)
     {
-      if (call_once && !hash_get (vm->init_functions_called, i->f))
+      if (call_once && !hash_get (vgm->init_functions_called, i->f))
 	{
 	  if (call_once)
-	    hash_set1 (vm->init_functions_called, i->f);
+	    hash_set1 (vgm->init_functions_called, i->f);
 	  error = i->f (vm);
 	  if (error)
 	    return error;
@@ -385,17 +374,42 @@ call_init_exit_functions_internal (vlib_main_t * vm,
 }
 
 clib_error_t *
-vlib_call_init_exit_functions (vlib_main_t * vm,
-			       _vlib_init_function_list_elt_t ** headp,
-			       int call_once)
+vlib_call_init_exit_functions (vlib_main_t *vm,
+			       _vlib_init_function_list_elt_t **headp,
+			       int call_once, int is_global)
 {
   return call_init_exit_functions_internal (vm, headp, call_once,
-					    1 /* do_sort */ );
+					    1 /* do_sort */, is_global);
+}
+
+static void
+vat_register_interface_dump (vat_main_t *vam)
+{
+  void *handle;
+  plugin_info_t *pi;
+
+  vec_foreach (pi, vat_plugin_main.plugin_info)
+    {
+      handle = dlsym (pi->handle, "api_sw_interface_dump");
+      if (handle)
+	{
+	  vam->api_sw_interface_dump = handle;
+	  break;
+	}
+    }
+
+  if (!vam->api_sw_interface_dump)
+    {
+      fformat (stderr,
+	       "sw_interface_dump not found in interface_test plugin!\n");
+      exit (1);
+    }
 }
 
 int
 main (int argc, char **argv)
 {
+  vlib_global_main_t *vgm = vlib_get_global_main ();
   vat_main_t *vam = &vat_main;
   unformat_input_t _argv, *a = &_argv;
   u8 **input_files = 0;
@@ -407,9 +421,11 @@ main (int argc, char **argv)
   int i;
   f64 timeout;
   clib_error_t *error;
-  vlib_main_t *vm = &vlib_global_main;
+  vlib_main_t *vm;
 
   clib_mem_init_thread_safe (0, 128 << 20);
+  vlib_main_init ();
+  vm = vlib_get_first_main ();
 
   clib_macro_init (&vam->macro_main);
   clib_macro_add_builtin (&vam->macro_main, "current_file",
@@ -494,9 +510,6 @@ main (int argc, char **argv)
 
   vam->json_output = json_output;
 
-  if (!json_output)
-    api_sw_interface_dump (vam);
-
   vec_validate (vam->inbuf, 4096);
 
   load_features ();
@@ -504,18 +517,24 @@ main (int argc, char **argv)
   vam->current_file = (u8 *) "plugin-init";
   vat_plugin_init (vam);
 
+  vat_register_interface_dump (vam);
+
+  if (!json_output)
+    vam->api_sw_interface_dump (vam);
+
   /* Set up the init function hash table */
-  vm->init_functions_called = hash_create (0, 0);
+  vgm->init_functions_called = hash_create (0, 0);
 
   /* Execute plugin init and api_init functions */
-  error = vlib_call_init_exit_functions
-    (vm, &vm->init_function_registrations, 1 /* call once */ );
+  error = vlib_call_init_exit_functions (vm, &vgm->init_function_registrations,
+					 1 /* call once */, 1 /* is_global*/);
 
   if (error)
     clib_error_report (error);
 
-  error = vlib_call_init_exit_functions
-    (vm, &vm->api_init_function_registrations, 1 /* call_once */ );
+  error =
+    vlib_call_init_exit_functions (vm, &vgm->api_init_function_registrations,
+				   1 /* call_once */, 1 /* is_global */);
 
   if (error)
     clib_error_report (error);

@@ -44,7 +44,7 @@
 #include <vnet/devices/pipe/pipe.h>
 #include <vppinfra/sparse_vec.h>
 #include <vnet/l2/l2_bvi.h>
-#include <vnet/classify/trace_classify.h>
+#include <vnet/classify/pcap_classify.h>
 
 #define foreach_ethernet_input_next		\
   _ (PUNT, "error-punt")			\
@@ -225,25 +225,24 @@ identify_subint (ethernet_main_t * em,
       // A unicast packet arriving on an L3 interface must have a dmac
       // matching the interface mac. If interface has STATUS_L3 bit set
       // mac filter is already done.
-      if (!(*is_l2 || (ei->flags & ETHERNET_INTERFACE_FLAG_STATUS_L3)))
+      if ((!*is_l2) && ei &&
+	  (!(ei->flags & ETHERNET_INTERFACE_FLAG_STATUS_L3)))
 	{
 	  u64 dmacs[2];
 	  u8 dmacs_bad[2];
 	  ethernet_header_t *e0;
-	  ethernet_interface_t *ei0;
 
 	  e0 = (void *) (b0->data + vnet_buffer (b0)->l2_hdr_offset);
 	  dmacs[0] = *(u64 *) e0;
-	  ei0 = ethernet_get_interface (&ethernet_main, hi->hw_if_index);
 
-	  if (ei0 && vec_len (ei0->secondary_addrs))
+	  if (vec_len (ei->secondary_addrs))
 	    ethernet_input_inline_dmac_check (hi, dmacs, dmacs_bad,
-					      1 /* n_packets */ , ei0,
-					      1 /* have_sec_dmac */ );
+					      1 /* n_packets */, ei,
+					      1 /* have_sec_dmac */);
 	  else
 	    ethernet_input_inline_dmac_check (hi, dmacs, dmacs_bad,
-					      1 /* n_packets */ , ei0,
-					      0 /* have_sec_dmac */ );
+					      1 /* n_packets */, ei,
+					      0 /* have_sec_dmac */);
 	  if (dmacs_bad[0])
 	    *error0 = ETHERNET_ERROR_L3_MAC_MISMATCH;
 	}
@@ -1131,6 +1130,7 @@ static_always_inline void
 ethernet_input_trace (vlib_main_t * vm, vlib_node_runtime_t * node,
 		      vlib_frame_t * from_frame)
 {
+  vnet_main_t *vnm = vnet_get_main ();
   u32 *from, n_left;
   if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE)))
     {
@@ -1159,48 +1159,22 @@ ethernet_input_trace (vlib_main_t * vm, vlib_node_runtime_t * node,
     }
 
   /* rx pcap capture if enabled */
-  if (PREDICT_FALSE (vlib_global_main.pcap.pcap_rx_enable))
+  if (PREDICT_FALSE (vnm->pcap.pcap_rx_enable))
     {
       u32 bi0;
-      vnet_pcap_t *pp = &vlib_global_main.pcap;
+      vnet_pcap_t *pp = &vnm->pcap;
 
       from = vlib_frame_vector_args (from_frame);
       n_left = from_frame->n_vectors;
       while (n_left > 0)
 	{
-	  int classify_filter_result;
 	  vlib_buffer_t *b0;
 	  bi0 = from[0];
 	  from++;
 	  n_left--;
 	  b0 = vlib_get_buffer (vm, bi0);
-	  if (pp->filter_classify_table_index != ~0)
-	    {
-	      classify_filter_result =
-		vnet_is_packet_traced_inline
-		(b0, pp->filter_classify_table_index, 0 /* full classify */ );
-	      if (classify_filter_result)
-		pcap_add_buffer (&pp->pcap_main, vm, bi0,
-				 pp->max_bytes_per_pkt);
-	      continue;
-	    }
-
-	  if (pp->pcap_sw_if_index == 0 ||
-	      pp->pcap_sw_if_index == vnet_buffer (b0)->sw_if_index[VLIB_RX])
-	    {
-	      vnet_main_t *vnm = vnet_get_main ();
-	      vnet_hw_interface_t *hi =
-		vnet_get_sup_hw_interface
-		(vnm, vnet_buffer (b0)->sw_if_index[VLIB_RX]);
-
-	      /* Capture pkt if not filtered, or if filter hits */
-	      if (hi->trace_classify_table_index == ~0 ||
-		  vnet_is_packet_traced_inline
-		  (b0, hi->trace_classify_table_index,
-		   0 /* full classify */ ))
-		pcap_add_buffer (&pp->pcap_main, vm, bi0,
-				 pp->max_bytes_per_pkt);
-	    }
+	  if (vnet_is_packet_pcaped (pp, b0, ~0))
+	    pcap_add_buffer (&pp->pcap_main, vm, bi0, pp->max_bytes_per_pkt);
 	}
     }
 }
@@ -1530,7 +1504,7 @@ ethernet_input_inline (vlib_main_t * vm,
 	  if (n_left_from > 1)
 	    {
 	      vlib_prefetch_buffer_header (b[1], STORE);
-	      CLIB_PREFETCH (b[1]->data, CLIB_CACHE_LINE_BYTES, LOAD);
+	      clib_prefetch_load (b[1]->data);
 	    }
 
 	  bi0 = from[0];
@@ -1589,21 +1563,20 @@ ethernet_input_inline (vlib_main_t * vm,
 
 		  dmacs[0] = *(u64 *) e0;
 
-		  if (ei && vec_len (ei->secondary_addrs))
-		    ethernet_input_inline_dmac_check (hi, dmacs,
-						      dmacs_bad,
-						      1 /* n_packets */ ,
-						      ei,
-						      1 /* have_sec_dmac */ );
-		  else
-		    ethernet_input_inline_dmac_check (hi, dmacs,
-						      dmacs_bad,
-						      1 /* n_packets */ ,
-						      ei,
-						      0 /* have_sec_dmac */ );
+		  if (ei)
+		    {
+		      if (vec_len (ei->secondary_addrs))
+			ethernet_input_inline_dmac_check (
+			  hi, dmacs, dmacs_bad, 1 /* n_packets */, ei,
+			  1 /* have_sec_dmac */);
+		      else
+			ethernet_input_inline_dmac_check (
+			  hi, dmacs, dmacs_bad, 1 /* n_packets */, ei,
+			  0 /* have_sec_dmac */);
 
-		  if (dmacs_bad[0])
-		    error0 = ETHERNET_ERROR_L3_MAC_MISMATCH;
+		      if (dmacs_bad[0])
+			error0 = ETHERNET_ERROR_L3_MAC_MISMATCH;
+		    }
 
 		skip_dmac_check0:
 		  vlib_buffer_advance (b0, sizeof (ethernet_header_t));
@@ -1922,7 +1895,7 @@ ethernet_sw_interface_get_config (vnet_main_t * vnm,
 	    }
 	  else
 	    {
-	      // a specific outer + specifc innner vlan id, a common case
+	      // a specific outer + specific innner vlan id, a common case
 
 	      // get the qinq table
 	      if (vlan_table->vlans[si->sub.eth.outer_vlan_id].qinqs == 0)
@@ -2259,6 +2232,17 @@ next_by_ethertype_register (next_by_ethertype_t * l3_next,
 	}
     }
   return 0;
+}
+
+void
+ethernet_setup_node (vlib_main_t *vm, u32 node_index)
+{
+  vlib_node_t *n = vlib_get_node (vm, node_index);
+  pg_node_t *pn = pg_get_node (node_index);
+
+  n->format_buffer = format_ethernet_header_with_length;
+  n->unformat_buffer = unformat_ethernet_header;
+  pn->unformat_edit = unformat_pg_ethernet_header;
 }
 
 void

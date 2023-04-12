@@ -55,6 +55,7 @@
 #include <linux/vfio.h>
 #include <sys/eventfd.h>
 
+#define SYSFS_DEVICES_PCI "/sys/devices/pci"
 static const char *sysfs_pci_dev_path = "/sys/bus/pci/devices";
 static const char *sysfs_pci_drv_path = "/sys/bus/pci/drivers";
 static char *sysfs_mod_vfio_noiommu =
@@ -347,7 +348,7 @@ vlib_pci_get_device_info (vlib_main_t * vm, vlib_pci_addr_t * addr,
 	    break;
 
 	  len = (tag[2] << 8) | tag[1];
-	  vec_validate (data, len);
+	  vec_validate (data, len - 1);
 
 	  if (read (fd, data, len) != len)
 	    {
@@ -383,6 +384,64 @@ done:
   return di;
 }
 
+clib_error_t *__attribute__ ((weak))
+vlib_pci_get_device_root_bus (vlib_pci_addr_t *addr, vlib_pci_addr_t *root_bus)
+{
+  u8 *rel_path = 0, *abs_path = 0, *link_path = 0;
+  unformat_input_t input;
+  int fd = open (sysfs_pci_dev_path, O_RDONLY);
+  ssize_t size = 0;
+  u32 domain = 0, bus;
+  clib_error_t *err = NULL;
+
+  if (fd < 0)
+    return clib_error_return_unix (0, "failed to open %s", sysfs_pci_dev_path);
+
+  vec_alloc (rel_path, PATH_MAX);
+  vec_alloc (abs_path, PATH_MAX);
+
+  link_path =
+    format (0, "%s/%U", sysfs_pci_dev_path, format_vlib_pci_addr, addr);
+  size = readlinkat (fd, (char *) link_path, (char *) rel_path, PATH_MAX);
+  if (size < 0)
+    {
+      err = clib_error_return_unix (0, "failed to read %s", rel_path);
+      goto done;
+    }
+
+  rel_path[size] = '\0';
+  vec_free (link_path);
+
+  link_path = format (0, "%s/%s", sysfs_pci_dev_path, rel_path);
+  if (!realpath ((char *) link_path, (char *) abs_path))
+    {
+      err = clib_error_return_unix (0, "failed to resolve %s", link_path);
+      goto done;
+    }
+
+  unformat_init_string (&input, (char *) abs_path,
+			clib_strnlen ((char *) abs_path, PATH_MAX));
+
+  if (!unformat (&input, SYSFS_DEVICES_PCI "%x:%x/%s", &domain, &bus,
+		 link_path))
+    {
+      err = clib_error_return (0, "unknown input '%U'", format_unformat_error,
+			       input);
+      goto done;
+    }
+
+  root_bus->domain = domain;
+  root_bus->bus = bus;
+
+done:
+  vec_free (abs_path);
+  vec_free (link_path);
+  vec_free (rel_path);
+  close (fd);
+
+  return err;
+}
+
 static int
 directory_exists (char *path)
 {
@@ -394,8 +453,8 @@ directory_exists (char *path)
 }
 
 clib_error_t *
-vlib_pci_bind_to_uio (vlib_main_t * vm, vlib_pci_addr_t * addr,
-		      char *uio_drv_name)
+vlib_pci_bind_to_uio (vlib_main_t *vm, vlib_pci_addr_t *addr,
+		      char *uio_drv_name, int force)
 {
   clib_error_t *error = 0;
   u8 *s = 0, *driver_name = 0;
@@ -427,7 +486,7 @@ vlib_pci_bind_to_uio (vlib_main_t * vm, vlib_pci_addr_t * addr,
 					 "is bound to IOMMU group and "
 					 "vfio-pci driver is not loaded",
 					 format_vlib_pci_addr, addr);
-	      goto done;
+	      goto err0;
 	    }
 	  else
 	    uio_drv_name = "vfio-pci";
@@ -448,7 +507,7 @@ vlib_pci_bind_to_uio (vlib_main_t * vm, vlib_pci_addr_t * addr,
 	      error = clib_error_return (0, "Skipping PCI device %U: missing "
 					 "kernel VFIO or UIO driver",
 					 format_vlib_pci_addr, addr);
-	      goto done;
+	      goto err0;
 	    }
 	  clib_error_free (error);
 	}
@@ -462,78 +521,82 @@ vlib_pci_bind_to_uio (vlib_main_t * vm, vlib_pci_addr_t * addr,
       ((strcmp ("vfio-pci", (char *) driver_name) == 0) ||
        (strcmp ("uio_pci_generic", (char *) driver_name) == 0) ||
        (strcmp ("igb_uio", (char *) driver_name) == 0)))
-    goto done;
+    goto err0;
 
-  /* walk trough all linux interfaces and if interface belonging to
-     this device is founf check if interface is admin up  */
-  dir = opendir ("/sys/class/net");
-  s = format (s, "%U%c", format_vlib_pci_addr, addr, 0);
-
-  if (!dir)
+  if (!force)
     {
-      error = clib_error_return (0, "Skipping PCI device %U: failed to "
-				 "read /sys/class/net",
-				 format_vlib_pci_addr, addr);
-      goto done;
-    }
+      /* walk trough all linux interfaces and if interface belonging to
+	 this device is found check if interface is admin up  */
+      dir = opendir ("/sys/class/net");
+      s = format (s, "%U%c", format_vlib_pci_addr, addr, 0);
 
-  fd = socket (PF_INET, SOCK_DGRAM, 0);
-  if (fd < 0)
-    {
-      error = clib_error_return_unix (0, "socket");
-      goto done;
-    }
-
-  while ((e = readdir (dir)))
-    {
-      struct ifreq ifr;
-      struct ethtool_drvinfo drvinfo;
-
-      if (e->d_name[0] == '.')	/* skip . and .. */
-	continue;
-
-      clib_memset (&ifr, 0, sizeof ifr);
-      clib_memset (&drvinfo, 0, sizeof drvinfo);
-      ifr.ifr_data = (char *) &drvinfo;
-      clib_strncpy (ifr.ifr_name, e->d_name, sizeof (ifr.ifr_name) - 1);
-
-      drvinfo.cmd = ETHTOOL_GDRVINFO;
-      if (ioctl (fd, SIOCETHTOOL, &ifr) < 0)
+      if (!dir)
 	{
-	  /* Some interfaces (eg "lo") don't support this ioctl */
-	  if ((errno != ENOTSUP) && (errno != ENODEV))
-	    clib_unix_warning ("ioctl fetch intf %s bus info error",
-			       e->d_name);
-	  continue;
+	  error = clib_error_return (0,
+				     "Skipping PCI device %U: failed to "
+				     "read /sys/class/net",
+				     format_vlib_pci_addr, addr);
+	  goto err0;
 	}
 
-      if (strcmp ((char *) s, drvinfo.bus_info))
-	continue;
-
-      clib_memset (&ifr, 0, sizeof (ifr));
-      clib_strncpy (ifr.ifr_name, e->d_name, sizeof (ifr.ifr_name) - 1);
-
-      if (ioctl (fd, SIOCGIFFLAGS, &ifr) < 0)
+      fd = socket (PF_INET, SOCK_DGRAM, 0);
+      if (fd < 0)
 	{
-	  error = clib_error_return_unix (0, "ioctl fetch intf %s flags",
-					  e->d_name);
-	  close (fd);
-	  goto done;
+	  error = clib_error_return_unix (0, "socket");
+	  goto err1;
 	}
 
-      if (ifr.ifr_flags & IFF_UP)
+      while ((e = readdir (dir)))
 	{
-	  vlib_log (VLIB_LOG_LEVEL_WARNING, pci_main.log_default,
-		    "Skipping PCI device %U as host "
-		    "interface %s is up", format_vlib_pci_addr, addr,
-		    e->d_name);
-	  close (fd);
-	  goto done;
+	  struct ifreq ifr;
+	  struct ethtool_drvinfo drvinfo;
+
+	  if (e->d_name[0] == '.') /* skip . and .. */
+	    continue;
+
+	  clib_memset (&ifr, 0, sizeof ifr);
+	  clib_memset (&drvinfo, 0, sizeof drvinfo);
+	  ifr.ifr_data = (char *) &drvinfo;
+	  clib_strncpy (ifr.ifr_name, e->d_name, sizeof (ifr.ifr_name) - 1);
+
+	  drvinfo.cmd = ETHTOOL_GDRVINFO;
+	  if (ioctl (fd, SIOCETHTOOL, &ifr) < 0)
+	    {
+	      /* Some interfaces (eg "lo") don't support this ioctl */
+	      if ((errno != ENOTSUP) && (errno != ENODEV))
+		clib_unix_warning ("ioctl fetch intf %s bus info error",
+				   e->d_name);
+	      continue;
+	    }
+
+	  if (strcmp ((char *) s, drvinfo.bus_info))
+	    continue;
+
+	  clib_memset (&ifr, 0, sizeof (ifr));
+	  clib_strncpy (ifr.ifr_name, e->d_name, sizeof (ifr.ifr_name) - 1);
+
+	  if (ioctl (fd, SIOCGIFFLAGS, &ifr) < 0)
+	    {
+	      error = clib_error_return_unix (0, "ioctl fetch intf %s flags",
+					      e->d_name);
+	      close (fd);
+	      goto err1;
+	    }
+
+	  if (ifr.ifr_flags & IFF_UP)
+	    {
+	      vlib_log (VLIB_LOG_LEVEL_WARNING, pci_main.log_default,
+			"Skipping PCI device %U as host "
+			"interface %s is up",
+			format_vlib_pci_addr, addr, e->d_name);
+	      close (fd);
+	      goto err1;
+	    }
 	}
+
+      close (fd);
+      vec_reset_length (s);
     }
-
-  close (fd);
-  vec_reset_length (s);
 
   s = format (s, "%v/driver/unbind%c", dev_dir_name, 0);
   clib_sysfs_write ((char *) s, "%U", format_vlib_pci_addr, addr);
@@ -565,8 +628,9 @@ vlib_pci_bind_to_uio (vlib_main_t * vm, vlib_pci_addr_t * addr,
       vec_reset_length (s);
     }
 
-done:
+err1:
   closedir (dir);
+err0:
   vec_free (s);
   vec_free (dev_dir_name);
   vec_free (driver_name);
@@ -1133,7 +1197,6 @@ vlib_pci_map_region_int (vlib_main_t * vm, vlib_pci_dev_handle_t h,
   linux_pci_device_t *p = linux_pci_get_device (h);
   int fd = -1;
   clib_error_t *error;
-  int flags = MAP_SHARED;
   u64 size = 0, offset = 0;
   u16 command;
 
@@ -1152,9 +1215,6 @@ vlib_pci_map_region_int (vlib_main_t * vm, vlib_pci_dev_handle_t h,
 
   if ((error = vlib_pci_region (vm, h, bar, &fd, &size, &offset)))
     return error;
-
-  if (p->type == LINUX_PCI_DEVICE_TYPE_UIO && addr != 0)
-    flags |= MAP_FIXED;
 
   *result = clib_mem_vm_map_shared (addr, size, fd, offset,
 				    "PCIe %U region %u", format_vlib_pci_addr,

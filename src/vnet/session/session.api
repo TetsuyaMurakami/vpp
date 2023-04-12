@@ -117,38 +117,6 @@ autoreply define app_del_cert_key_pair {
     u32 index;
 };
 
-/** \brief Application add TLS certificate
- 	### WILL BE DEPRECATED POST 20.01 ###
-    @param client_index - opaque cookie to identify the sender
-    @param context - sender context, to match reply w/ request
-    @param cert_len - certificate length
-    @param cert - certificate as a string
-*/
-autoreply define application_tls_cert_add {
-    option deprecated="to be removed post 21.06";
-    u32 client_index;
-    u32 context;
-    u32 app_index;
-    u16 cert_len;
-    u8 cert[cert_len];
-};
-
-/** \brief Application add TLS key
- 	### WILL BE DEPRECATED POST 20.01 ###
-    @param client_index - opaque cookie to identify the sender
-    @param context - sender context, to match reply w/ request
-    @param key_len - certificate length
-    @param key - PEM encoded key as a string
-*/
-autoreply define application_tls_key_add {
-    option deprecated="to be removed post 21.06";
-    u32 client_index;
-    u32 context;
-    u32 app_index;
-    u16 key_len;
-    u8 key[key_len];
-};
-
 /** \brief add/del application worker
     @param client_index - opaque cookie to identify the sender
                           client to vpp direction only
@@ -203,6 +171,18 @@ autoreply define session_enable_disable {
   bool is_enable [default=true];
 };
 
+/** \brief enable/disable session layer socket api
+    @param client_index - opaque cookie to identify the sender
+                          client to vpp direction only
+    @param context - sender context, to match reply w/ request
+    @param is_enable - disable session layer if 0, enable otherwise
+*/
+autoreply define session_sapi_enable_disable {
+  u32 client_index;
+  u32 context;
+  bool is_enable [default=true];
+};
+
 /** \brief add/del application namespace
     @param client_index - opaque cookie to identify the sender
                           client to vpp direction only
@@ -217,6 +197,7 @@ autoreply define session_enable_disable {
     @param namespace_id - namespace id
 */
 define app_namespace_add_del {
+  option deprecated;
   u32 client_index;
   u32 context;
   u64 secret;
@@ -226,12 +207,85 @@ define app_namespace_add_del {
   string namespace_id[];
 };
 
+/** \brief add/del application namespace
+    @param client_index - opaque cookie to identify the sender
+                          client to vpp direction only
+    @param context - sender context, to match reply w/ request
+    @param secret - secret shared between app and vpp
+    @param sw_if_index - local interface that "supports" namespace. Set to
+                         ~0 if no preference
+    @param ip4_fib_id - id of ip4 fib that "supports" the namespace. Ignored
+                        if sw_if_index set.
+    @param ip6_fib_id - id of ip6 fib that "supports" the namespace. Ignored
+                        if sw_if_index set.
+    @param namespace_id - namespace id
+    @param netns - linux net namespace
+*/
+define app_namespace_add_del_v2 {
+  u32 client_index;
+  u32 context;
+  u64 secret;
+  vl_api_interface_index_t sw_if_index [default=0xffffffff];
+  u32 ip4_fib_id;
+  u32 ip6_fib_id;
+  string namespace_id[64];
+  string netns[64];
+};
+
+/** \brief add/del application namespace
+    @param client_index - opaque cookie to identify the sender
+                          client to vpp direction only
+    @param context - sender context, to match reply w/ request
+    @param secret - secret shared between app and vpp
+    @param sw_if_index - local interface that "supports" namespace. Set to
+                         ~0 if no preference
+    @param ip4_fib_id - id of ip4 fib that "supports" the namespace. Ignored
+                        if sw_if_index set.
+    @param ip6_fib_id - id of ip6 fib that "supports" the namespace. Ignored
+                        if sw_if_index set.
+    @param namespace_id - namespace id
+    @param netns - linux net namespace
+    @param sock_name - socket name (path, abstract socket name)
+*/
+define app_namespace_add_del_v3 {
+  u32 client_index;
+  u32 context;
+  u64 secret;
+  bool is_add [default=true];
+  vl_api_interface_index_t sw_if_index [default=0xffffffff];
+  u32 ip4_fib_id;
+  u32 ip6_fib_id;
+  string namespace_id[64];
+  string netns[64];
+  string sock_name[];
+};
+
 /** \brief Reply for app namespace add/del
     @param context - returned sender context, to match reply w/ request
     @param retval - return code
     @param appns_index - app namespace index
 */
 define app_namespace_add_del_reply
+{
+  option deprecated;
+  u32 context;
+  i32 retval;
+  u32 appns_index;
+};
+
+/** \brief Reply for app namespace add/del
+    @param context - returned sender context, to match reply w/ request
+    @param retval - return code
+    @param appns_index - app namespace index
+*/
+define app_namespace_add_del_v2_reply
+{
+  u32 context;
+  i32 retval;
+  u32 appns_index;
+};
+
+define app_namespace_add_del_v3_reply
 {
   u32 context;
   i32 retval;

@@ -10,7 +10,7 @@ except NameError:
 
 
 def mk_counter():
-    return {'packets': 0, 'bytes': 0}
+    return {"packets": 0, "bytes": 0}
 
 
 class VppIpsecSpd(VppObject):
@@ -52,14 +52,13 @@ class VppIpsecSpdItfBinding(VppObject):
         self.itf = itf
 
     def add_vpp_config(self):
-        self.test.vapi.ipsec_interface_add_del_spd(self.spd.id,
-                                                   self.itf.sw_if_index)
+        self.test.vapi.ipsec_interface_add_del_spd(self.spd.id, self.itf.sw_if_index)
         self.test.registry.register(self, self.test.logger)
 
     def remove_vpp_config(self):
-        self.test.vapi.ipsec_interface_add_del_spd(self.spd.id,
-                                                   self.itf.sw_if_index,
-                                                   is_add=0)
+        self.test.vapi.ipsec_interface_add_del_spd(
+            self.spd.id, self.itf.sw_if_index, is_add=0
+        )
 
     def object_id(self):
         return "bind-%s-to-%s" % (self.spd.id, self.itf)
@@ -77,17 +76,24 @@ class VppIpsecSpdEntry(VppObject):
     VPP SPD DB Entry
     """
 
-    def __init__(self, test, spd, sa_id,
-                 local_start, local_stop,
-                 remote_start, remote_stop,
-                 proto,
-                 priority=100,
-                 policy=None,
-                 is_outbound=1,
-                 remote_port_start=0,
-                 remote_port_stop=65535,
-                 local_port_start=0,
-                 local_port_stop=65535):
+    def __init__(
+        self,
+        test,
+        spd,
+        sa_id,
+        local_start,
+        local_stop,
+        remote_start,
+        remote_stop,
+        proto=socket.IPPROTO_RAW,
+        priority=100,
+        policy=None,
+        is_outbound=1,
+        remote_port_start=0,
+        remote_port_stop=65535,
+        local_port_start=0,
+        local_port_stop=65535,
+    ):
         self.test = test
         self.spd = spd
         self.sa_id = sa_id
@@ -99,11 +105,10 @@ class VppIpsecSpdEntry(VppObject):
         self.is_outbound = is_outbound
         self.priority = priority
         if not policy:
-            self.policy = (VppEnum.vl_api_ipsec_spd_action_t.
-                           IPSEC_API_SPD_ACTION_BYPASS)
+            self.policy = VppEnum.vl_api_ipsec_spd_action_t.IPSEC_API_SPD_ACTION_BYPASS
         else:
             self.policy = policy
-        self.is_ipv6 = (0 if self.local_start.version == 4 else 1)
+        self.is_ipv6 = 0 if self.local_start.version == 4 else 1
         self.local_port_start = local_port_start
         self.local_port_stop = local_port_stop
         self.remote_port_start = remote_port_start
@@ -125,9 +130,11 @@ class VppIpsecSpdEntry(VppObject):
             local_port_start=self.local_port_start,
             local_port_stop=self.local_port_stop,
             remote_port_start=self.remote_port_start,
-            remote_port_stop=self.remote_port_stop)
+            remote_port_stop=self.remote_port_stop,
+        )
         self.stat_index = rv.stat_index
         self.test.registry.register(self, self.test.logger)
+        return self
 
     def remove_vpp_config(self):
         self.test.vapi.ipsec_spd_entry_add_del(
@@ -146,25 +153,30 @@ class VppIpsecSpdEntry(VppObject):
             local_port_stop=self.local_port_stop,
             remote_port_start=self.remote_port_start,
             remote_port_stop=self.remote_port_stop,
-            is_add=0)
+            is_add=0,
+        )
 
     def object_id(self):
-        return "spd-entry-%d-%d-%d-%d-%d-%d" % (self.spd.id,
-                                                self.priority,
-                                                self.policy,
-                                                self.is_outbound,
-                                                self.is_ipv6,
-                                                self.remote_port_start)
+        return "spd-entry-%d-%d-%d-%d-%d-%d" % (
+            self.spd.id,
+            self.priority,
+            self.policy,
+            self.is_outbound,
+            self.is_ipv6,
+            self.remote_port_start,
+        )
 
     def query_vpp_config(self):
         ss = self.test.vapi.ipsec_spd_dump(self.spd.id)
         for s in ss:
-            if s.entry.sa_id == self.sa_id and \
-               s.entry.is_outbound == self.is_outbound and \
-               s.entry.priority == self.priority and \
-               s.entry.policy == self.policy and \
-               s.entry.remote_address_start == self.remote_start and \
-               s.entry.remote_port_start == self.remote_port_start:
+            if (
+                s.entry.sa_id == self.sa_id
+                and s.entry.is_outbound == self.is_outbound
+                and s.entry.priority == self.priority
+                and s.entry.policy == self.policy
+                and s.entry.remote_address_start == self.remote_start
+                and s.entry.remote_port_start == self.remote_port_start
+            ):
                 return True
         return False
 
@@ -173,11 +185,11 @@ class VppIpsecSpdEntry(VppObject):
         if worker is None:
             total = mk_counter()
             for t in c:
-                total['packets'] += t[self.stat_index]['packets']
+                total["packets"] += t[self.stat_index]["packets"]
             return total
         else:
             # +1 to skip main thread
-            return c[worker+1][self.stat_index]
+            return c[worker + 1][self.stat_index]
 
 
 class VppIpsecSA(VppObject):
@@ -187,14 +199,26 @@ class VppIpsecSA(VppObject):
 
     DEFAULT_UDP_PORT = 4500
 
-    def __init__(self, test, id, spi,
-                 integ_alg, integ_key,
-                 crypto_alg, crypto_key,
-                 proto,
-                 tun_src=None, tun_dst=None,
-                 flags=None, salt=0, tun_flags=None,
-                 dscp=None,
-                 udp_src=None, udp_dst=None, hop_limit=None):
+    def __init__(
+        self,
+        test,
+        id,
+        spi,
+        integ_alg,
+        integ_key,
+        crypto_alg,
+        crypto_key,
+        proto,
+        tun_src=None,
+        tun_dst=None,
+        flags=None,
+        salt=0,
+        tun_flags=None,
+        dscp=None,
+        udp_src=None,
+        udp_dst=None,
+        hop_limit=None,
+    ):
         e = VppEnum.vl_api_ipsec_sad_flags_t
         self.test = test
         self.id = id
@@ -213,17 +237,16 @@ class VppIpsecSA(VppObject):
             self.flags = e.IPSEC_API_SAD_FLAG_NONE
         else:
             self.flags = flags
-        if (tun_src):
+        if tun_src:
             self.tun_src = ip_address(text_type(tun_src))
             self.flags = self.flags | e.IPSEC_API_SAD_FLAG_IS_TUNNEL
-            if (self.tun_src.version == 6):
-                self.flags = self.flags | e.IPSEC_API_SAD_FLAG_IS_TUNNEL_V6
-        if (tun_dst):
+        if tun_dst:
             self.tun_dst = ip_address(text_type(tun_dst))
         self.udp_src = udp_src
         self.udp_dst = udp_dst
-        self.tun_flags = (VppEnum.vl_api_tunnel_encap_decap_flags_t.
-                          TUNNEL_API_ENCAP_DECAP_FLAG_NONE)
+        self.tun_flags = (
+            VppEnum.vl_api_tunnel_encap_decap_flags_t.TUNNEL_API_ENCAP_DECAP_FLAG_NONE
+        )
         if tun_flags:
             self.tun_flags = tun_flags
         self.dscp = VppEnum.vl_api_ip_dscp_t.IP_API_DSCP_CS0
@@ -234,63 +257,66 @@ class VppIpsecSA(VppObject):
             self.hop_limit = hop_limit
 
     def tunnel_encode(self):
-        return {'src': (self.tun_src if self.tun_src else []),
-                'dst': (self.tun_dst if self.tun_dst else []),
-                'encap_decap_flags': self.tun_flags,
-                'dscp': self.dscp,
-                'hop_limit': self.hop_limit,
-                'table_id': self.table_id
-                }
+        return {
+            "src": (self.tun_src if self.tun_src else []),
+            "dst": (self.tun_dst if self.tun_dst else []),
+            "encap_decap_flags": self.tun_flags,
+            "dscp": self.dscp,
+            "hop_limit": self.hop_limit,
+            "table_id": self.table_id,
+        }
 
     def add_vpp_config(self):
         entry = {
-            'sad_id': self.id,
-            'spi': self.spi,
-            'integrity_algorithm': self.integ_alg,
-            'integrity_key': {
-                'length': len(self.integ_key),
-                'data': self.integ_key,
+            "sad_id": self.id,
+            "spi": self.spi,
+            "integrity_algorithm": self.integ_alg,
+            "integrity_key": {
+                "length": len(self.integ_key),
+                "data": self.integ_key,
             },
-            'crypto_algorithm': self.crypto_alg,
-            'crypto_key': {
-                'data': self.crypto_key,
-                'length': len(self.crypto_key),
+            "crypto_algorithm": self.crypto_alg,
+            "crypto_key": {
+                "data": self.crypto_key,
+                "length": len(self.crypto_key),
             },
-            'protocol': self.proto,
-            'tunnel': self.tunnel_encode(),
-            'flags': self.flags,
-            'salt': self.salt
+            "protocol": self.proto,
+            "tunnel": self.tunnel_encode(),
+            "flags": self.flags,
+            "salt": self.salt,
         }
         # don't explicitly send the defaults, let papi fill them in
         if self.udp_src:
-            entry['udp_src_port'] = self.udp_src
+            entry["udp_src_port"] = self.udp_src
         if self.udp_dst:
-            entry['udp_dst_port'] = self.udp_dst
-        r = self.test.vapi.ipsec_sad_entry_add_del_v3(is_add=1, entry=entry)
+            entry["udp_dst_port"] = self.udp_dst
+        r = self.test.vapi.ipsec_sad_entry_add(entry=entry)
         self.stat_index = r.stat_index
         self.test.registry.register(self, self.test.logger)
         return self
 
+    def update_vpp_config(
+        self, udp_src=None, udp_dst=None, is_tun=False, tun_src=None, tun_dst=None
+    ):
+        if is_tun:
+            if tun_src:
+                self.tun_src = ip_address(text_type(tun_src))
+            if tun_dst:
+                self.tun_dst = ip_address(text_type(tun_dst))
+        if udp_src:
+            self.udp_src = udp_src
+        if udp_dst:
+            self.udp_dst = udp_dst
+        self.test.vapi.ipsec_sad_entry_update(
+            sad_id=self.id,
+            is_tun=is_tun,
+            tunnel=self.tunnel_encode(),
+            udp_src_port=udp_src,
+            udp_dst_port=udp_dst,
+        )
+
     def remove_vpp_config(self):
-        r = self.test.vapi.ipsec_sad_entry_add_del_v3(
-            is_add=0,
-            entry={
-                'sad_id': self.id,
-                'spi': self.spi,
-                'integrity_algorithm': self.integ_alg,
-                'integrity_key': {
-                    'length': len(self.integ_key),
-                    'data': self.integ_key,
-                },
-                'crypto_algorithm': self.crypto_alg,
-                'crypto_key': {
-                    'data': self.crypto_key,
-                    'length': len(self.crypto_key),
-                },
-                'protocol': self.proto,
-                'tunnel': self.tunnel_encode(),
-                'salt': self.salt
-            })
+        self.test.vapi.ipsec_sad_entry_del(id=self.id)
 
     def object_id(self):
         return "ipsec-sa-%d" % self.id
@@ -303,7 +329,7 @@ class VppIpsecSA(VppObject):
             if b.entry.sad_id == self.id:
                 # if udp encap is configured then the ports should match
                 # those configured or the default
-                if (self.flags & e.IPSEC_API_SAD_FLAG_UDP_ENCAP):
+                if self.flags & e.IPSEC_API_SAD_FLAG_UDP_ENCAP:
                     if not b.entry.flags & e.IPSEC_API_SAD_FLAG_UDP_ENCAP:
                         return False
                     if self.udp_src:
@@ -326,11 +352,22 @@ class VppIpsecSA(VppObject):
         if worker is None:
             total = mk_counter()
             for t in c:
-                total['packets'] += t[self.stat_index]['packets']
+                total["packets"] += t[self.stat_index]["packets"]
             return total
         else:
             # +1 to skip main thread
-            return c[worker+1][self.stat_index]
+            return c[worker + 1][self.stat_index]
+
+    def get_err(self, name, worker=None):
+        c = self.test.statistics.get_counter("/net/ipsec/sa/err/" + name)
+        if worker is None:
+            total = 0
+            for t in c:
+                total += t[self.stat_index]
+            return total
+        else:
+            # +1 to skip main thread
+            return c[worker + 1][self.stat_index]
 
 
 class VppIpsecTunProtect(VppObject):
@@ -356,11 +393,13 @@ class VppIpsecTunProtect(VppObject):
         self.sa_out = sa_out.id
         self.test.vapi.ipsec_tunnel_protect_update(
             tunnel={
-                'sw_if_index': self.itf._sw_if_index,
-                'n_sa_in': len(self.sas_in),
-                'sa_out': self.sa_out,
-                'sa_in': self.sas_in,
-                'nh': self.nh})
+                "sw_if_index": self.itf._sw_if_index,
+                "n_sa_in": len(self.sas_in),
+                "sa_out": self.sa_out,
+                "sa_in": self.sas_in,
+                "nh": self.nh,
+            }
+        )
 
     def object_id(self):
         return "ipsec-tun-protect-%s-%s" % (self.itf, self.nh)
@@ -368,24 +407,24 @@ class VppIpsecTunProtect(VppObject):
     def add_vpp_config(self):
         self.test.vapi.ipsec_tunnel_protect_update(
             tunnel={
-                'sw_if_index': self.itf._sw_if_index,
-                'n_sa_in': len(self.sas_in),
-                'sa_out': self.sa_out,
-                'sa_in': self.sas_in,
-                'nh': self.nh})
+                "sw_if_index": self.itf._sw_if_index,
+                "n_sa_in": len(self.sas_in),
+                "sa_out": self.sa_out,
+                "sa_in": self.sas_in,
+                "nh": self.nh,
+            }
+        )
         self.test.registry.register(self, self.test.logger)
 
     def remove_vpp_config(self):
         self.test.vapi.ipsec_tunnel_protect_del(
-            sw_if_index=self.itf.sw_if_index,
-            nh=self.nh)
+            sw_if_index=self.itf.sw_if_index, nh=self.nh
+        )
 
     def query_vpp_config(self):
-        bs = self.test.vapi.ipsec_tunnel_protect_dump(
-            sw_if_index=self.itf.sw_if_index)
+        bs = self.test.vapi.ipsec_tunnel_protect_dump(sw_if_index=self.itf.sw_if_index)
         for b in bs:
-            if b.tun.sw_if_index == self.itf.sw_if_index and \
-               self.nh == str(b.tun.nh):
+            if b.tun.sw_if_index == self.itf.sw_if_index and self.nh == str(b.tun.nh):
                 return True
         return False
 
@@ -395,31 +434,34 @@ class VppIpsecInterface(VppInterface):
     VPP IPSec interface
     """
 
-    def __init__(self, test, mode=None, instance=0xffffffff):
+    def __init__(self, test, mode=None, instance=0xFFFFFFFF):
         super(VppIpsecInterface, self).__init__(test)
 
         self.mode = mode
         if not self.mode:
-            self.mode = (VppEnum.vl_api_tunnel_mode_t.
-                         TUNNEL_API_MODE_P2P)
+            self.mode = VppEnum.vl_api_tunnel_mode_t.TUNNEL_API_MODE_P2P
         self.instance = instance
 
     def add_vpp_config(self):
-        r = self.test.vapi.ipsec_itf_create(itf={
-            'user_instance': self.instance,
-            'mode': self.mode,
-        })
+        r = self.test.vapi.ipsec_itf_create(
+            itf={
+                "user_instance": self.instance,
+                "mode": self.mode,
+            }
+        )
         self.set_sw_if_index(r.sw_if_index)
         self.test.registry.register(self, self.test.logger)
+        ts = self.test.vapi.ipsec_itf_dump(sw_if_index=self._sw_if_index)
+        self.instance = ts[0].itf.user_instance
         return self
 
     def remove_vpp_config(self):
         self.test.vapi.ipsec_itf_delete(sw_if_index=self._sw_if_index)
 
     def query_vpp_config(self):
-        ts = self.test.vapi.ipsec_itf_dump(sw_if_index=0xffffffff)
+        ts = self.test.vapi.ipsec_itf_dump(sw_if_index=0xFFFFFFFF)
         for t in ts:
-            if t.tunnel.sw_if_index == self._sw_if_index:
+            if t.itf.sw_if_index == self._sw_if_index:
                 return True
         return False
 
@@ -427,4 +469,4 @@ class VppIpsecInterface(VppInterface):
         return self.object_id()
 
     def object_id(self):
-        return "ipsec-%d" % self._sw_if_index
+        return "ipsec%d" % self.instance

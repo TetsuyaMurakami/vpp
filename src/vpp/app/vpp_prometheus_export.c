@@ -96,20 +96,19 @@ retry:
 			 res[i].combined_counter_vec[k][j].bytes);
 	      }
 	  break;
-	case STAT_DIR_TYPE_ERROR_INDEX:
-	  for (j = 0; j < vec_len (res[i].error_vector); j++)
-	    {
-	      fformat (stream, "# TYPE %s counter\n",
-		       prom_string (res[i].name));
-	      fformat (stream, "%s{thread=\"%d\"} %lld\n",
-		       prom_string (res[i].name), j, res[i].error_vector[j]);
-	    }
-	  break;
-
 	case STAT_DIR_TYPE_SCALAR_INDEX:
 	  fformat (stream, "# TYPE %s counter\n", prom_string (res[i].name));
 	  fformat (stream, "%s %.2f\n", prom_string (res[i].name),
 		   res[i].scalar_value);
+	  break;
+
+	case STAT_DIR_TYPE_NAME_VECTOR:
+	  fformat (stream, "# TYPE %s_info gauge\n",
+		   prom_string (res[i].name));
+	  for (k = 0; k < vec_len (res[i].name_vector); k++)
+	    if (res[i].name_vector[k])
+	      fformat (stream, "%s_info{index=\"%d\",name=\"%s\"} 1\n",
+		       prom_string (res[i].name), k, res[i].name_vector[k]);
 	  break;
 
 	case STAT_DIR_TYPE_EMPTY:
@@ -245,8 +244,8 @@ main (int argc, char **argv)
   u8 *stat_segment_name, *pattern = 0, **patterns = 0;
   int rv;
 
-  /* Allocating 32MB heap */
-  clib_mem_init (0, 32 << 20);
+  /* Allocating 256MB heap */
+  clib_mem_init (0, 256 << 20);
 
   unformat_init_command_line (a, argv);
 

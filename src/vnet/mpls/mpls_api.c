@@ -30,33 +30,12 @@
 #include <vnet/fib/fib_path_list.h>
 #include <vnet/ip/ip_types_api.h>
 
-#include <vnet/vnet_msg_enum.h>
+#include <vnet/format_fns.h>
+#include <vnet/mpls/mpls.api_enum.h>
+#include <vnet/mpls/mpls.api_types.h>
 
-#define vl_typedefs		/* define message structures */
-#include <vnet/vnet_all_api_h.h>
-#undef vl_typedefs
-
-#define vl_endianfun		/* define message structures */
-#include <vnet/vnet_all_api_h.h>
-#undef vl_endianfun
-
-/* instantiate all the print functions we know about */
-#define vl_print(handle, ...) vlib_cli_output (handle, __VA_ARGS__)
-#define vl_printfun
-#include <vnet/vnet_all_api_h.h>
-#undef vl_printfun
-
+#define REPLY_MSG_ID_BASE mpls_main.msg_id_base
 #include <vlibapi/api_helper_macros.h>
-
-#define foreach_vpe_api_msg                                 \
-_(MPLS_IP_BIND_UNBIND, mpls_ip_bind_unbind)                 \
-_(MPLS_ROUTE_ADD_DEL, mpls_route_add_del)                   \
-_(MPLS_TABLE_ADD_DEL, mpls_table_add_del)                   \
-_(MPLS_TUNNEL_ADD_DEL, mpls_tunnel_add_del)                 \
-_(MPLS_TUNNEL_DUMP, mpls_tunnel_dump)                       \
-_(SW_INTERFACE_SET_MPLS_ENABLE, sw_interface_set_mpls_enable) \
-_(MPLS_TABLE_DUMP, mpls_table_dump)                         \
-_(MPLS_ROUTE_DUMP, mpls_route_dump)
 
 void
 mpls_table_delete (u32 table_id, u8 is_api)
@@ -192,13 +171,11 @@ mpls_route_add_del_t_handler (vnet_main_t * vnm,
 	goto out;
     }
 
-  rv = fib_api_route_add_del (mp->mr_is_add,
-			      mp->mr_is_multipath,
-			      fib_index,
-			      &pfx,
-			      (mp->mr_route.mr_is_multicast ?
-			       FIB_ENTRY_FLAG_MULTICAST :
-			       FIB_ENTRY_FLAG_NONE), rpaths);
+  rv = fib_api_route_add_del (
+    mp->mr_is_add, mp->mr_is_multipath, fib_index, &pfx, FIB_SOURCE_API,
+    (mp->mr_route.mr_is_multicast ? FIB_ENTRY_FLAG_MULTICAST :
+				    FIB_ENTRY_FLAG_NONE),
+    rpaths);
 
   if (mp->mr_is_add && 0 == rv)
     *stats_index = fib_table_entry_get_stats_index (fib_index, &pfx);
@@ -233,8 +210,6 @@ vl_api_mpls_route_add_del_t_handler (vl_api_mpls_route_add_del_t * mp)
 void
 mpls_table_create (u32 table_id, u8 is_api, const u8 * name)
 {
-  u32 fib_index;
-
   /*
    * The MPLS defult table must also be explicitly created via the API.
    * So in contrast to IP, it gets no special treatment here.
@@ -245,16 +220,11 @@ mpls_table_create (u32 table_id, u8 is_api, const u8 * name)
    * i.e. it can be added many times via the API but needs to be
    * deleted only once.
    */
-  fib_index = fib_table_find (FIB_PROTOCOL_MPLS, table_id);
-
-  if (~0 == fib_index)
-    {
       fib_table_find_or_create_and_lock_w_name (FIB_PROTOCOL_MPLS,
 						table_id,
 						(is_api ?
 						 FIB_SOURCE_API :
 						 FIB_SOURCE_CLI), name);
-    }
 }
 
 static void
@@ -318,9 +288,8 @@ static void
 
   VALIDATE_SW_IF_INDEX (mp);
 
-  rv = mpls_sw_interface_enable_disable (&mpls_main,
-					 ntohl (mp->sw_if_index),
-					 mp->enable, 1);
+  rv = mpls_sw_interface_enable_disable (&mpls_main, ntohl (mp->sw_if_index),
+					 mp->enable);
 
   BAD_SW_IF_INDEX_LABEL;
   REPLY_MACRO (VL_API_SW_INTERFACE_SET_MPLS_ENABLE_REPLY);
@@ -358,7 +327,7 @@ send_mpls_tunnel_entry (u32 mti, void *arg)
   mp = vl_msg_api_alloc (sizeof (*mp) + n * sizeof (vl_api_fib_path_t));
   clib_memset (mp, 0, sizeof (*mp) + n * sizeof (vl_api_fib_path_t));
 
-  mp->_vl_msg_id = ntohs (VL_API_MPLS_TUNNEL_DETAILS);
+  mp->_vl_msg_id = ntohs (REPLY_MSG_ID_BASE + VL_API_MPLS_TUNNEL_DETAILS);
   mp->context = ctx->context;
 
   mp->mt_tunnel.mt_n_paths = n;
@@ -409,7 +378,7 @@ send_mpls_table_details (vpe_api_main_t * am,
 
   mp = vl_msg_api_alloc (sizeof (*mp));
   memset (mp, 0, sizeof (*mp));
-  mp->_vl_msg_id = ntohs (VL_API_MPLS_TABLE_DETAILS);
+  mp->_vl_msg_id = ntohs (REPLY_MSG_ID_BASE + VL_API_MPLS_TABLE_DETAILS);
   mp->context = context;
 
   mp->mt_table.mt_table_id = htonl (table->ft_table_id);
@@ -459,7 +428,7 @@ send_mpls_route_details (vpe_api_main_t * am,
   if (!mp)
     return;
   clib_memset (mp, 0, sizeof (*mp));
-  mp->_vl_msg_id = ntohs (VL_API_MPLS_ROUTE_DETAILS);
+  mp->_vl_msg_id = ntohs (REPLY_MSG_ID_BASE + VL_API_MPLS_ROUTE_DETAILS);
   mp->context = context;
 
   mp->mr_route.mr_table_id =
@@ -530,49 +499,22 @@ vl_api_mpls_route_dump_t_handler (vl_api_mpls_route_dump_t * mp)
     }
 }
 
-/*
- * mpls_api_hookup
- * Add vpe's API message handlers to the table.
- * vlib has already mapped shared memory and
- * added the client registration handlers.
- * See .../vlib-api/vlibmemory/memclnt_vlib.c:memclnt_process()
- */
-#define vl_msg_name_crc_list
-#include <vnet/vnet_all_api_h.h>
-#undef vl_msg_name_crc_list
-
-static void
-setup_message_id_table (api_main_t * am)
-{
-#define _(id,n,crc) vl_msg_api_add_msg_name_crc (am, #n "_" #crc, id);
-  foreach_vl_msg_name_crc_mpls;
-#undef _
-}
-
+#include <vnet/mpls/mpls.api.c>
 static clib_error_t *
 mpls_api_hookup (vlib_main_t * vm)
 {
   api_main_t *am = vlibapi_get_main ();
 
-#define _(N,n)                                                  \
-    vl_msg_api_set_handlers(VL_API_##N, #n,                     \
-                           vl_api_##n##_t_handler,              \
-                           vl_noop_handler,                     \
-                           vl_api_##n##_t_endian,               \
-                           vl_api_##n##_t_print,                \
-                           sizeof(vl_api_##n##_t), 1);
-  foreach_vpe_api_msg;
-#undef _
-
   /*
    * Trace space for 8 MPLS encap labels
    */
-  am->api_trace_cfg[VL_API_MPLS_TUNNEL_ADD_DEL].size += 8 * sizeof (u32);
+  vl_api_increase_msg_trace_size (am, VL_API_MPLS_TUNNEL_ADD_DEL,
+				  8 * sizeof (u32));
 
   /*
    * Set up the (msg_name, crc, message-id) table
    */
-  setup_message_id_table (am);
+  REPLY_MSG_ID_BASE = setup_message_id_table ();
 
   return 0;
 }

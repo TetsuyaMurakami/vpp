@@ -93,14 +93,12 @@ lisp_gpe_sub_interface_set_table (u32 sw_if_index, u32 table_id)
 						 FIB_SOURCE_LISP);
   ASSERT (FIB_NODE_INDEX_INVALID != fib_index);
 
-  vec_validate (ip4_main.fib_index_by_sw_if_index, sw_if_index);
   ip4_main.fib_index_by_sw_if_index[sw_if_index] = fib_index;
 
   fib_index = fib_table_find_or_create_and_lock (FIB_PROTOCOL_IP6, table_id,
 						 FIB_SOURCE_LISP);
   ASSERT (FIB_NODE_INDEX_INVALID != fib_index);
 
-  vec_validate (ip6_main.fib_index_by_sw_if_index, sw_if_index);
   ip6_main.fib_index_by_sw_if_index[sw_if_index] = fib_index;
 }
 
@@ -170,6 +168,8 @@ lisp_gpe_sub_interface_find_or_create_and_lock (const ip_address_t * lrloc,
       vnet_sw_interface_set_flags (vnet_get_main (),
 				   l3s->sw_if_index,
 				   VNET_SW_INTERFACE_FLAG_ADMIN_UP);
+      vnet_set_interface_l3_output_node (vlib_get_main (), l3s->sw_if_index,
+					 (u8 *) "lisp-tunnel-output");
 
       lisp_gpe_sub_interface_db_insert (l3s);
     }
@@ -202,6 +202,7 @@ lisp_gpe_sub_interface_unlock (index_t l3si)
 
       lisp_gpe_tenant_l3_iface_unlock (l3s->key->vni);
       vnet_sw_interface_set_flags (vnet_get_main (), l3s->sw_if_index, 0);
+      vnet_reset_interface_l3_output_node (vlib_get_main (), l3s->sw_if_index);
       vnet_delete_sub_interface (l3s->sw_if_index);
 
       lisp_gpe_sub_interface_db_remove (l3s);

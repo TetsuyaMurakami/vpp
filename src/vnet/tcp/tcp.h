@@ -34,7 +34,7 @@ extern timer_expiration_handler tcp_timer_retransmit_syn_handler;
 
 typedef enum _tcp_error
 {
-#define tcp_error(n,s) TCP_ERROR_##n,
+#define tcp_error(f, n, s, d) TCP_ERROR_##f,
 #include <vnet/tcp/tcp_error.def>
 #undef tcp_error
   TCP_N_ERROR,
@@ -91,14 +91,14 @@ typedef struct tcp_worker_ctx_
   /** convenience pointer to this thread's vlib main */
   vlib_main_t *vm;
 
+  /** Time used for high precision (us) measurements in seconds */
+  f64 time_us;
+
   /** Time measured in @ref TCP_TSTAMP_TICK used for time stamps */
-  u32 time_now;
+  u32 time_tstamp;
 
   /* Max timers to be handled per dispatch loop */
   u32 max_timers_per_loop;
-
-  /** Session layer edge indices to tcp output */
-  u32 tco_next_node[2];
 
   /* Fifo of pending timer expirations */
   u32 *pending_timers;
@@ -113,6 +113,9 @@ typedef struct tcp_worker_ctx_
 
   /* fifo of pending free requests */
   tcp_cleanup_req_t *pending_cleanups;
+
+  /** Session layer edge indices to tcp output */
+  u32 tco_next_node[2];
 
   /** worker timer wheel */
   tcp_timer_wheel_t timer_wheel;
@@ -181,14 +184,14 @@ typedef struct tcp_configuration_
   /** Timer ticks to wait in closing for fin ack */
   u32 closing_time;
 
+  /** Timer ticks to wait for free buffer */
+  u32 alloc_err_timeout;
+
   /** Time to wait (sec) before cleaning up the connection */
   f32 cleanup_time;
 
   /** Number of preallocated connections */
   u32 preallocated_connections;
-
-  /** Number of preallocated half-open connections */
-  u32 preallocated_half_open_connections;
 
   /** Maxium allowed GSO packet size */
   u32 max_gso_size;
@@ -217,11 +220,6 @@ typedef struct _tcp_main
 
   /** Dispatch table by state and flags */
   tcp_lookup_dispatch_t dispatch_table[TCP_N_STATES][64];
-
-  clib_spinlock_t half_open_lock;
-
-  /** Pool of half-open connections on which we've sent a SYN */
-  tcp_connection_t *half_open_connections;
 
   /** Seed used to generate random iss */
   tcp_iss_seed_t iss_seed;
@@ -252,6 +250,9 @@ typedef struct _tcp_main
 
   /** Protocol configuration */
   tcp_configuration_t cfg;
+
+  /** message ID base for API */
+  u16 msg_id_base;
 } tcp_main_t;
 
 extern tcp_main_t tcp_main;
@@ -267,6 +268,8 @@ extern vlib_node_registration_t tcp4_rcv_process_node;
 extern vlib_node_registration_t tcp6_rcv_process_node;
 extern vlib_node_registration_t tcp4_listen_node;
 extern vlib_node_registration_t tcp6_listen_node;
+extern vlib_node_registration_t tcp4_input_nolookup_node;
+extern vlib_node_registration_t tcp6_input_nolookup_node;
 
 #define tcp_cfg tcp_main.cfg
 #define tcp_node_index(node_id, is_ip4) 				\
@@ -285,18 +288,9 @@ tcp_get_worker (u32 thread_index)
   return &tcp_main.wrk_ctx[thread_index];
 }
 
-#if (VLIB_BUFFER_TRACE_TRAJECTORY)
-#define tcp_trajectory_add_start(b, start)			\
-{								\
-    (*vlib_buffer_trace_trajectory_cb) (b, start);		\
-}
-#else
-#define tcp_trajectory_add_start(b, start)
-#endif
-
 tcp_connection_t *tcp_connection_alloc (u8 thread_index);
 tcp_connection_t *tcp_connection_alloc_w_base (u8 thread_index,
-					       tcp_connection_t * base);
+					       tcp_connection_t **base);
 void tcp_connection_free (tcp_connection_t * tc);
 void tcp_connection_close (tcp_connection_t * tc);
 void tcp_connection_cleanup (tcp_connection_t * tc);
@@ -321,8 +315,8 @@ u32 tcp_snd_space (tcp_connection_t * tc);
 int tcp_fastrecovery_prr_snd_space (tcp_connection_t * tc);
 void tcp_reschedule (tcp_connection_t * tc);
 fib_node_index_t tcp_lookup_rmt_in_fib (tcp_connection_t * tc);
-u32 tcp_session_push_header (transport_connection_t * tconn,
-			     vlib_buffer_t * b);
+u32 tcp_session_push_header (transport_connection_t *tconn, vlib_buffer_t **b,
+			     u32 n_bufs);
 int tcp_session_custom_tx (void *conn, transport_send_params_t * sp);
 
 void tcp_connection_timers_init (tcp_connection_t * tc);
@@ -333,7 +327,9 @@ void tcp_connection_tx_pacer_update (tcp_connection_t * tc);
 void tcp_connection_tx_pacer_reset (tcp_connection_t * tc, u32 window,
 				    u32 start_bucket);
 void tcp_program_cleanup (tcp_worker_ctx_t * wrk, tcp_connection_t * tc);
+void tcp_check_gso (tcp_connection_t *tc);
 
+int tcp_buffer_make_reset (vlib_main_t *vm, vlib_buffer_t *b, u8 is_ip4);
 void tcp_punt_unknown (vlib_main_t * vm, u8 is_ip4, u8 is_add);
 int tcp_configure_v4_source_address_range (vlib_main_t * vm,
 					   ip4_address_t * start,

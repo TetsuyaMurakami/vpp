@@ -22,11 +22,13 @@
 typedef struct lcp_main_s
 {
   u16 msg_id_base;		    /* API message ID base */
-  u8 default_namespace[LCP_NS_LEN]; /* default namespace if set */
+  u8 *default_namespace;	    /* default namespace if set */
   int default_ns_fd;
-  u8 auto_intf;
-  /* Set when Unit testing */
-  u8 test_mode;
+  u8 lcp_auto_subint; /* Automatically create/delete LCP sub-interfaces */
+  u8 lcp_sync;	      /* Automatically sync VPP changes to LCP */
+  u8 del_static_on_link_down;  /* Delete static routes when link goes down */
+  u8 del_dynamic_on_link_down; /* Delete dynamic routes when link goes down */
+  u8 test_mode;	      /* Set when Unit testing */
 } lcp_main_t;
 
 extern lcp_main_t lcp_main;
@@ -37,6 +39,18 @@ extern lcp_main_t lcp_main;
 int lcp_set_default_ns (u8 *ns);
 u8 *lcp_get_default_ns (void); /* Returns NULL or shared string */
 int lcp_get_default_ns_fd (void);
+
+/**
+ * Get/Set whether to delete static routes when the link goes down.
+ */
+void lcp_set_del_static_on_link_down (u8 is_del);
+u8 lcp_get_del_static_on_link_down (void);
+
+/**
+ * Get/Set whether to delete dynamic routes when the link goes down.
+ */
+void lcp_set_del_dynamic_on_link_down (u8 is_del);
+u8 lcp_get_del_dynamic_on_link_down (void);
 
 #endif
 

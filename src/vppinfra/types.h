@@ -73,7 +73,9 @@ typedef unsigned int u32;
 typedef unsigned long long u64;
 #endif /* CLIB_AVOID_CLASH_WITH_LINUX_TYPES */
 
-#elif defined(alpha) || (defined(_mips) && __mips == 64) || defined(__x86_64__) || defined (__powerpc64__) || defined (__aarch64__)
+#elif defined(alpha) || (defined(_mips) && __mips == 64) ||                   \
+  defined(__x86_64__) || defined(__powerpc64__) || defined(__aarch64__) ||    \
+  (defined(__riscv) && __riscv_xlen == 64)
 typedef signed int i32;
 typedef signed long i64;
 
@@ -123,6 +125,24 @@ typedef u64 clib_address_t;
 typedef u32 clib_address_t;
 #endif
 
+#define CLIB_I8_MAX  __INT8_MAX__
+#define CLIB_I16_MAX __INT16_MAX__
+#define CLIB_I32_MAX __INT32_MAX__
+#define CLIB_I64_MAX __INT64_MAX__
+
+#define CLIB_U8_MAX  __UINT8_MAX__
+#define CLIB_U16_MAX __UINT16_MAX__
+#define CLIB_U32_MAX __UINT32_MAX__
+#define CLIB_U64_MAX __UINT64_MAX__
+
+#if clib_address_bits == 64
+#define CLIB_WORD_MAX  CLIB_I64_MAX
+#define CLIB_UWORD_MAX CLIB_U64_MAX
+#else
+#define CLIB_WORD_MAX  CLIB_I32_MAX
+#define CLIB_UWORD_MAX CLIB_U32_MAX
+#endif
+
 /* These are needed to convert between pointers and machine words.
    MIPS is currently the only machine that can have different sized
    pointers and machine words (but only when compiling with 64 bit
@@ -131,6 +151,14 @@ static inline __attribute__ ((always_inline)) uword
 pointer_to_uword (const void *p)
 {
   return (uword) (clib_address_t) p;
+}
+
+static inline __attribute__ ((always_inline)) uword
+pointer_is_aligned (void *p, uword align)
+{
+  if ((pointer_to_uword (p) & (align - 1)) == 0)
+    return 1;
+  return 0;
 }
 
 #define uword_to_pointer(u,type) ((type) (clib_address_t) (u))
@@ -162,6 +190,15 @@ typedef f64 fword;
        type _data					\
        __attribute__ ((aligned (align), packed));	\
     } *) (addr))->_data)
+
+typedef u16 u16u __attribute__ ((aligned (1), __may_alias__));
+typedef u32 u32u __attribute__ ((aligned (1), __may_alias__));
+typedef u64 u64u __attribute__ ((aligned (1), __may_alias__));
+typedef i16 i16u __attribute__ ((aligned (1), __may_alias__));
+typedef i32 i32u __attribute__ ((aligned (1), __may_alias__));
+typedef i64 i64u __attribute__ ((aligned (1), __may_alias__));
+typedef word wordu __attribute__ ((aligned (1), __may_alias__));
+typedef uword uwordu __attribute__ ((aligned (1), __may_alias__));
 
 #endif /* included_clib_types_h */
 

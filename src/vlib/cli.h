@@ -41,6 +41,7 @@
 #define included_vlib_cli_h
 
 #include <vppinfra/format.h>
+#include <vlib/log.h>
 
 struct vlib_cli_command_t;
 
@@ -152,30 +153,34 @@ typedef struct vlib_cli_main_t
     (struct vlib_cli_main_t *, u32 id, int before_or_after);
   void (**perf_counter_cbs_tmp)
     (struct vlib_cli_main_t *, u32 id, int before_or_after);
+
+  /* cli log */
+  vlib_log_class_t log;
+
 } vlib_cli_main_t;
 
 #ifndef CLIB_MARCH_VARIANT
-#define VLIB_CLI_COMMAND(x,...)                                         \
-    __VA_ARGS__ vlib_cli_command_t x;                                   \
-static void __vlib_cli_command_registration_##x (void)                  \
-    __attribute__((__constructor__)) ;                                  \
-static void __vlib_cli_command_registration_##x (void)                  \
-{                                                                       \
-    vlib_main_t * vm = vlib_get_main();                                 \
-    vlib_cli_main_t *cm = &vm->cli_main;                                \
-    x.next_cli_command = cm->cli_command_registrations;                 \
-    cm->cli_command_registrations = &x;                                 \
-}                                                                       \
-static void __vlib_cli_command_unregistration_##x (void)                \
-    __attribute__((__destructor__)) ;                                   \
-static void __vlib_cli_command_unregistration_##x (void)                \
-{                                                                       \
-    vlib_main_t * vm = vlib_get_main();                                 \
-    vlib_cli_main_t *cm = &vm->cli_main;                                \
-    VLIB_REMOVE_FROM_LINKED_LIST (cm->cli_command_registrations, &x,    \
-                                  next_cli_command);                    \
-}                                                                       \
-__VA_ARGS__ vlib_cli_command_t x
+#define VLIB_CLI_COMMAND(x, ...)                                              \
+  __VA_ARGS__ vlib_cli_command_t x;                                           \
+  static void __vlib_cli_command_registration_##x (void)                      \
+    __attribute__ ((__constructor__));                                        \
+  static void __vlib_cli_command_registration_##x (void)                      \
+  {                                                                           \
+    vlib_global_main_t *vgm = vlib_get_global_main ();                        \
+    vlib_cli_main_t *cm = &vgm->cli_main;                                     \
+    x.next_cli_command = cm->cli_command_registrations;                       \
+    cm->cli_command_registrations = &x;                                       \
+  }                                                                           \
+  static void __vlib_cli_command_unregistration_##x (void)                    \
+    __attribute__ ((__destructor__));                                         \
+  static void __vlib_cli_command_unregistration_##x (void)                    \
+  {                                                                           \
+    vlib_global_main_t *vgm = vlib_get_global_main ();                        \
+    vlib_cli_main_t *cm = &vgm->cli_main;                                     \
+    VLIB_REMOVE_FROM_LINKED_LIST (cm->cli_command_registrations, &x,          \
+				  next_cli_command);                          \
+  }                                                                           \
+  __VA_ARGS__ vlib_cli_command_t x
 #else
 /* create unused pointer to silence compiler warnings and get whole
    function optimized out */
@@ -199,6 +204,7 @@ clib_error_t *vlib_cli_register (struct vlib_main_t *vm,
 clib_error_t *vlib_cli_register_parse_rule (struct vlib_main_t *vm,
 					    vlib_cli_parse_rule_t * c);
 
+unformat_function_t unformat_vlib_cli_line;
 uword unformat_vlib_cli_sub_input (unformat_input_t * i, va_list * args);
 
 /* Return an vector of strings consisting of possible auto-completions

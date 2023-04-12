@@ -11,13 +11,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_definitions (-DWITH_LIBSSL=1)
-include_directories(${OPENSSL_INCLUDE_DIR})
-
 unset(VNET_SOURCES)
 unset(VNET_HEADERS)
 unset(VNET_API_FILES)
 unset(VNET_MULTIARCH_SOURCES)
+
+option(VPP_IP_FIB_MTRIE_16 "IP FIB's MTRIE Stride is 16-8-8 (if not set it's 8-8-8-8)" ON)
 
 ##############################################################################
 # Generic stuff
@@ -27,6 +26,7 @@ list(APPEND VNET_SOURCES
   config.c
   devices/devices.c
   devices/netlink.c
+  error.c
   flow/flow.c
   flow/flow_cli.c
   flow/flow_api.c
@@ -36,8 +36,12 @@ list(APPEND VNET_SOURCES
   interface_cli.c
   interface_format.c
   interface_output.c
+  interface/caps.c
   interface/rx_queue.c
+  interface/tx_queue.c
   interface/runtime.c
+  interface/monitor.c
+  interface/stats.c
   interface_stats.c
   misc.c
 )
@@ -50,14 +54,15 @@ list(APPEND VNET_MULTIARCH_SOURCES
 
 list(APPEND VNET_HEADERS
   api_errno.h
+  error.h
   buffer.h
   config.h
   devices/devices.h
   devices/netlink.h
   flow/flow.h
   global_funcs.h
-  handoff.h
   interface/rx_queue_funcs.h
+  interface/tx_queue_funcs.h
   interface.h
   interface_funcs.h
   interface_output.h
@@ -68,13 +73,13 @@ list(APPEND VNET_HEADERS
   plugin/plugin.h
   pipeline.h
   vnet.h
-  vnet_all_api_h.h
-  vnet_msg_enum.h
   util/radix.h
   util/refcount.h
   format_fns.h
   ip/ip_format_fns.h
+  ip/ip_sas.h
   ethernet/ethernet_format_fns.h
+  ethernet/ethernet_types_api.h
 )
 
 list(APPEND VNET_API_FILES
@@ -109,16 +114,6 @@ list(APPEND VNET_API_FILES
   policer/policer.api
   policer/policer_types.api
 )
-
-##############################################################################
-# Binary API compatibility until vpp 20.12, see the ADL plugin...
-##############################################################################
-
-list(APPEND VNET_SOURCES
-  cop/cop_api.c
-)
-
-list(APPEND VNET_API_FILES cop/cop.api)
 
 ##############################################################################
 # Layer 2 protocols go here
@@ -302,30 +297,6 @@ list(APPEND VNET_HEADERS
 )
 
 ##############################################################################
-# Layer 2 / vxlan
-##############################################################################
-list(APPEND VNET_SOURCES
-  vxlan/vxlan.c
-  vxlan/encap.c
-  vxlan/decap.c
-  vxlan/vxlan_api.c
-)
-
-list(APPEND VNET_MULTIARCH_SOURCES
-  vxlan/encap.c
-)
-
-list(APPEND VNET_HEADERS
-  vxlan/vxlan.h
-  vxlan/vxlan_packet.h
-  vxlan/vxlan_error.def
-)
-
-list(APPEND VNET_MULTIARCH_SOURCES vxlan/decap.c)
-
-list(APPEND VNET_API_FILES vxlan/vxlan.api)
-
-##############################################################################
 # Layer 2 / Bonding
 ##############################################################################
 list(APPEND VNET_SOURCES
@@ -424,6 +395,7 @@ list(APPEND VNET_SOURCES
   ip/punt.c
   ip/punt_node.c
   ip/vtep.c
+  ip/ip_sas.c
 )
 
 list(APPEND VNET_MULTIARCH_SOURCES
@@ -448,13 +420,11 @@ list(APPEND VNET_HEADERS
   ip/icmp4.h
   ip/icmp6.h
   ip/igmp_packet.h
-  ip/ip4_error.h
   ip/ip4.h
   ip/ip4_mtrie.h
   ip/ip4_inlines.h
   ip/ip4_packet.h
   ip/ip46_address.h
-  ip/ip6_error.h
   ip/ip6.h
   ip/ip6_hop_by_hop.h
   ip/ip6_hop_by_hop_packet.h
@@ -466,6 +436,7 @@ list(APPEND VNET_HEADERS
   ip/ip_table.h
   ip/ip_interface.h
   ip/ip_packet.h
+  ip/ip_psh_cksum.h
   ip/ip_source_and_port_range_check.h
   ip/ip_types.h
   ip/lookup.h
@@ -473,6 +444,8 @@ list(APPEND VNET_HEADERS
   ip/protocols.def
   ip/punt_error.def
   ip/punt.h
+  ip/reass/ip4_sv_reass.h
+  ip/reass/ip6_sv_reass.h
 )
 
 list(APPEND VNET_API_FILES
@@ -671,7 +644,9 @@ list(APPEND VNET_SOURCES
   udp/udp_pg.c
   udp/udp_encap_node.c
   udp/udp_encap.c
+  udp/udp_decap.c
   udp/udp_api.c
+  udp/udp_output.c
 )
 
 list(APPEND VNET_MULTIARCH_SOURCES
@@ -682,6 +657,7 @@ list(APPEND VNET_MULTIARCH_SOURCES
 list(APPEND VNET_HEADERS
   udp/udp_error.def
   udp/udp.h
+  udp/udp_encap.h
   udp/udp_packet.h
   udp/udp_inlines.h
   udp/udp_local.h
@@ -751,6 +727,7 @@ list(APPEND VNET_API_FILES
 list(APPEND VNET_HEADERS
   tunnel/tunnel.h
   tunnel/tunnel_dp.h
+  tunnel/tunnel_types_api.h
 )
 
 ##############################################################################
@@ -777,37 +754,13 @@ list(APPEND VNET_MULTIARCH_SOURCES
 
 list(APPEND VNET_HEADERS
   mpls/mpls.h
+  mpls/mpls_lookup.h
   mpls/mpls_types.h
   mpls/mpls_tunnel.h
   mpls/packet.h
-  mpls/error.def
 )
 
 list(APPEND VNET_API_FILES mpls/mpls.api)
-
-##############################################################################
-# Tunnel protocol: vxlan-gbp
-##############################################################################
-list(APPEND VNET_SOURCES
-  vxlan-gbp/decap.c
-  vxlan-gbp/encap.c
-  vxlan-gbp/vxlan_gbp_api.c
-  vxlan-gbp/vxlan_gbp.c
-  vxlan-gbp/vxlan_gbp_packet.c
-)
-
-list (APPEND VNET_MULTIARCH_SOURCES
-  vxlan-gbp/decap.c
-  vxlan-gbp/encap.c
-)
-
-list(APPEND VNET_HEADERS
-  vxlan-gbp/vxlan_gbp.h
-  vxlan-gbp/vxlan_gbp_packet.h
-  vxlan-gbp/vxlan_gbp_error.def
-)
-
-list(APPEND VNET_API_FILES vxlan-gbp/vxlan_gbp.api)
 
 ##############################################################################
 # Tunnel protocol: vxlan-gpe
@@ -842,16 +795,21 @@ list(APPEND VNET_SOURCES
   srv6/sr_policy_rewrite.c
   srv6/sr_steering.c
   srv6/sr_api.c
+  srv6/sr_pt.c
+  srv6/sr_pt_node.c
+  srv6/sr_pt_api.c
 )
 
 list(APPEND VNET_HEADERS
   srv6/sr_packet.h
   srv6/sr.h
+  srv6/sr_pt.h
 )
 
 list(APPEND VNET_API_FILES
   srv6/sr.api
   srv6/sr_types.api
+  srv6/sr_pt.api
 )
 
 ##############################################################################
@@ -887,6 +845,21 @@ list(APPEND VNET_HEADERS
 )
 
 list(APPEND VNET_API_FILES ipfix-export/ipfix_export.api)
+
+##############################################################################
+# HASH
+##############################################################################
+list(APPEND VNET_SOURCES
+  hash/hash.c
+  hash/cli.c
+  hash/crc32_5tuple.c
+  hash/handoff_eth.c
+  hash/hash_eth.c
+)
+
+list(APPEND VNET_HEADERS
+  hash/hash.h
+)
 
 ##############################################################################
 # GSO
@@ -989,15 +962,11 @@ list(APPEND VNET_SOURCES
   devices/virtio/format.c
   devices/virtio/node.c
   devices/virtio/pci.c
-  devices/virtio/vhost_user.c
-  devices/virtio/vhost_user_input.c
-  devices/virtio/vhost_user_output.c
-  devices/virtio/vhost_user_api.c
   devices/virtio/virtio.c
   devices/virtio/virtio_api.c
   devices/virtio/virtio_pci_legacy.c
   devices/virtio/virtio_pci_modern.c
-  devices/virtio/virtio_process.c
+  devices/virtio/virtio_pre_input.c
   devices/virtio/virtio_types_api.c
 )
 
@@ -1009,20 +978,15 @@ list(APPEND VNET_HEADERS
   devices/virtio/virtio_pci_legacy.h
   devices/virtio/virtio_pci_modern.h
   devices/virtio/vhost_std.h
-  devices/virtio/vhost_user.h
   devices/virtio/virtio_types_api.h
 )
 
 list(APPEND VNET_MULTIARCH_SOURCES
-  devices/virtio/vhost_user_input.c
-  devices/virtio/vhost_user_output.c
   devices/virtio/node.c
-  devices/af_packet/node.c
   devices/virtio/device.c
 )
 
 list(APPEND VNET_API_FILES
-  devices/virtio/vhost_user.api
   devices/virtio/virtio.api
   devices/virtio/virtio_types.api
 )
@@ -1117,27 +1081,6 @@ list(APPEND VNET_HEADERS
   tls/tls_test.h
 )
 
-##############################################################################
-# Linux packet interface
-##############################################################################
-
-list(APPEND VNET_SOURCES
-  devices/af_packet/af_packet.c
-  devices/af_packet/device.c
-  devices/af_packet/node.c
-  devices/af_packet/cli.c
-  devices/af_packet/af_packet_api.c
-)
-
-list(APPEND VNET_MULTIARCH_SOURCES
-  devices/af_packet/device.c
-)
-
-list(APPEND VNET_HEADERS
-  devices/af_packet/af_packet.h
-)
-
-list(APPEND VNET_API_FILES devices/af_packet/af_packet.api)
 
 ##############################################################################
 # Driver feature graph arc support
@@ -1176,7 +1119,10 @@ list(APPEND VNET_HEADERS
 
 list(APPEND VNET_SOURCES
   fib/fib.c
+  fib/ip4_fib_hash.c
   fib/ip4_fib.c
+  fib/ip4_fib_16.c
+  fib/ip4_fib_8.c
   fib/ip6_fib.c
   fib/mpls_fib.c
   fib/fib_table.c
@@ -1212,7 +1158,11 @@ list(APPEND VNET_SOURCES
 list(APPEND VNET_HEADERS
   fib/fib.h
   fib/fib_api.h
+  fib/fib_entry_track.h
   fib/ip4_fib.h
+  fib/ip4_fib_8.h
+  fib/ip4_fib_16.h
+  fib/ip4_fib_hash.h
   fib/ip6_fib.h
   fib/fib_types.h
   fib/fib_table.h
@@ -1220,11 +1170,16 @@ list(APPEND VNET_HEADERS
   fib/fib_node_list.h
   fib/fib_entry.h
   fib/fib_entry_delegate.h
+  fib/fib_path.h
+  fib/fib_path_list.h
   fib/fib_sas.h
   fib/fib_source.h
 )
 
-list(APPEND VNET_API_FILES fib/fib_types.api)
+list(APPEND VNET_API_FILES
+  fib/fib_types.api
+  fib/fib.api
+)
 
 ##############################################################################
 # ADJ
@@ -1234,6 +1189,7 @@ list(APPEND VNET_SOURCES
   adj/adj_nbr.c
   adj/adj_glean.c
   adj/adj_midchain.c
+  adj/adj_midchain_node.c
   adj/adj_midchain_delegate.c
   adj/adj_mcast.c
   adj/adj_l2.c
@@ -1247,7 +1203,7 @@ list(APPEND VNET_SOURCES
 list(APPEND VNET_MULTIARCH_SOURCES
   adj/adj_nsh.c
   adj/adj_l2.c
-  adj/adj_midchain.c
+  adj/adj_midchain_node.c
 )
 
 list(APPEND VNET_HEADERS
@@ -1295,6 +1251,7 @@ list(APPEND VNET_MULTIARCH_SOURCES
 
 list(APPEND VNET_HEADERS
   dpo/load_balance.h
+  dpo/load_balance_map.h
   dpo/drop_dpo.h
   dpo/lookup_dpo.h
   dpo/punt_dpo.h
@@ -1346,7 +1303,6 @@ list(APPEND VNET_SOURCES
   util/radix.c
   util/refcount.c
   util/throttle.c
-  util/trajectory.c
 )
 
 list(APPEND VNET_HEADERS
@@ -1409,10 +1365,13 @@ list(APPEND VNET_MULTIARCH_SOURCES
 )
 
 list(APPEND VNET_HEADERS
-  bier/bier_types.h
+  bier/bier_bit_string.h
   bier/bier_entry.h
+  bier/bier_fwd.h
+  bier/bier_hdr_inlines.h
   bier/bier_update.h
   bier/bier_table.h
+  bier/bier_types.h
 )
 
 list(APPEND VNET_API_FILES bier/bier.api)
@@ -1471,6 +1430,7 @@ list (APPEND VNET_SOURCES
   ip6-nd/ip6_nd.c
   ip6-nd/ip6_nd_api.c
   ip6-nd/ip6_nd_proxy.c
+  ip6-nd/ip6_nd_mirror_proxy.c
   ip6-nd/ip6_ra.c
   ip6-nd/rd_cp.c
   ip6-nd/rd_cp_api.c
@@ -1494,7 +1454,7 @@ add_vpp_library(vnet
   MULTIARCH_SOURCES ${VNET_MULTIARCH_SOURCES}
   INSTALL_HEADERS ${VNET_HEADERS}
   API_FILES ${VNET_API_FILES}
-  LINK_LIBRARIES vppinfra svm vlib ${OPENSSL_LIBRARIES}
+  LINK_LIBRARIES vppinfra svm vlib
   DEPENDS vpp_version_h api_headers
 )
 
@@ -1505,6 +1465,17 @@ add_vpp_library(vnet
 add_vpp_library (vatclient
   SOURCES ip/ip_types_api.c
   DEPENDS api_headers
+)
+
+add_vat_test_library(vnet
+  interface_test.c
+  ip/ip_test.c
+  arp/arp_test.c
+  ip6-nd/ip6_nd_test.c
+  srmpls/sr_mpls_test.c
+  session/session_test.c
+  l2/l2_test.c
+  ipsec/ipsec_test.c
 )
 
 ##############################################################################

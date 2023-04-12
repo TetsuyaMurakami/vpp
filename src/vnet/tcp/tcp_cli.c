@@ -149,9 +149,8 @@ format_tcp_congestion (u8 * s, va_list * args)
 	      format_white_space, indent, tc->snd_congestion - tc->iss,
 	      tc->rcv_dupacks, tc->limited_transmit - tc->iss);
   s = format (s, "%Urxt_bytes %u rxt_delivered %u rxt_head %u rxt_ts %u\n",
-	      format_white_space, indent, tc->snd_rxt_bytes,
-	      tc->rxt_delivered, tc->rxt_head - tc->iss,
-	      tcp_time_now_w_thread (tc->c_thread_index) - tc->snd_rxt_ts);
+	      format_white_space, indent, tc->snd_rxt_bytes, tc->rxt_delivered,
+	      tc->rxt_head - tc->iss, tcp_tstamp (tc) - tc->snd_rxt_ts);
   if (tcp_in_fastrecovery (tc))
     prr_space = tcp_fastrecovery_prr_snd_space (tc);
   s = format (s, "%Uprr_start %u prr_delivered %u prr space %u\n",
@@ -202,15 +201,16 @@ format_tcp_vars (u8 * s, va_list * args)
   s = format (s, " tsval_recent %u\n", tc->tsval_recent);
   s = format (s, " tsecr %u tsecr_last_ack %u tsval_recent_age %u",
 	      tc->rcv_opts.tsecr, tc->tsecr_last_ack,
-	      tcp_time_now () - tc->tsval_recent_age);
+	      tcp_time_tstamp (tc->c_thread_index) - tc->tsval_recent_age);
   s = format (s, " snd_mss %u\n", tc->snd_mss);
   s = format (s, " rto %u rto_boff %u srtt %.1f us %.3f rttvar %.1f",
 	      tc->rto / 1000, tc->rto_boff, tc->srtt / 1000.0,
 	      tc->mrtt_us * 1e3, tc->rttvar / 1000.0);
   s = format (s, " rtt_ts %.4f rtt_seq %u\n", tc->rtt_ts,
 	      tc->rtt_seq - tc->iss);
-  s = format (s, " next_node %u opaque 0x%x fib_index %u\n",
-	      tc->next_node_index, tc->next_node_opaque, tc->c_fib_index);
+  s = format (s, " next_node %u opaque 0x%x fib_index %u sw_if_index %d\n",
+	      tc->next_node_index, tc->next_node_opaque, tc->c_fib_index,
+	      tc->sw_if_index);
   s = format (s, " cong:   %U", format_tcp_congestion, tc);
 
   if (tc->state >= TCP_STATE_ESTABLISHED)
@@ -411,6 +411,8 @@ tcp_configure_v4_source_address_range (vlib_main_t * vm,
     return VNET_API_ERROR_NEXT_HOP_NOT_IN_FIB;
 
   sw_if_index = fib_entry_get_resolving_interface (fei);
+  if (sw_if_index == (u32) ~0)
+    return VNET_API_ERROR_NO_MATCHING_INTERFACE;
 
   /* Configure proxy arp across the range */
   rv = ip4_neighbor_proxy_add (fib_index, start, end);
@@ -431,7 +433,7 @@ tcp_configure_v4_source_address_range (vlib_main_t * vm,
 
       /* Add local adjacencies for the range */
 
-      receive_dpo_add_or_lock (DPO_PROTO_IP4, ~0 /* sw_if_index */ ,
+      receive_dpo_add_or_lock (DPO_PROTO_IP4, sw_if_index /* sw_if_index */,
 			       NULL, &dpo);
       prefix.fp_len = 32;
       prefix.fp_proto = FIB_PROTOCOL_IP4;
@@ -506,7 +508,7 @@ tcp_configure_v6_source_address_range (vlib_main_t * vm,
       ip6_neighbor_proxy_add (sw_if_index, start);
 
       /* Add a receive adjacency for this address */
-      receive_dpo_add_or_lock (DPO_PROTO_IP6, ~0 /* sw_if_index */ ,
+      receive_dpo_add_or_lock (DPO_PROTO_IP6, sw_if_index /* sw_if_index */,
 			       NULL, &dpo);
 
       fib_table_entry_special_dpo_update (fib_index,
@@ -900,110 +902,6 @@ VLIB_CLI_COMMAND (clear_tcp_stats_command, static) =
 };
 /* *INDENT-ON* */
 
-static void
-tcp_show_half_open (vlib_main_t * vm, u32 start, u32 end, u8 verbose)
-{
-  tcp_main_t *tm = &tcp_main;
-  u8 output_suppressed = 0;
-  u32 n_elts, count = 0;
-  tcp_connection_t *tc;
-  int max_index, i;
-
-  n_elts = pool_elts (tm->half_open_connections);
-  max_index = clib_max (pool_len (tm->half_open_connections), 1) - 1;
-  if (verbose && end == ~0 && n_elts > 50)
-    {
-      vlib_cli_output (vm, "Too many connections, use range <start> <end>");
-      return;
-    }
-
-  if (!verbose)
-    {
-      vlib_cli_output (vm, "%u tcp half-open connections", n_elts);
-      return;
-    }
-
-  for (i = start; i <= clib_min (end, max_index); i++)
-    {
-      if (pool_is_free_index (tm->half_open_connections, i))
-	continue;
-
-      tc = pool_elt_at_index (tm->half_open_connections, i);
-
-      count += 1;
-      if (verbose)
-	{
-	  if (count > 50 || (verbose > 1 && count > 10))
-	    {
-	      output_suppressed = 1;
-	      continue;
-	    }
-	}
-      vlib_cli_output (vm, "%U", format_tcp_connection, tc, verbose);
-    }
-  if (!output_suppressed)
-    vlib_cli_output (vm, "%u tcp half-open connections", n_elts);
-  else
-    vlib_cli_output (vm, "%u tcp half-open connections matched. Output "
-		     "suppressed. Use finer grained filter.", count);
-
-}
-
-static clib_error_t *
-show_tcp_half_open_fn (vlib_main_t * vm, unformat_input_t * input,
-		       vlib_cli_command_t * cmd)
-{
-  unformat_input_t _line_input, *line_input = &_line_input;
-  u32 start, end = ~0, verbose = 0;
-  clib_error_t *error = 0;
-
-  session_cli_return_if_not_enabled ();
-
-  if (!unformat_user (input, unformat_line_input, line_input))
-    {
-      tcp_show_half_open (vm, 0, ~0, 0);
-      return 0;
-    }
-
-  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
-    {
-      if (unformat (line_input, "range %u %u", &start, &end))
-	;
-      else if (unformat (line_input, "verbose %d", &verbose))
-	;
-      else if (unformat (line_input, "verbose"))
-	verbose = 1;
-      else
-	{
-	  error = clib_error_return (0, "unknown input `%U'",
-				     format_unformat_error, input);
-	  goto done;
-	}
-    }
-
-  if (start > end)
-    {
-      error = clib_error_return (0, "invalid range start: %u end: %u", start,
-				 end);
-      goto done;
-    }
-
-  tcp_show_half_open (vm, start, end, verbose);
-
-done:
-  unformat_free (line_input);
-  return error;
-}
-
-/* *INDENT-OFF* */
-VLIB_CLI_COMMAND (show_tcp_half_open_command, static) =
-{
-  .path = "show tcp half-open",
-  .short_help = "show tcp half-open [verbose <n>] [range <start> <end>]",
-  .function = show_tcp_half_open_fn,
-};
-/* *INDENT-ON* */
-
 uword
 unformat_tcp_cc_algo (unformat_input_t * input, va_list * va)
 {
@@ -1050,7 +948,7 @@ unformat_tcp_cc_algo_cfg (unformat_input_t * input, va_list * va)
 static clib_error_t *
 tcp_config_fn (vlib_main_t * vm, unformat_input_t * input)
 {
-  u32 cwnd_multiplier, tmp_time, mtu, max_gso_size;
+  u32 cwnd_multiplier, tmp_time, mtu, max_gso_size, tmp;
   uword memory_size;
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
@@ -1058,8 +956,8 @@ tcp_config_fn (vlib_main_t * vm, unformat_input_t * input)
       if (unformat (input, "preallocated-connections %d",
 		    &tcp_cfg.preallocated_connections))
 	;
-      else if (unformat (input, "preallocated-half-open-connections %d",
-			 &tcp_cfg.preallocated_half_open_connections))
+      /* Config deprecated. Will be removed in a later release */
+      else if (unformat (input, "preallocated-half-open-connections %d", &tmp))
 	;
       else if (unformat (input, "buffer-fail-fraction %f",
 			 &tcp_cfg.buffer_fail_fraction))
@@ -1119,6 +1017,8 @@ tcp_config_fn (vlib_main_t * vm, unformat_input_t * input)
 	tcp_cfg.lastack_time = tmp_time / TCP_TIMER_TICK;
       else if (unformat (input, "closing-time %u", &tmp_time))
 	tcp_cfg.closing_time = tmp_time / TCP_TIMER_TICK;
+      else if (unformat (input, "alloc-err-timeout %u", &tmp_time))
+	tcp_cfg.alloc_err_timeout = tmp_time / TCP_TIMER_TICK;
       else if (unformat (input, "cleanup-time %u", &tmp_time))
 	tcp_cfg.cleanup_time = tmp_time / 1000.0;
       else

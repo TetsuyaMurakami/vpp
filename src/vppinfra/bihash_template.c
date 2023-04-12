@@ -23,6 +23,10 @@
 #define BIIHASH_MIN_ALLOC_LOG2_PAGES 10
 #endif
 
+#ifndef BIHASH_USE_HEAP
+#define BIHASH_USE_HEAP 1
+#endif
+
 static inline void *BV (alloc_aligned) (BVT (clib_bihash) * h, uword nbytes)
 {
   uword rv;
@@ -161,19 +165,23 @@ static void BV (clib_bihash_instantiate) (BVT (clib_bihash) * h)
 
   if (BIHASH_KVP_AT_BUCKET_LEVEL)
     {
-      int i;
+      int i, j;
       BVT (clib_bihash_bucket) * b;
 
       b = h->buckets;
 
       for (i = 0; i < h->nbuckets; i++)
 	{
+	  BVT (clib_bihash_kv) * v;
 	  b->offset = BV (clib_bihash_get_offset) (h, (void *) (b + 1));
 	  b->refcnt = 1;
 	  /* Mark all elements free */
-	  clib_memset_u8 ((b + 1), 0xff, BIHASH_KVP_PER_PAGE *
-			  sizeof (BVT (clib_bihash_kv)));
-
+	  v = (void *) (b + 1);
+	  for (j = 0; j < BIHASH_KVP_PER_PAGE; j++)
+	    {
+	      BV (clib_bihash_mark_free) (v);
+	      v++;
+	    }
 	  /* Compute next bucket start address */
 	  b = (void *) (((uword) b) + sizeof (*b) +
 			(BIHASH_KVP_PER_PAGE *
@@ -197,6 +205,7 @@ void BV (clib_bihash_init2) (BVT (clib_bihash_init2_args) * a)
   h->log2_nbuckets = max_log2 (a->nbuckets);
   h->memory_size = BIHASH_USE_HEAP ? 0 : a->memory_size;
   h->instantiated = 0;
+  h->dont_add_to_all_bihash_list = a->dont_add_to_all_bihash_list;
   h->fmt_fn = BV (format_bihash);
   h->kvp_fmt_fn = a->kvp_fmt_fn;
 
@@ -272,7 +281,7 @@ void BV (clib_bihash_initiator_init_svm)
 
   ASSERT (memory_size < (1ULL << 32));
   /* Set up for memfd sharing */
-  if ((fd = memfd_create (name, MFD_ALLOW_SEALING)) == -1)
+  if ((fd = clib_mem_vm_create_fd (CLIB_MEM_PAGE_SZ_DEFAULT, name) == -1)
     {
       clib_unix_warning ("memfd_create");
       return;
@@ -421,6 +430,7 @@ void BV (clib_bihash_free) (BVT (clib_bihash) * h)
 
   vec_free (h->working_copies);
   vec_free (h->working_copy_lengths);
+  clib_mem_free ((void *) h->alloc_lock);
 #if BIHASH_32_64_SVM == 0
   vec_free (h->freelists);
 #else
@@ -431,6 +441,11 @@ void BV (clib_bihash_free) (BVT (clib_bihash) * h)
     clib_mem_vm_free ((void *) (uword) (alloc_arena (h)),
 		      alloc_arena_size (h));
 never_initialized:
+  if (h->dont_add_to_all_bihash_list)
+    {
+      clib_memset_u8 (h, 0, sizeof (*h));
+      return;
+    }
   clib_memset_u8 (h, 0, sizeof (*h));
   for (i = 0; i < vec_len (clib_all_bihashes); i++)
     {
@@ -448,6 +463,7 @@ static
 BVT (clib_bihash_value) *
 BV (value_alloc) (BVT (clib_bihash) * h, u32 log2_pages)
 {
+  int i;
   BVT (clib_bihash_value) * rv = 0;
 
   ASSERT (h->alloc_lock[0]);
@@ -467,12 +483,15 @@ BV (value_alloc) (BVT (clib_bihash) * h, u32 log2_pages)
 
 initialize:
   ASSERT (rv);
-  /*
-   * Latest gcc complains that the length arg is zero
-   * if we replace (1<<log2_pages) with vec_len(rv).
-   * No clue.
-   */
-  clib_memset_u8 (rv, 0xff, sizeof (*rv) * (1 << log2_pages));
+
+  BVT (clib_bihash_kv) * v;
+  v = (BVT (clib_bihash_kv) *) rv;
+
+  for (i = 0; i < BIHASH_KVP_PER_PAGE * (1 << log2_pages); i++)
+    {
+      BV (clib_bihash_mark_free) (v);
+      v++;
+    }
   return rv;
 }
 
@@ -661,9 +680,10 @@ BV (split_and_rehash_linear)
   return new_values;
 }
 
-static_always_inline int BV (clib_bihash_add_del_inline_with_hash)
-  (BVT (clib_bihash) * h, BVT (clib_bihash_kv) * add_v, u64 hash, int is_add,
-   int (*is_stale_cb) (BVT (clib_bihash_kv) *, void *), void *arg)
+static_always_inline int BV (clib_bihash_add_del_inline_with_hash) (
+  BVT (clib_bihash) * h, BVT (clib_bihash_kv) * add_v, u64 hash, int is_add,
+  int (*is_stale_cb) (BVT (clib_bihash_kv) *, void *), void *is_stale_arg,
+  void (*overwrite_cb) (BVT (clib_bihash_kv) *, void *), void *overwrite_arg)
 {
   BVT (clib_bihash_bucket) * b, tmp_b;
   BVT (clib_bihash_value) * v, *new_v, *save_new_v, *working_copy;
@@ -700,6 +720,12 @@ static_always_inline int BV (clib_bihash_add_del_inline_with_hash)
   /* Debug image: make sure the table has been instantiated */
   ASSERT (h->instantiated != 0);
 #endif
+
+  /*
+   * Debug image: make sure that an item being added doesn't accidentally
+   * look like a free item.
+   */
+  ASSERT ((is_add && BV (clib_bihash_is_free) (add_v)) == 0);
 
   b = BV (clib_bihash_get_bucket) (h, hash);
 
@@ -757,6 +783,8 @@ static_always_inline int BV (clib_bihash_add_del_inline_with_hash)
        */
       for (i = 0; i < limit; i++)
 	{
+	  if (BV (clib_bihash_is_free) (&(v->kvp[i])))
+	    continue;
 	  if (BV (clib_bihash_key_compare) (v->kvp[i].key, add_v->key))
 	    {
 	      /* Add but do not overwrite? */
@@ -765,7 +793,8 @@ static_always_inline int BV (clib_bihash_add_del_inline_with_hash)
 		  BV (clib_bihash_unlock_bucket) (b);
 		  return (-2);
 		}
-
+	      if (overwrite_cb)
+		overwrite_cb (&(v->kvp[i]), overwrite_arg);
 	      clib_memcpy_fast (&(v->kvp[i].value),
 				&add_v->value, sizeof (add_v->value));
 	      BV (clib_bihash_unlock_bucket) (b);
@@ -801,7 +830,7 @@ static_always_inline int BV (clib_bihash_add_del_inline_with_hash)
 	{
 	  for (i = 0; i < limit; i++)
 	    {
-	      if (is_stale_cb (&(v->kvp[i]), arg))
+	      if (is_stale_cb (&(v->kvp[i]), is_stale_arg))
 		{
 		  clib_memcpy_fast (&(v->kvp[i]), add_v, sizeof (*add_v));
 		  CLIB_MEMORY_STORE_BARRIER ();
@@ -817,10 +846,13 @@ static_always_inline int BV (clib_bihash_add_del_inline_with_hash)
     {
       for (i = 0; i < limit; i++)
 	{
+	  /* no sense even looking at this one */
+	  if (BV (clib_bihash_is_free) (&(v->kvp[i])))
+	    continue;
 	  /* Found the key? Kill it... */
 	  if (BV (clib_bihash_key_compare) (v->kvp[i].key, add_v->key))
 	    {
-	      clib_memset_u8 (&(v->kvp[i]), 0xff, sizeof (*(add_v)));
+	      BV (clib_bihash_mark_free) (&(v->kvp[i]));
 	      /* Is the bucket empty? */
 	      if (PREDICT_TRUE (b->refcnt > 1))
 		{
@@ -835,8 +867,13 @@ static_always_inline int BV (clib_bihash_add_del_inline_with_hash)
 		      b->linear_search = 0;
 		      b->log2_pages = 0;
 		      /* Clean up the bucket-level kvp array */
-		      clib_memset_u8 ((b + 1), 0xff, BIHASH_KVP_PER_PAGE *
-				      sizeof (BVT (clib_bihash_kv)));
+		      BVT (clib_bihash_kv) *v = (void *) (b + 1);
+		      int j;
+		      for (j = 0; j < BIHASH_KVP_PER_PAGE; j++)
+			{
+			  BV (clib_bihash_mark_free) (v);
+			  v++;
+			}
 		      CLIB_MEMORY_STORE_BARRIER ();
 		      BV (clib_bihash_unlock_bucket) (b);
 		      BV (clib_bihash_increment_stat) (h, BIHASH_STAT_del, 1);
@@ -983,7 +1020,15 @@ static_always_inline int BV (clib_bihash_add_del_inline)
 {
   u64 hash = BV (clib_bihash_hash) (add_v);
   return BV (clib_bihash_add_del_inline_with_hash) (h, add_v, hash, is_add,
-						    is_stale_cb, arg);
+						    is_stale_cb, arg, 0, 0);
+}
+
+int BV (clib_bihash_add_del_with_hash) (BVT (clib_bihash) * h,
+					BVT (clib_bihash_kv) * add_v, u64 hash,
+					int is_add)
+{
+  return BV (clib_bihash_add_del_inline_with_hash) (h, add_v, hash, is_add, 0,
+						    0, 0, 0);
 }
 
 int BV (clib_bihash_add_del)
@@ -997,6 +1042,15 @@ int BV (clib_bihash_add_or_overwrite_stale)
    int (*stale_callback) (BVT (clib_bihash_kv) *, void *), void *arg)
 {
   return BV (clib_bihash_add_del_inline) (h, add_v, 1, stale_callback, arg);
+}
+
+int BV (clib_bihash_add_with_overwrite_cb) (
+  BVT (clib_bihash) * h, BVT (clib_bihash_kv) * add_v,
+  void (overwrite_cb) (BVT (clib_bihash_kv) *, void *), void *arg)
+{
+  u64 hash = BV (clib_bihash_hash) (add_v);
+  return BV (clib_bihash_add_del_inline_with_hash) (h, add_v, hash, 1, 0, 0,
+						    overwrite_cb, arg);
 }
 
 int BV (clib_bihash_search)

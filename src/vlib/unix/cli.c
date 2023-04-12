@@ -62,6 +62,7 @@
 #include <netinet/tcp.h>
 #include <math.h>
 #include <vppinfra/macros.h>
+#include <vppinfra/format_table.h>
 
 /** ANSI escape code. */
 #define ESC "\x1b"
@@ -244,6 +245,9 @@ typedef struct
 
   /** Macro tables for this session */
   clib_macro_main_t macro_main;
+
+  /** Session name */
+  u8 *name;
 } unix_cli_file_t;
 
 /** Resets the pager buffer and other data.
@@ -275,6 +279,7 @@ unix_cli_file_free (unix_cli_file_t * f)
 {
   vec_free (f->output_vector);
   vec_free (f->input_vector);
+  vec_free (f->name);
   unix_cli_pager_reset (f);
 }
 
@@ -1312,6 +1317,10 @@ unix_cli_new_session_process (vlib_main_t * vm, vlib_node_runtime_t * rt,
 	    /* Add an identifier to the new session list */
 	    unix_cli_new_session_t ns;
 
+	    /* Check the connection didn't close already */
+	    if (pool_is_free_index (cm->cli_file_pool, event_data[0]))
+	      break;
+
 	    ns.cf_index = event_data[0];
 	    ns.deadline = vlib_time_now (vm) + 1.0;
 
@@ -1606,7 +1615,7 @@ unix_cli_line_process_one (unix_cli_main_t * cm,
 
       /* Delete the desired text from the command */
       memmove (cf->current_command, cf->current_command + j, delta);
-      _vec_len (cf->current_command) = delta;
+      vec_set_len (cf->current_command, delta);
 
       /* Print the new contents */
       unix_vlib_cli_output_cooked (cf, uf, cf->current_command, delta);
@@ -1631,7 +1640,7 @@ unix_cli_line_process_one (unix_cli_main_t * cm,
 	unix_vlib_cli_output_cursor_left (cf, uf);
 
       /* Truncate the line at the cursor */
-      _vec_len (cf->current_command) = cf->cursor;
+      vec_set_len (cf->current_command, cf->cursor);
 
       cf->search_mode = 0;
       break;
@@ -1673,7 +1682,7 @@ unix_cli_line_process_one (unix_cli_main_t * cm,
 		unix_vlib_cli_output_cooked (cf, uf, (u8 *) " ", 1);
 	      for (; (cf->current_command + cf->cursor) > save; cf->cursor--)
 		unix_vlib_cli_output_cursor_left (cf, uf);
-	      _vec_len (cf->current_command) -= delta;
+	      vec_dec_len (cf->current_command, delta);
 	    }
 	}
       cf->search_mode = 0;
@@ -1730,13 +1739,13 @@ unix_cli_line_process_one (unix_cli_main_t * cm,
 	  if (cf->excursion == vec_len (cf->command_history))
 	    {
 	      /* down-arrowed to last entry - want a blank line */
-	      _vec_len (cf->current_command) = 0;
+	      vec_set_len (cf->current_command, 0);
 	    }
 	  else if (cf->excursion < 0)
 	    {
 	      /* up-arrowed over the start to the end, want a blank line */
 	      cf->excursion = vec_len (cf->command_history);
-	      _vec_len (cf->current_command) = 0;
+	      vec_set_len (cf->current_command, 0);
 	    }
 	  else
 	    {
@@ -1749,7 +1758,7 @@ unix_cli_line_process_one (unix_cli_main_t * cm,
 	      vec_validate (cf->current_command, vec_len (prev) - 1);
 
 	      clib_memcpy (cf->current_command, prev, vec_len (prev));
-	      _vec_len (cf->current_command) = vec_len (prev);
+	      vec_set_len (cf->current_command, vec_len (prev));
 	      unix_vlib_cli_output_cooked (cf, uf, cf->current_command,
 					   vec_len (cf->current_command));
 	    }
@@ -1836,7 +1845,7 @@ unix_cli_line_process_one (unix_cli_main_t * cm,
 	      cf->cursor++;
 	      unix_vlib_cli_output_cursor_left (cf, uf);
 	      cf->cursor--;
-	      _vec_len (cf->current_command)--;
+	      vec_dec_len (cf->current_command, 1);
 	    }
 	  else if (cf->cursor > 0)
 	    {
@@ -1844,7 +1853,7 @@ unix_cli_line_process_one (unix_cli_main_t * cm,
 	      j = vec_len (cf->current_command) - cf->cursor;
 	      memmove (cf->current_command + cf->cursor - 1,
 		       cf->current_command + cf->cursor, j);
-	      _vec_len (cf->current_command)--;
+	      vec_dec_len (cf->current_command, 1);
 
 	      /* redraw the rest of the line */
 	      unix_vlib_cli_output_cursor_left (cf, uf);
@@ -1880,7 +1889,7 @@ unix_cli_line_process_one (unix_cli_main_t * cm,
 	      j = vec_len (cf->current_command) - cf->cursor - 1;
 	      memmove (cf->current_command + cf->cursor,
 		       cf->current_command + cf->cursor + 1, j);
-	      _vec_len (cf->current_command)--;
+	      vec_dec_len (cf->current_command, 1);
 	      /* redraw the rest of the line */
 	      unix_vlib_cli_output_cooked (cf, uf,
 					   cf->current_command + cf->cursor,
@@ -1952,7 +1961,7 @@ unix_cli_line_process_one (unix_cli_main_t * cm,
 	      vec_resize (save, vec_len (cf->current_command) - cf->cursor);
 	      clib_memcpy (save, cf->current_command + cf->cursor,
 			   vec_len (cf->current_command) - cf->cursor);
-	      _vec_len (cf->current_command) = cf->cursor;
+	      vec_set_len (cf->current_command, cf->cursor);
 	    }
 	  else
 	    {
@@ -1974,7 +1983,7 @@ unix_cli_line_process_one (unix_cli_main_t * cm,
 	      cf->cursor--;
 	      j--;
 	    }
-	  _vec_len (cf->current_command) = j;
+	  vec_set_len (cf->current_command, j);
 
 	  /* replace it with the newly expanded command */
 	  vec_append (cf->current_command, completed);
@@ -2381,7 +2390,7 @@ unix_cli_line_process_one (unix_cli_main_t * cm,
 
 	      vec_validate (cf->current_command, vec_len (item) - 1);
 	      clib_memcpy (cf->current_command, item, vec_len (item));
-	      _vec_len (cf->current_command) = vec_len (item);
+	      vec_set_len (cf->current_command, vec_len (item));
 
 	      unix_vlib_cli_output_cooked (cf, uf, cf->current_command,
 					   vec_len (cf->current_command));
@@ -2572,9 +2581,8 @@ more:
     {
       static u8 *lv;
       vec_reset_length (lv);
-      lv = format (lv, "%U[%d]: %v",
-		   format_timeval, 0 /* current bat-time */ ,
-		   0 /* current bat-format */ ,
+      lv = format (lv, "%U[%d]: %v", format_timeval,
+		   NULL /* current bat-format */, 0 /* current bat-time */,
 		   cli_file_index, cf->current_command);
       if ((vec_len (cf->current_command) > 0) &&
 	  (cf->current_command[vec_len (cf->current_command) - 1] != '\n'))
@@ -2595,7 +2603,7 @@ more:
 					 0 /* level */ ,
 					 8 /* max_level */ );
       /* Macro processor NULL terminates the return */
-      _vec_len (expanded) -= 1;
+      vec_dec_len (expanded, 1);
       vec_reset_length (cf->current_command);
       vec_append (cf->current_command, expanded);
       vec_free (expanded);
@@ -2687,6 +2695,17 @@ unix_cli_kill (unix_cli_main_t * cm, uword cli_file_index)
   if (pool_is_free_index (cm->cli_file_pool, cli_file_index))
     return;
 
+  vec_foreach_index (i, cm->new_sessions)
+    {
+      unix_cli_new_session_t *ns = vec_elt_at_index (cm->new_sessions, i);
+
+      if (ns->cf_index == cli_file_index)
+	{
+	  ns->cf_index = ~0;
+	  break;
+	}
+    }
+
   cf = pool_elt_at_index (cm->cli_file_pool, cli_file_index);
   uf = pool_elt_at_index (fm->file_pool, cf->clib_file_index);
 
@@ -2739,7 +2758,7 @@ unix_cli_process (vlib_main_t * vm,
 	}
 
       if (data)
-	_vec_len (data) = 0;
+	vec_set_len (data, 0);
     }
 
 done:
@@ -2821,7 +2840,7 @@ unix_cli_read_ready (clib_file_t * uf)
 	return clib_error_return_unix (0, "read");
 
       n_read = n < 0 ? 0 : n;
-      _vec_len (cf->input_vector) = l + n_read;
+      vec_set_len (cf->input_vector, l + n_read);
     }
 
   if (!(n < 0))
@@ -2867,40 +2886,12 @@ unix_cli_file_add (unix_cli_main_t * cm, char *name, int fd)
   clib_file_t template = { 0 };
   vlib_main_t *vm = um->vlib_main;
   vlib_node_t *n = 0;
-  u8 *file_desc = 0;
-
-  file_desc = format (0, "%s", name);
-
-  name = (char *) format (0, "unix-cli-%s", name);
 
   if (vec_len (cm->unused_cli_process_node_indices) > 0)
     {
-      uword l = vec_len (cm->unused_cli_process_node_indices);
-      int i;
-      vlib_main_t *this_vlib_main;
-      u8 *old_name = 0;
-
-      /*
-       * Nodes are bulk-copied, so node name pointers are shared.
-       * Find the cli node in all graph replicas, and give all of them
-       * the same new name.
-       * Then, throw away the old shared name-vector.
-       */
-      for (i = 0; i < vec_len (vlib_mains); i++)
-	{
-	  this_vlib_main = vlib_mains[i];
-	  if (this_vlib_main == 0)
-	    continue;
-	  n = vlib_get_node (this_vlib_main,
-			     cm->unused_cli_process_node_indices[l - 1]);
-	  old_name = n->name;
-	  n->name = (u8 *) name;
-	}
-      vec_free (old_name);
+      n = vlib_get_node (vm, vec_pop (cm->unused_cli_process_node_indices));
 
       vlib_node_set_state (vm, n->index, VLIB_NODE_STATE_POLLING);
-
-      _vec_len (cm->unused_cli_process_node_indices) = l - 1;
     }
   else
     {
@@ -2909,21 +2900,18 @@ unix_cli_file_add (unix_cli_main_t * cm, char *name, int fd)
 	.type = VLIB_NODE_TYPE_PROCESS,
 	.process_log2_n_stack_bytes = 18,
       };
-
-      r.name = name;
+      static u32 count = 0;
 
       vlib_worker_thread_barrier_sync (vm);
 
-      vlib_register_node (vm, &r);
-      vec_free (name);
+      vlib_register_node (vm, &r, "unix-cli-process-%u", count++);
 
       n = vlib_get_node (vm, r.index);
       vlib_worker_thread_node_runtime_update ();
       vlib_worker_thread_barrier_release (vm);
     }
 
-  pool_get (cm->cli_file_pool, cf);
-  clib_memset (cf, 0, sizeof (*cf));
+  pool_get_zero (cm->cli_file_pool, cf);
   clib_macro_init (&cf->macro_main);
 
   template.read_function = unix_cli_read_ready;
@@ -2931,14 +2919,15 @@ unix_cli_file_add (unix_cli_main_t * cm, char *name, int fd)
   template.error_function = unix_cli_error_detected;
   template.file_descriptor = fd;
   template.private_data = cf - cm->cli_file_pool;
-  template.description = file_desc;
+  template.description = format (0, "%s", name);
 
+  cf->name = format (0, "unix-cli-%s", name);
   cf->process_node_index = n->index;
   cf->clib_file_index = clib_file_add (fm, &template);
   cf->output_vector = 0;
   cf->input_vector = 0;
   vec_validate (cf->current_command, 0);
-  _vec_len (cf->current_command) = 0;
+  vec_set_len (cf->current_command, 0);
 
   vlib_start_process (vm, n->runtime_index);
 
@@ -3350,9 +3339,10 @@ unix_cli_exec (vlib_main_t * vm,
 	       unformat_input_t * input, vlib_cli_command_t * cmd)
 {
   char *file_name;
-  int fd;
-  unformat_input_t sub_input;
+  int fd, rv = 0;
+  unformat_input_t sub_input, in;
   clib_error_t *error;
+  clib_macro_main_t *mm = 0;
   unix_cli_main_t *cm = &unix_cli_main;
   unix_cli_file_t *cf;
   u8 *file_data = 0;
@@ -3389,8 +3379,14 @@ unix_cli_exec (vlib_main_t * vm,
       goto done;
     }
 
+  if (s.st_size < 1)
+    {
+      error = clib_error_return (0, "empty file `%s'", file_name);
+      goto done;
+    }
+
   /* Read the file */
-  vec_validate (file_data, s.st_size);
+  vec_validate (file_data, s.st_size - 1);
 
   if (read (fd, file_data, s.st_size) != s.st_size)
     {
@@ -3400,42 +3396,43 @@ unix_cli_exec (vlib_main_t * vm,
       goto done;
     }
 
-  /* The macro expander expects a c string... */
-  vec_add1 (file_data, 0);
-
   unformat_init_vector (&sub_input, file_data);
 
-  /* Run the file contents through the macro processor */
-  if (vec_len (sub_input.buffer) > 1)
+  /* Initial config process? Use the global macro table. */
+  if (pool_is_free_index (cm->cli_file_pool, cm->current_input_file_index))
+    mm = &cm->macro_main;
+  else
     {
-      u8 *expanded;
-      clib_macro_main_t *mm = 0;
-
-      /* Initial config process? Use the global macro table. */
-      if (pool_is_free_index
-	  (cm->cli_file_pool, cm->current_input_file_index))
-	mm = &cm->macro_main;
-      else
-	{
-	  /* Otherwise, use the per-cli-process macro table */
-	  cf = pool_elt_at_index (cm->cli_file_pool,
-				  cm->current_input_file_index);
-	  mm = &cf->macro_main;
-	}
-
-      expanded = (u8 *) clib_macro_eval (mm,
-					 (i8 *) sub_input.buffer,
-					 1 /* complain */ ,
-					 0 /* level */ ,
-					 8 /* max_level */ );
-      /* Macro processor NULL terminates the return */
-      _vec_len (expanded) -= 1;
-      vec_reset_length (sub_input.buffer);
-      vec_append (sub_input.buffer, expanded);
-      vec_free (expanded);
+      /* Otherwise, use the per-cli-process macro table */
+      cf = pool_elt_at_index (cm->cli_file_pool, cm->current_input_file_index);
+      mm = &cf->macro_main;
     }
 
-  vlib_cli_input (vm, &sub_input, 0, 0);
+  while (rv == 0 && unformat_user (&sub_input, unformat_vlib_cli_line, &in))
+    {
+      /* Run the file contents through the macro processor */
+      if (vec_len (in.buffer) > 1)
+	{
+	  u8 *expanded;
+
+	  /* The macro expander expects a c string... */
+	  vec_add1 (in.buffer, 0);
+
+	  expanded =
+	    (u8 *) clib_macro_eval (mm, (i8 *) in.buffer, 1 /* complain */,
+				    0 /* level */, 8 /* max_level */);
+	  /* Macro processor NULL terminates the return */
+	  vec_dec_len (expanded, 1);
+	  vec_reset_length (in.buffer);
+	  vec_append (in.buffer, expanded);
+	  vec_free (expanded);
+	}
+
+      if ((rv = vlib_cli_input (vm, &in, 0, 0)) != 0)
+	error = clib_error_return (0, "CLI line error: %U",
+				   format_unformat_error, &in);
+      unformat_free (&in);
+    }
   unformat_free (&sub_input);
 
 done:
@@ -3448,7 +3445,7 @@ done:
 
 /*?
  * Executes a sequence of CLI commands which are read from a file. If
- * a command is unrecognised or otherwise invalid then the usual CLI
+ * a command is unrecognized or otherwise invalid then the usual CLI
  * feedback will be generated, however execution of subsequent commands
  * from the file will continue.
  *
@@ -3648,7 +3645,8 @@ unix_cli_show_terminal (vlib_main_t * vm,
 
   n = vlib_get_node (vm, cf->process_node_index);
 
-  vlib_cli_output (vm, "Terminal name:   %v\n", n->name);
+  vlib_cli_output (vm, "Terminal name:   %v\n", cf->name);
+  vlib_cli_output (vm, "Terminal node:   %v\n", n->name);
   vlib_cli_output (vm, "Terminal mode:   %s\n", cf->line_mode ?
 		   "line-by-line" : "char-by-char");
   vlib_cli_output (vm, "Terminal width:  %d\n", cf->width);
@@ -3713,30 +3711,33 @@ unix_cli_show_cli_sessions (vlib_main_t * vm,
 {
   unix_cli_main_t *cm = &unix_cli_main;
   clib_file_main_t *fm = &file_main;
+  table_t table = {}, *t = &table;
   unix_cli_file_t *cf;
   clib_file_t *uf;
-  vlib_node_t *n;
 
-  vlib_cli_output (vm, "%-5s %-5s %-20s %s", "PNI", "FD", "Name", "Flags");
+  table_add_header_col (t, 4, "PNI  ", "FD   ", "Name", "Flags");
 
 #define fl(x, y) ( (x) ? toupper((y)) : tolower((y)) )
-  /* *INDENT-OFF* */
-  pool_foreach (cf, cm->cli_file_pool)  {
-    uf = pool_elt_at_index (fm->file_pool, cf->clib_file_index);
-    n = vlib_get_node (vm, cf->process_node_index);
-    vlib_cli_output (vm,
-		     "%-5d %-5d %-20v %c%c%c%c%c\n",
-		     cf->process_node_index,
-		     uf->file_descriptor,
-		     n->name,
-		     fl (cf->is_interactive, 'i'),
-		     fl (cf->is_socket, 's'),
-		     fl (cf->line_mode, 'l'),
-		     fl (cf->has_epipe, 'p'),
-		     fl (cf->ansi_capable, 'a'));
-  }
-  /* *INDENT-ON* */
+  int i = 0;
+  pool_foreach (cf, cm->cli_file_pool)
+    {
+      int j = 0;
+
+      uf = pool_elt_at_index (fm->file_pool, cf->clib_file_index);
+      table_format_cell (t, i, j++, "%u", cf->process_node_index);
+      table_format_cell (t, i, j++, "%u", uf->file_descriptor);
+      table_format_cell (t, i, j++, "%v", cf->name);
+      table_format_cell (t, i++, j++, "%c%c%c%c%c",
+			 fl (cf->is_interactive, 'i'), fl (cf->is_socket, 's'),
+			 fl (cf->line_mode, 'l'), fl (cf->has_epipe, 'p'),
+			 fl (cf->ansi_capable, 'a'));
+    }
 #undef fl
+
+  t->default_body.align = TTAA_LEFT;
+  t->default_header_col.align = TTAA_LEFT;
+  vlib_cli_output (vm, "%U", format_table, t);
+  table_free (t);
 
   return 0;
 }

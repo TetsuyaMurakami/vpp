@@ -1,8 +1,5 @@
-
 /*
- * http_static.h - skeleton vpp engine plug-in header file
- *
- * Copyright (c) <current-year> <your-organization>
+ * Copyright (c) 2017-2022 Cisco and/or its affiliates.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at:
@@ -18,199 +15,160 @@
 #ifndef __included_http_static_h__
 #define __included_http_static_h__
 
-#include <vnet/vnet.h>
-#include <vnet/session/application.h>
 #include <vnet/session/application_interface.h>
 #include <vnet/session/session.h>
-#include <vnet/ip/ip.h>
-#include <vnet/ethernet/ethernet.h>
+#include <http/http.h>
 
 #include <vppinfra/hash.h>
 #include <vppinfra/error.h>
-#include <vppinfra/time_range.h>
-#include <vppinfra/tw_timer_2t_1w_2048sl.h>
-#include <vppinfra/bihash_vec8_8.h>
+#include <http_static/http_cache.h>
 
 /** @file http_static.h
  * Static http server definitions
  */
-
-typedef struct
-{
-  /* API message ID base */
-  u16 msg_id_base;
-
-  /* convenience */
-  vlib_main_t *vlib_main;
-  vnet_main_t *vnet_main;
-} http_static_main_t;
-
-extern http_static_main_t http_static_main;
-
-/** \brief Session States
- */
-
-typedef enum
-{
-  /** Session is closed */
-  HTTP_STATE_CLOSED,
-  /** Session is established */
-  HTTP_STATE_ESTABLISHED,
-  /** Session has sent an OK response */
-  HTTP_STATE_OK_SENT,
-  /** Session has sent an HTML response */
-  HTTP_STATE_SEND_MORE_DATA,
-  /** Number of states */
-  HTTP_STATE_N_STATES,
-} http_session_state_t;
-
-typedef enum
-{
-  CALLED_FROM_RX,
-  CALLED_FROM_TX,
-  CALLED_FROM_TIMER,
-} http_state_machine_called_from_t;
-
-typedef enum
-{
-  HTTP_BUILTIN_METHOD_GET = 0,
-  HTTP_BUILTIN_METHOD_POST,
-} http_builtin_method_type_t;
-
 
 /** \brief Application session
  */
 typedef struct
 {
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
-  /** Base class instance variables */
-#define _(type, name) type name;
-  foreach_app_session_field
-#undef _
+  u32 session_index;
   /** rx thread index */
   u32 thread_index;
-  /** rx buffer */
-  u8 *rx_buf;
   /** vpp session index, handle */
   u32 vpp_session_index;
-  u64 vpp_session_handle;
-  /** Timeout timer handle */
-  u32 timer_handle;
+  session_handle_t vpp_session_handle;
   /** Fully-resolved file path */
   u8 *path;
-  /** File data, a vector */
+  /** Data to send */
   u8 *data;
+  /** Data length */
+  u64 data_len;
   /** Current data send offset */
   u32 data_offset;
   /** Need to free data in detach_cache_entry */
   int free_data;
-
   /** File cache pool index */
   u32 cache_pool_index;
-  /** state machine called from... */
-  http_state_machine_called_from_t called_from;
-} http_session_t;
+  /** Content type, e.g. text, text/javascript, etc. */
+  http_content_type_t content_type;
+} hss_session_t;
 
-/** \brief In-memory file data cache entry
- */
-typedef struct
+typedef struct hss_session_handle_
 {
-  /** Name of the file */
-  u8 *filename;
-  /** Contents of the file, as a u8 * vector */
-  u8 *data;
-  /** Last time the cache entry was used */
-  f64 last_used;
-  /** Cache LRU links */
-  u32 next_index;
-  u32 prev_index;
-  /** Reference count, so we don't recycle while referenced */
-  int inuse;
-} file_data_cache_t;
+  union
+  {
+    struct
+    {
+      u32 session_index;
+      u32 thread_index;
+    };
+    u64 as_u64;
+  };
+} hss_session_handle_t;
+
+STATIC_ASSERT_SIZEOF (hss_session_handle_t, sizeof (u64));
+
+
+typedef struct hss_url_handler_args_
+{
+  hss_session_handle_t sh;
+
+  union
+  {
+    /* Request args */
+    struct
+    {
+      u8 *request;
+      http_req_method_t reqtype;
+    };
+
+    /* Reply args */
+    struct
+    {
+      u8 *data;
+      uword data_len;
+      u8 free_vec_data;
+      http_status_code_t sc;
+    };
+  };
+} hss_url_handler_args_t;
+
+typedef enum hss_url_handler_rc_
+{
+  HSS_URL_HANDLER_OK,
+  HSS_URL_HANDLER_ERROR,
+  HSS_URL_HANDLER_ASYNC,
+} hss_url_handler_rc_t;
+
+typedef hss_url_handler_rc_t (*hss_url_handler_fn) (hss_url_handler_args_t *);
+typedef void (*hss_register_url_fn) (hss_url_handler_fn, char *, int);
+typedef void (*hss_session_send_fn) (hss_url_handler_args_t *args);
 
 /** \brief Main data structure
  */
-
 typedef struct
 {
   /** Per thread vector of session pools */
-  http_session_t **sessions;
-  /** Session pool reader writer lock */
-  clib_rwlock_t sessions_lock;
-  /** vpp session to http session index map */
-  u32 **session_to_http_session;
-
-  /** Enable debug messages */
-  int debug_level;
-
-  /** vpp message/event queue */
-  svm_msg_q_t **vpp_queue;
-
-  /** Unified file data cache pool */
-  file_data_cache_t *cache_pool;
-  /** Hash table which maps file name to file data */
-    BVT (clib_bihash) name_to_data;
+  hss_session_t **sessions;
 
   /** Hash tables for built-in GET and POST handlers */
   uword *get_url_handlers;
   uword *post_url_handlers;
 
-  /** Current cache size */
-  u64 cache_size;
-  /** Max cache size in bytes */
-  u64 cache_limit;
-  /** Number of cache evictions */
-  u64 cache_evictions;
-
-  /** Cache LRU listheads */
-  u32 first_index;
-  u32 last_index;
+  hss_cache_t cache;
 
   /** root path to be served */
   u8 *www_root;
 
-  /** Server's event queue */
-  svm_queue_t *vl_input_queue;
-
-  /** API client handle */
-  u32 my_client_index;
-
   /** Application index */
   u32 app_index;
-
-  /** Process node index for event scheduling */
-  u32 node_index;
 
   /** Cert and key pair for tls */
   u32 ckpair_index;
 
-  /** Session cleanup timer wheel */
-  tw_timer_wheel_2t_1w_2048sl_t tw;
-  clib_spinlock_t tw_lock;
+  /* API message ID base */
+  u16 msg_id_base;
 
-  /** Time base, so we can generate browser cache control http spew */
-  clib_timebase_t timebase;
+  vlib_main_t *vlib_main;
 
+  /*
+   * Config
+   */
+
+  /** Enable debug messages */
+  int debug_level;
   /** Number of preallocated fifos, usually 0 */
   u32 prealloc_fifos;
   /** Private segment size, usually 0 */
-  u32 private_segment_size;
+  u64 private_segment_size;
   /** Size of the allocated rx, tx fifos, roughly 8K or so */
   u32 fifo_size;
   /** The bind URI, defaults to tcp://0.0.0.0/80 */
   u8 *uri;
-  vlib_main_t *vlib_main;
-} http_static_server_main_t;
+  /** Threshold for switching to ptr data in http msgs */
+  u64 use_ptr_thresh;
+  /** Enable the use of builtinurls */
+  u8 enable_url_handlers;
+  /** Max cache size before LRU occurs */
+  u64 cache_size;
 
-extern http_static_server_main_t http_static_server_main;
+  /** hash table of file extensions to mime types string indices */
+  uword *mime_type_indices_by_file_extensions;
+} hss_main_t;
 
-int http_static_server_enable_api (u32 fifo_size, u32 cache_limit,
-				   u32 prealloc_fifos,
-				   u32 private_segment_size,
-				   u8 * www_root, u8 * uri);
+extern hss_main_t hss_main;
 
-void http_static_server_register_builtin_handler
-  (void *fp, char *url, int type);
+int hss_create (vlib_main_t *vm);
+
+/**
+ * Register a GET or POST URL handler
+ */
+void hss_register_url_handler (hss_url_handler_fn fp, const char *url,
+			       http_req_method_t type);
+void hss_session_send_data (hss_url_handler_args_t *args);
+void hss_builtinurl_json_handlers_init (void);
+hss_session_t *hss_session_get (u32 thread_index, u32 hs_index);
 
 #endif /* __included_http_static_h__ */
 

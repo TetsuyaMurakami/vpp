@@ -173,6 +173,9 @@ icmp_match_out2in_det (vlib_node_runtime_t * node,
 	}
       det44_log_info ("unknown dst address:  %U",
 		      format_ip4_address, &ip0->dst_address);
+      b0->error = node->errors[DET44_OUT2IN_ERROR_NO_TRANSLATION];
+      next0 = DET44_OUT2IN_NEXT_DROP;
+
       goto out;
     }
 
@@ -415,8 +418,8 @@ VLIB_NODE_FN (det44_out2in_node) (vlib_main_t * vm,
 	  vlib_prefetch_buffer_header (p2, LOAD);
 	  vlib_prefetch_buffer_header (p3, LOAD);
 
-	  CLIB_PREFETCH (p2->data, CLIB_CACHE_LINE_BYTES, LOAD);
-	  CLIB_PREFETCH (p3->data, CLIB_CACHE_LINE_BYTES, LOAD);
+	  clib_prefetch_load (p2->data);
+	  clib_prefetch_load (p3->data);
 	}
 
 

@@ -76,8 +76,9 @@ load_one_plugin (plugin_info_t * pi)
   return 0;
 }
 
+/* Takes a vector as argument */
 static u8 **
-split_plugin_path (char *plugin_path)
+split_plugin_path (u8 *plugin_path)
 {
   int i;
   u8 **rv = 0;
@@ -104,7 +105,7 @@ split_plugin_path (char *plugin_path)
 }
 
 int
-vat2_load_plugins (char *path, char *filter, int *loaded)
+vat2_load_plugins (u8 *path, char *filter, int *loaded)
 {
   DIR *dp;
   struct dirent *entry;
@@ -165,7 +166,7 @@ vat2_load_plugins (char *path, char *filter, int *loaded)
 		{
 		  res = -1;
 		  vec_free (plugin_name);
-		  _vec_len (plugin_info) = vec_len (plugin_info) - 1;
+		  vec_set_len (plugin_info, vec_len (plugin_info) - 1);
 		  continue;
 		}
 	      clib_memset (pi, 0, sizeof (*pi));

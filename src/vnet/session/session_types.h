@@ -22,6 +22,7 @@
 #define SESSION_INVALID_INDEX ((u32)~0)
 #define SESSION_INVALID_HANDLE ((u64)~0)
 #define SESSION_CTRL_MSG_MAX_SIZE 86
+#define SESSION_CTRL_MSG_TX_MAX_SIZE 160
 #define SESSION_NODE_FRAME_SIZE 128
 
 #define foreach_session_endpoint_fields				\
@@ -35,6 +36,23 @@ typedef struct _session_endpoint
 #undef _
 } session_endpoint_t;
 
+#define foreach_session_endpoint_cfg_flags _ (PROXY_LISTEN, "proxy listener")
+
+typedef enum session_endpoint_cfg_flags_bits_
+{
+#define _(sym, str) SESSION_ENDPT_CFG_F_BIT_##sym,
+  foreach_session_endpoint_cfg_flags
+#undef _
+} __clib_packed session_endpoint_cfg_flags_bits_t;
+
+typedef enum session_endpoint_cfg_flags_
+{
+#define _(sym, str)                                                           \
+  SESSION_ENDPT_CFG_F_##sym = 1 << SESSION_ENDPT_CFG_F_BIT_##sym,
+  foreach_session_endpoint_cfg_flags
+#undef _
+} __clib_packed session_endpoint_cfg_flags_t;
+
 typedef struct _session_endpoint_cfg
 {
 #define _(type, name) type name;
@@ -44,11 +62,9 @@ typedef struct _session_endpoint_cfg
   u32 opaque;
   u32 ns_index;
   u8 original_tp;
-  u8 *hostname;
   u64 parent_handle;
-  u32 ckpair_index;
-  u8 crypto_engine;
-  u8 flags;
+  session_endpoint_cfg_flags_t flags;
+  transport_endpt_ext_cfg_t *ext_cfg;
 } session_endpoint_cfg_t;
 
 #define SESSION_IP46_ZERO			\
@@ -76,21 +92,15 @@ typedef struct _session_endpoint_cfg
   .peer = TRANSPORT_ENDPOINT_NULL,		\
   .transport_proto = 0,				\
 }
-#define SESSION_ENDPOINT_CFG_NULL 		\
-{						\
-  .sw_if_index = ENDPOINT_INVALID_INDEX,	\
-  .ip = SESSION_IP46_ZERO,			\
-  .fib_index = ENDPOINT_INVALID_INDEX,		\
-  .is_ip4 = 0,					\
-  .port = 0,					\
-  .peer = TRANSPORT_ENDPOINT_NULL,		\
-  .transport_proto = 0,				\
-  .app_wrk_index = ENDPOINT_INVALID_INDEX,	\
-  .opaque = ENDPOINT_INVALID_INDEX,		\
-  .hostname = 0,				\
-  .parent_handle = SESSION_INVALID_HANDLE,	\
-  .ckpair_index = 0				\
-}
+#define SESSION_ENDPOINT_CFG_NULL                                             \
+  {                                                                           \
+    .sw_if_index = ENDPOINT_INVALID_INDEX, .ip = SESSION_IP46_ZERO,           \
+    .fib_index = ENDPOINT_INVALID_INDEX, .is_ip4 = 0, .port = 0,              \
+    .peer = TRANSPORT_ENDPOINT_NULL, .transport_proto = 0,                    \
+    .app_wrk_index = ENDPOINT_INVALID_INDEX,                                  \
+    .opaque = ENDPOINT_INVALID_INDEX,                                         \
+    .parent_handle = SESSION_INVALID_HANDLE, .ext_cfg = 0,                    \
+  }
 
 #define session_endpoint_to_transport(_sep) ((transport_endpoint_t *)_sep)
 #define session_endpoint_to_transport_cfg(_sep)		\
@@ -156,13 +166,15 @@ typedef enum
     SESSION_N_STATES,
 } session_state_t;
 
-#define foreach_session_flag				\
-  _(RX_EVT, "rx-event")					\
-  _(PROXY, "proxy")					\
-  _(CUSTOM_TX, "custom-tx")				\
-  _(IS_MIGRATING, "migrating")				\
-  _(UNIDIRECTIONAL, "unidirectional")			\
-  _(CUSTOM_FIFO_TUNING, "custom-fifo-tuning")		\
+#define foreach_session_flag                                                  \
+  _ (RX_EVT, "rx-event")                                                      \
+  _ (PROXY, "proxy")                                                          \
+  _ (CUSTOM_TX, "custom-tx")                                                  \
+  _ (IS_MIGRATING, "migrating")                                               \
+  _ (UNIDIRECTIONAL, "unidirectional")                                        \
+  _ (CUSTOM_FIFO_TUNING, "custom-fifo-tuning")                                \
+  _ (HALF_OPEN, "half-open")                                                  \
+  _ (APP_CLOSED, "app-closed")
 
 typedef enum session_flags_bits_
 {
@@ -216,6 +228,9 @@ typedef struct session_
 
     /** App listener index in app's listener pool if a listener */
     u32 al_index;
+
+    /** Index in app worker's half-open table if a half-open */
+    u32 ho_index;
   };
 
   /** Opaque, for general use */
@@ -333,8 +348,9 @@ typedef enum
   SESSION_IO_EVT_TX,
   SESSION_IO_EVT_TX_FLUSH,
   SESSION_IO_EVT_BUILTIN_RX,
-  SESSION_IO_EVT_BUILTIN_TX,
+  SESSION_IO_EVT_TX_MAIN,
   SESSION_CTRL_EVT_RPC,
+  SESSION_CTRL_EVT_HALF_CLOSE,
   SESSION_CTRL_EVT_CLOSE,
   SESSION_CTRL_EVT_RESET,
   SESSION_CTRL_EVT_BOUND,
@@ -348,6 +364,7 @@ typedef enum
   SESSION_CTRL_EVT_REQ_WORKER_UPDATE,
   SESSION_CTRL_EVT_WORKER_UPDATE,
   SESSION_CTRL_EVT_WORKER_UPDATE_REPLY,
+  SESSION_CTRL_EVT_SHUTDOWN,
   SESSION_CTRL_EVT_DISCONNECT,
   SESSION_CTRL_EVT_CONNECT,
   SESSION_CTRL_EVT_CONNECT_URI,
@@ -360,39 +377,42 @@ typedef enum
   SESSION_CTRL_EVT_MIGRATED,
   SESSION_CTRL_EVT_CLEANUP,
   SESSION_CTRL_EVT_APP_WRK_RPC,
+  SESSION_CTRL_EVT_TRANSPORT_ATTR,
+  SESSION_CTRL_EVT_TRANSPORT_ATTR_REPLY,
 } session_evt_type_t;
 
-#define foreach_session_ctrl_evt				\
-  _(LISTEN, listen)						\
-  _(LISTEN_URI, listen_uri)					\
-  _(BOUND, bound)						\
-  _(UNLISTEN, unlisten)						\
-  _(UNLISTEN_REPLY, unlisten_reply)				\
-  _(ACCEPTED, accepted)						\
-  _(ACCEPTED_REPLY, accepted_reply)				\
-  _(CONNECT, connect)						\
-  _(CONNECT_URI, connect_uri)					\
-  _(CONNECTED, connected)					\
-  _(DISCONNECT, disconnect)					\
-  _(DISCONNECTED, disconnected)					\
-  _(DISCONNECTED_REPLY, disconnected_reply)			\
-  _(RESET_REPLY, reset_reply)					\
-  _(REQ_WORKER_UPDATE, req_worker_update)			\
-  _(WORKER_UPDATE, worker_update)				\
-  _(WORKER_UPDATE_REPLY, worker_update_reply)			\
-  _(APP_DETACH, app_detach)					\
-  _(APP_ADD_SEGMENT, app_add_segment)				\
-  _(APP_DEL_SEGMENT, app_del_segment)				\
-  _(MIGRATED, migrated)						\
-  _(CLEANUP, cleanup)						\
-  _(APP_WRK_RPC, app_wrk_rpc)					\
-
+#define foreach_session_ctrl_evt                                              \
+  _ (LISTEN, listen)                                                          \
+  _ (LISTEN_URI, listen_uri)                                                  \
+  _ (BOUND, bound)                                                            \
+  _ (UNLISTEN, unlisten)                                                      \
+  _ (UNLISTEN_REPLY, unlisten_reply)                                          \
+  _ (ACCEPTED, accepted)                                                      \
+  _ (ACCEPTED_REPLY, accepted_reply)                                          \
+  _ (CONNECT, connect)                                                        \
+  _ (CONNECT_URI, connect_uri)                                                \
+  _ (CONNECTED, connected)                                                    \
+  _ (SHUTDOWN, shutdown)                                                      \
+  _ (DISCONNECT, disconnect)                                                  \
+  _ (DISCONNECTED, disconnected)                                              \
+  _ (DISCONNECTED_REPLY, disconnected_reply)                                  \
+  _ (RESET_REPLY, reset_reply)                                                \
+  _ (REQ_WORKER_UPDATE, req_worker_update)                                    \
+  _ (WORKER_UPDATE, worker_update)                                            \
+  _ (WORKER_UPDATE_REPLY, worker_update_reply)                                \
+  _ (APP_DETACH, app_detach)                                                  \
+  _ (APP_ADD_SEGMENT, app_add_segment)                                        \
+  _ (APP_DEL_SEGMENT, app_del_segment)                                        \
+  _ (MIGRATED, migrated)                                                      \
+  _ (CLEANUP, cleanup)                                                        \
+  _ (APP_WRK_RPC, app_wrk_rpc)                                                \
+  _ (TRANSPORT_ATTR, transport_attr)                                          \
+  _ (TRANSPORT_ATTR_REPLY, transport_attr_reply)                              \
 /* Deprecated and will be removed. Use types above */
 #define FIFO_EVENT_APP_RX SESSION_IO_EVT_RX
 #define FIFO_EVENT_APP_TX SESSION_IO_EVT_TX
 #define FIFO_EVENT_DISCONNECT SESSION_CTRL_EVT_CLOSE
 #define FIFO_EVENT_BUILTIN_RX SESSION_IO_EVT_BUILTIN_RX
-#define FIFO_EVENT_BUILTIN_TX SESSION_IO_EVT_BUILTIN_TX
 
 typedef enum
 {
@@ -441,45 +461,52 @@ typedef struct session_dgram_header_
   u16 rmt_port;
   u16 lcl_port;
   u8 is_ip4;
+  u16 gso_size;
 } __clib_packed session_dgram_hdr_t;
 
 #define SESSION_CONN_ID_LEN 37
-#define SESSION_CONN_HDR_LEN 45
-
-STATIC_ASSERT (sizeof (session_dgram_hdr_t) == (SESSION_CONN_ID_LEN + 8),
+#define SESSION_CONN_HDR_LEN 47
+STATIC_ASSERT (sizeof (session_dgram_hdr_t) == (SESSION_CONN_ID_LEN + 10),
 	       "session conn id wrong length");
 
-#define foreach_session_error						\
-  _(NONE, "no error")							\
-  _(UNKNOWN, "generic/unknown error")					\
-  _(REFUSED, "refused")							\
-  _(TIMEDOUT, "timedout")						\
-  _(ALLOC, "obj/memory allocation error")				\
-  _(OWNER, "object not owned by application")				\
-  _(NOROUTE, "no route")						\
-  _(NOINTF, "no resolving interface")					\
-  _(NOIP, "no ip for lcl interface")					\
-  _(NOPORT, "no lcl port")						\
-  _(NOSUPPORT, "not supported")						\
-  _(NOLISTEN, "not listening")						\
-  _(NOSESSION, "session does not exist")				\
-  _(NOAPP, "app not attached")						\
-  _(PORTINUSE, "lcl port in use")					\
-  _(IPINUSE, "ip in use")						\
-  _(ALREADY_LISTENING, "ip port pair already listened on")		\
-  _(INVALID_RMT_IP, "invalid remote ip")				\
-  _(INVALID_APPWRK, "invalid app worker")				\
-  _(INVALID_NS, "invalid namespace")					\
-  _(SEG_NO_SPACE, "Couldn't allocate a fifo pair")			\
-  _(SEG_NO_SPACE2, "Created segment, couldn't allocate a fifo pair") 	\
-  _(SEG_CREATE, "Couldn't create a new segment")			\
-  _(FILTERED, "session filtered")					\
-  _(SCOPE, "scope not supported")					\
-  _(BAPI_NO_FD, "bapi doesn't have a socket fd")			\
-  _(BAPI_SEND_FD, "couldn't send fd over bapi socket fd")		\
-  _(BAPI_NO_REG, "app bapi registration not found")			\
-  _(MQ_MSG_ALLOC, "failed to alloc mq msg")				\
-  _(TLS_HANDSHAKE, "failed tls handshake")				\
+#define foreach_session_error                                                 \
+  _ (NONE, "no error")                                                        \
+  _ (UNKNOWN, "generic/unknown error")                                        \
+  _ (REFUSED, "refused")                                                      \
+  _ (TIMEDOUT, "timedout")                                                    \
+  _ (ALLOC, "obj/memory allocation error")                                    \
+  _ (OWNER, "object not owned by application")                                \
+  _ (NOROUTE, "no route")                                                     \
+  _ (NOINTF, "no resolving interface")                                        \
+  _ (NOIP, "no ip for lcl interface")                                         \
+  _ (NOPORT, "no lcl port")                                                   \
+  _ (NOSUPPORT, "not supported")                                              \
+  _ (NOLISTEN, "not listening")                                               \
+  _ (NOSESSION, "session does not exist")                                     \
+  _ (NOAPP, "app not attached")                                               \
+  _ (PORTINUSE, "lcl port in use")                                            \
+  _ (IPINUSE, "ip in use")                                                    \
+  _ (ALREADY_LISTENING, "ip port pair already listened on")                   \
+  _ (INVALID, "invalid value")                                                \
+  _ (INVALID_RMT_IP, "invalid remote ip")                                     \
+  _ (INVALID_APPWRK, "invalid app worker")                                    \
+  _ (INVALID_NS, "invalid namespace")                                         \
+  _ (SEG_NO_SPACE, "Couldn't allocate a fifo pair")                           \
+  _ (SEG_NO_SPACE2, "Created segment, couldn't allocate a fifo pair")         \
+  _ (SEG_CREATE, "Couldn't create a new segment")                             \
+  _ (FILTERED, "session filtered")                                            \
+  _ (SCOPE, "scope not supported")                                            \
+  _ (BAPI_NO_FD, "bapi doesn't have a socket fd")                             \
+  _ (BAPI_SEND_FD, "couldn't send fd over bapi socket fd")                    \
+  _ (BAPI_NO_REG, "app bapi registration not found")                          \
+  _ (MQ_MSG_ALLOC, "failed to alloc mq msg")                                  \
+  _ (TLS_HANDSHAKE, "failed tls handshake")                                   \
+  _ (EVENTFD_ALLOC, "failed to alloc eventfd")                                \
+  _ (NOEXTCFG, "no extended transport config")                                \
+  _ (NOCRYPTOENG, "no crypto engine")                                         \
+  _ (NOCRYPTOCKP, "cert key pair not found ")                                 \
+  _ (LOCAL_CONNECT, "could not connect with local scope")                     \
+  _ (TRANSPORT_NO_REG, "transport was not registered")
 
 typedef enum session_error_p_
 {

@@ -40,6 +40,7 @@
 #ifndef included_vlib_main_h
 #define included_vlib_main_h
 
+#include <vppinfra/clib.h>
 #include <vppinfra/callback_data.h>
 #include <vppinfra/elog.h>
 #include <vppinfra/format.h>
@@ -47,7 +48,6 @@
 #include <vppinfra/pool.h>
 #include <vppinfra/random_buffer.h>
 #include <vppinfra/time.h>
-#include <vppinfra/pcap.h>
 
 #include <pthread.h>
 
@@ -57,21 +57,6 @@
 #ifndef VLIB_ELOG_MAIN_LOOP
 #define VLIB_ELOG_MAIN_LOOP 0
 #endif
-
-typedef struct
-{
-  /* Trace RX pkts */
-  u8 pcap_rx_enable;
-  /* Trace TX pkts */
-  u8 pcap_tx_enable;
-  /* Trace drop pkts */
-  u8 pcap_drop_enable;
-  u8 pad1;
-  u32 max_bytes_per_pkt;
-  u32 pcap_sw_if_index;
-  pcap_main_t pcap_main;
-  u32 filter_classify_table_index;
-} vnet_pcap_t;
 
 typedef struct
 {
@@ -159,6 +144,8 @@ typedef struct vlib_main_t
   u32 main_loop_exit_set;
   /* Set e.g. in the SIGTERM signal handler, checked in a safe place... */
   volatile u32 main_loop_exit_now;
+  /* Exit status that will be returned by the process upon exit. */
+  volatile int main_loop_exit_status;
   clib_longjmp_t main_loop_exit;
 #define VLIB_MAIN_LOOP_EXIT_NONE 0
 #define VLIB_MAIN_LOOP_EXIT_PANIC 1
@@ -167,18 +154,6 @@ typedef struct vlib_main_t
 
   /* Error marker to use when exiting main loop. */
   clib_error_t *main_loop_error;
-
-  /* Name for e.g. syslog. */
-  char *name;
-
-  /* Start of the heap. */
-  void *heap_base;
-
-  /* Truncated version, to create frame indices */
-  void *heap_aligned_base;
-
-  /* Size of the heap */
-  uword heap_size;
 
   /* buffer main structure. */
   vlib_buffer_main_t *buffer_main;
@@ -189,24 +164,8 @@ typedef struct vlib_main_t
   /* Node graph main structure. */
   vlib_node_main_t node_main;
 
-  /* Command line interface. */
-  vlib_cli_main_t cli_main;
-
   /* Packet trace buffer. */
   vlib_trace_main_t trace_main;
-
-  /* Pcap dispatch trace main */
-  pcap_main_t dispatch_pcap_main;
-  uword dispatch_pcap_enable;
-  uword dispatch_pcap_postmortem;
-  u32 *dispatch_buffer_trace_nodes;
-  u8 *pcap_buffer;
-
-  /* pcap rx / tx tracing */
-  vnet_pcap_t pcap;
-
-  /* Packet trace capture filter */
-  vlib_trace_filter_t trace_filter;
 
   /* Error handling. */
   vlib_error_main_t error_main;
@@ -220,11 +179,10 @@ typedef struct vlib_main_t
   /* Stream index to use for distribution when MC is enabled. */
   u32 mc_stream_index;
 
-  vlib_one_time_waiting_process_t *procs_waiting_for_mc_stream_join;
+  /* Hash table to record which init functions have been called. */
+  uword *worker_init_functions_called;
 
-  /* Event logger. */
-  elog_main_t elog_main;
-  u32 configured_elog_ring_size;
+  vlib_one_time_waiting_process_t *procs_waiting_for_mc_stream_join;
 
   /* Event logger trace flags */
   int elog_trace_api_messages;
@@ -245,27 +203,15 @@ typedef struct vlib_main_t
   /* Buffer of random data for various uses. */
   clib_random_buffer_t random_buffer;
 
-  /* Hash table to record which init functions have been called. */
-  uword *init_functions_called;
-
   /* thread, cpu and numa_node indices */
   u32 thread_index;
   u32 cpu_id;
   u32 numa_node;
 
-  /* List of init functions to call, setup by constructors */
-  _vlib_init_function_list_elt_t *init_function_registrations;
-  _vlib_init_function_list_elt_t *worker_init_function_registrations;
-  _vlib_init_function_list_elt_t *main_loop_enter_function_registrations;
-  _vlib_init_function_list_elt_t *main_loop_exit_function_registrations;
-  _vlib_init_function_list_elt_t *api_init_function_registrations;
-  vlib_config_function_runtime_t *config_function_registrations;
-
   /* control-plane API queue signal pending, length indication */
   volatile u32 queue_signal_pending;
   volatile u32 api_queue_nonempty;
   void (*queue_signal_callback) (struct vlib_main_t *);
-  u8 **argv;
 
   /* Top of (worker) dispatch loop callback */
   void (**volatile worker_thread_main_loop_callbacks)
@@ -276,15 +222,6 @@ typedef struct vlib_main_t
 
   /* debugging */
   volatile int parked_at_barrier;
-
-  /* Attempt to do a post-mortem elog dump */
-  int elog_post_mortem_dump;
-
-  /*
-   * Need to call vlib_worker_thread_node_runtime_update before
-   * releasing worker thread barrier. Only valid in vlib_global_main.
-   */
-  int need_vlib_worker_thread_node_runtime_update;
 
   /* Dispatch loop time accounting */
   u64 loops_this_reporting_interval;
@@ -327,8 +264,60 @@ typedef struct vlib_main_t
 #endif
 } vlib_main_t;
 
+typedef struct vlib_global_main_t
+{
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
+
+  /* Per-thread Mains */
+  vlib_main_t **vlib_mains;
+
+  /* Name for e.g. syslog. */
+  char *name;
+
+  /* full path to main executable */
+  char *exec_path;
+
+  /* command line arguments */
+  u8 **argv;
+
+  /* post-mortem callbacks */
+  void (**post_mortem_callbacks) (void);
+
+  /*
+   * Need to call vlib_worker_thread_node_runtime_update before
+   * releasing worker thread barrier.
+   */
+  int need_vlib_worker_thread_node_runtime_update;
+
+  /* Command line interface. */
+  vlib_cli_main_t cli_main;
+
+  /* Node registrations added by constructors */
+  vlib_node_registration_t *node_registrations;
+
+  /* Event logger. */
+  elog_main_t elog_main;
+  u32 configured_elog_ring_size;
+
+  /* Packet trace capture filter */
+  vlib_trace_filter_t trace_filter;
+
+  /* List of init functions to call, setup by constructors */
+  _vlib_init_function_list_elt_t *init_function_registrations;
+  _vlib_init_function_list_elt_t *main_loop_enter_function_registrations;
+  _vlib_init_function_list_elt_t *main_loop_exit_function_registrations;
+  _vlib_init_function_list_elt_t *worker_init_function_registrations;
+  _vlib_init_function_list_elt_t *num_workers_change_function_registrations;
+  _vlib_init_function_list_elt_t *api_init_function_registrations;
+  vlib_config_function_runtime_t *config_function_registrations;
+
+  /* Hash table to record which init functions have been called. */
+  uword *init_functions_called;
+
+} vlib_global_main_t;
+
 /* Global main structure. */
-extern vlib_main_t vlib_global_main;
+extern vlib_global_main_t vlib_global_main;
 
 void vlib_worker_loop (vlib_main_t * vm);
 
@@ -388,7 +377,13 @@ always_inline void
 vlib_panic_with_error (vlib_main_t * vm, clib_error_t * error)
 {
   vm->main_loop_error = error;
-  clib_longjmp (&vm->main_loop_exit, VLIB_MAIN_LOOP_EXIT_PANIC);
+  if (vm->main_loop_exit_set)
+    clib_longjmp (&vm->main_loop_exit, VLIB_MAIN_LOOP_EXIT_PANIC);
+  else
+    {
+      clib_warning ("panic: %U", format_clib_error, error);
+      abort ();
+    }
 }
 
 #define vlib_panic_with_msg(vm,args...) \
@@ -400,6 +395,8 @@ vlib_panic (vlib_main_t * vm)
   vlib_panic_with_error (vm, 0);
 }
 
+/* Asynchronously requests exit with the given status. */
+void vlib_exit_with_status (vlib_main_t *vm, int status);
 
 always_inline f64
 vlib_internal_node_vector_rate (vlib_main_t * vm)
@@ -467,6 +464,18 @@ always_inline void vlib_set_queue_signal_callback
   vm->queue_signal_callback = fp;
 }
 
+always_inline void
+vlib_main_init ()
+{
+  vlib_global_main_t *vgm = &vlib_global_main;
+  vlib_main_t *vm;
+
+  vgm->init_functions_called = hash_create (0, /* value bytes */ 0);
+
+  vm = clib_mem_alloc_aligned (sizeof (*vm), CLIB_CACHE_LINE_BYTES);
+  vec_add1_ha (vgm->vlib_mains, vm, 0, CLIB_CACHE_LINE_BYTES);
+}
+
 /* Main routine. */
 int vlib_main (vlib_main_t * vm, unformat_input_t * input);
 
@@ -476,23 +485,8 @@ extern u8 **vlib_thread_stacks;
 /* Number of thread stacks that the application needs */
 u32 vlib_app_num_thread_stacks_needed (void) __attribute__ ((weak));
 
-extern void vlib_node_sync_stats (vlib_main_t * vm, vlib_node_t * n);
+void vlib_add_del_post_mortem_callback (void *cb, int is_add);
 
-#define VLIB_PCAP_MAJOR_VERSION 1
-#define VLIB_PCAP_MINOR_VERSION 0
-
-typedef struct
-{
-  u8 *filename;
-  int enable;
-  int status;
-  int post_mortem;
-  u32 packets_to_capture;
-  u32 buffer_trace_node_index;
-  u32 buffer_traces_to_capture;
-} vlib_pcap_dispatch_trace_args_t;
-
-int vlib_pcap_dispatch_trace_configure (vlib_pcap_dispatch_trace_args_t *);
 vlib_main_t *vlib_get_main_not_inline (void);
 elog_main_t *vlib_get_elog_main_not_inline ();
 

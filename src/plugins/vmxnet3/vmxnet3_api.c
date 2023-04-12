@@ -29,6 +29,7 @@
 #include <vmxnet3/vmxnet3.api_enum.h>
 #include <vmxnet3/vmxnet3.api_types.h>
 
+#define REPLY_MSG_ID_BASE (vmxm->msg_id_base)
 #include <vlibapi/api_helper_macros.h>
 
 static void
@@ -55,10 +56,8 @@ vl_api_vmxnet3_create_t_handler (vl_api_vmxnet3_create_t * mp)
   rv = args.rv;
 
   /* *INDENT-OFF* */
-  REPLY_MACRO2 (VL_API_VMXNET3_CREATE_REPLY + vmxm->msg_id_base,
-    ({
-      rmp->sw_if_index = ntohl (args.sw_if_index);
-    }));
+  REPLY_MACRO2 (VL_API_VMXNET3_CREATE_REPLY,
+		({ rmp->sw_if_index = ntohl (args.sw_if_index); }));
   /* *INDENT-ON* */
 }
 
@@ -87,7 +86,7 @@ vl_api_vmxnet3_delete_t_handler (vl_api_vmxnet3_delete_t * mp)
   vmxnet3_delete_if (vm, vd);
 
 reply:
-  REPLY_MACRO (VL_API_VMXNET3_DELETE_REPLY + vmxm->msg_id_base);
+  REPLY_MACRO (VL_API_VMXNET3_DELETE_REPLY);
 }
 
 static void
@@ -180,7 +179,7 @@ vl_api_vmxnet3_dump_t_handler (vl_api_vmxnet3_dump_t * mp)
       if_name = format (if_name, "%U%c", format_vnet_sw_interface_name, vnm,
 			swif, 0);
       send_vmxnet3_details (reg, vd, swif, if_name, mp->context);
-      _vec_len (if_name) = 0;
+      vec_set_len (if_name, 0);
     }
   /* *INDENT-ON* */
 
@@ -221,7 +220,7 @@ static void vl_api_sw_vmxnet3_interface_dump_t_handler
 	  if_name = format (if_name, "%U%c", format_vnet_sw_interface_name, vnm,
 			    swif, 0);
 	  send_vmxnet3_details (reg, vd, swif, if_name, mp->context);
-	  _vec_len (if_name) = 0;
+	  vec_set_len (if_name, 0);
 	}
     }
   /* *INDENT-ON* */

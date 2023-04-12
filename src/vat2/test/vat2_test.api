@@ -13,7 +13,9 @@
  * limitations under the License.
  */
 
+option version="0.0.0";
 import "vnet/ip/ip_types.api";
+import "vnet/interface_types.api";
 
 autoreply define test_prefix {
   vl_api_prefix_t pref;
@@ -93,4 +95,9 @@ autoreply define test_addresses3 {
 autoreply define test_empty {
   u32 client_index;
   u32 context;
+};
+
+/* Interface */
+autoreply define test_interface {
+  vl_api_interface_index_t sw_if_index;
 };

@@ -96,9 +96,11 @@ typedef struct vlib_pci_device_info
 
 typedef u32 vlib_pci_dev_handle_t;
 
-vlib_pci_device_info_t *vlib_pci_get_device_info (vlib_main_t * vm,
-						  vlib_pci_addr_t * addr,
-						  clib_error_t ** error);
+vlib_pci_device_info_t *vlib_pci_get_device_info (vlib_main_t *vm,
+						  vlib_pci_addr_t *addr,
+						  clib_error_t **error);
+clib_error_t *vlib_pci_get_device_root_bus (vlib_pci_addr_t *addr,
+					    vlib_pci_addr_t *root_bus);
 vlib_pci_addr_t *vlib_pci_get_all_dev_addrs ();
 vlib_pci_addr_t *vlib_pci_get_addr (vlib_main_t * vm,
 				    vlib_pci_dev_handle_t h);
@@ -180,8 +182,8 @@ static void __vlib_rm_pci_device_registration_##x (void)        \
 }                                                               \
 __VA_ARGS__ pci_device_registration_t x
 
-clib_error_t *vlib_pci_bind_to_uio (vlib_main_t * vm, vlib_pci_addr_t * addr,
-				    char *uio_driver_name);
+clib_error_t *vlib_pci_bind_to_uio (vlib_main_t *vm, vlib_pci_addr_t *addr,
+				    char *uio_driver_name, int force);
 
 /* Configuration space read/write. */
 clib_error_t *vlib_pci_read_write_config (vlib_main_t * vm,
@@ -325,6 +327,7 @@ int vlib_pci_supports_virtual_addr_dma (vlib_main_t * vm,
 unformat_function_t unformat_vlib_pci_addr;
 format_function_t format_vlib_pci_addr;
 format_function_t format_vlib_pci_link_speed;
+format_function_t format_vlib_pci_link_port;
 format_function_t format_vlib_pci_vpd;
 
 #endif /* included_vlib_pci_h */

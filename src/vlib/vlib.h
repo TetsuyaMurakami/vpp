@@ -49,6 +49,7 @@
 
 /* Forward declarations of structs to avoid circular dependencies. */
 struct vlib_main_t;
+struct vlib_global_main_t;
 typedef u32 vlib_log_class_t;
 
 /* All includes in alphabetical order. */
@@ -76,7 +77,6 @@ typedef u32 vlib_log_class_t;
 #include <vlib/trace_funcs.h>
 #include <vlib/global_funcs.h>
 #include <vlib/buffer_node.h>
-#include <vppinfra/pcap_funcs.h>
 
 #endif /* included_vlib_h */
 

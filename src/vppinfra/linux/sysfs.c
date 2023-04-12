@@ -16,6 +16,7 @@
 #include <vppinfra/clib.h>
 #include <vppinfra/clib_error.h>
 #include <vppinfra/format.h>
+#include <vppinfra/bitmap.h>
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -69,7 +70,7 @@ clib_sysfs_read (char *file_name, char *fmt, ...)
       return clib_error_return_unix (0, "read `%s'", file_name);
     }
 
-  _vec_len (s) = sz;
+  vec_set_len (s, sz);
   unformat_init_vector (&input, s);
 
   va_list va;
@@ -153,7 +154,7 @@ clib_sysfs_set_nr_hugepages (int numa_node, int log2_page_size, int nr)
       goto done;
     }
 
-  _vec_len (p) -= 1;
+  vec_dec_len (p, 1);
   p = format (p, "/hugepages/hugepages-%ukB/nr_hugepages%c", page_size, 0);
   clib_sysfs_write ((char *) p, "%d", nr);
 
@@ -206,7 +207,7 @@ clib_sysfs_get_xxx_hugepages (char *type, int numa_node,
       goto done;
     }
 
-  _vec_len (p) -= 1;
+  vec_dec_len (p, 1);
   p = format (p, "/hugepages/hugepages-%ukB/%s_hugepages%c", page_size,
 	      type, 0);
   error = clib_sysfs_read ((char *) p, "%d", val);
@@ -262,6 +263,32 @@ clib_sysfs_prealloc_hugepages (int numa_node, int log2_page_size, int nr)
   return clib_sysfs_set_nr_hugepages (numa_node, log2_page_size, n + needed);
 }
 
+__clib_export uword *
+clib_sysfs_list_to_bitmap (char *filename)
+{
+  FILE *fp;
+  uword *r = 0;
+
+  fp = fopen (filename, "r");
+
+  if (fp != NULL)
+    {
+      u8 *buffer = 0;
+      vec_validate (buffer, 256 - 1);
+      if (fgets ((char *) buffer, 256, fp))
+	{
+	  unformat_input_t in;
+	  unformat_init_string (&in, (char *) buffer,
+				strlen ((char *) buffer));
+	  if (unformat (&in, "%U", unformat_bitmap_list, &r) != 1)
+	    clib_warning ("unformat_bitmap_list failed");
+	  unformat_free (&in);
+	}
+      vec_free (buffer);
+      fclose (fp);
+    }
+  return r;
+}
 
 /*
  * fd.io coding-style-patch-verification: ON

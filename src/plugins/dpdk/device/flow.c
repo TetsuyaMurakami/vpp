@@ -21,7 +21,7 @@
 #include <vnet/ip/ip.h>
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/ethernet/arp_packet.h>
-#include <vnet/vxlan/vxlan.h>
+#include <vxlan/vxlan.h>
 #include <dpdk/device/dpdk.h>
 #include <dpdk/device/dpdk_priv.h>
 #include <vppinfra/error.h>
@@ -29,22 +29,30 @@
 #define FLOW_IS_ETHERNET_CLASS(f) \
   (f->type == VNET_FLOW_TYPE_ETHERNET)
 
-#define FLOW_IS_IPV4_CLASS(f) \
-  ((f->type == VNET_FLOW_TYPE_IP4) || \
-    (f->type == VNET_FLOW_TYPE_IP4_N_TUPLE) || \
-    (f->type == VNET_FLOW_TYPE_IP4_N_TUPLE_TAGGED) || \
-    (f->type == VNET_FLOW_TYPE_IP4_VXLAN) || \
-    (f->type == VNET_FLOW_TYPE_IP4_GTPC) || \
-    (f->type == VNET_FLOW_TYPE_IP4_GTPU) || \
-    (f->type == VNET_FLOW_TYPE_IP4_L2TPV3OIP) || \
-    (f->type == VNET_FLOW_TYPE_IP4_IPSEC_ESP) || \
-    (f->type == VNET_FLOW_TYPE_IP4_IPSEC_AH))
+#define FLOW_IS_IPV4_CLASS(f)                                                 \
+  ((f->type == VNET_FLOW_TYPE_IP4) ||                                         \
+   (f->type == VNET_FLOW_TYPE_IP4_N_TUPLE) ||                                 \
+   (f->type == VNET_FLOW_TYPE_IP4_N_TUPLE_TAGGED) ||                          \
+   (f->type == VNET_FLOW_TYPE_IP4_VXLAN) ||                                   \
+   (f->type == VNET_FLOW_TYPE_IP4_GTPC) ||                                    \
+   (f->type == VNET_FLOW_TYPE_IP4_GTPU) ||                                    \
+   (f->type == VNET_FLOW_TYPE_IP4_L2TPV3OIP) ||                               \
+   (f->type == VNET_FLOW_TYPE_IP4_IPSEC_ESP) ||                               \
+   (f->type == VNET_FLOW_TYPE_IP4_IPSEC_AH) ||                                \
+   (f->type == VNET_FLOW_TYPE_IP4_IP4) ||                                     \
+   (f->type == VNET_FLOW_TYPE_IP4_IP6) ||                                     \
+   (f->type == VNET_FLOW_TYPE_IP4_IP4_N_TUPLE) ||                             \
+   (f->type == VNET_FLOW_TYPE_IP4_IP6_N_TUPLE))
 
-#define FLOW_IS_IPV6_CLASS(f) \
-  ((f->type == VNET_FLOW_TYPE_IP6) || \
-    (f->type == VNET_FLOW_TYPE_IP6_N_TUPLE) || \
-    (f->type == VNET_FLOW_TYPE_IP6_N_TUPLE_TAGGED) || \
-    (f->type == VNET_FLOW_TYPE_IP6_VXLAN))
+#define FLOW_IS_IPV6_CLASS(f)                                                 \
+  ((f->type == VNET_FLOW_TYPE_IP6) ||                                         \
+   (f->type == VNET_FLOW_TYPE_IP6_N_TUPLE) ||                                 \
+   (f->type == VNET_FLOW_TYPE_IP6_N_TUPLE_TAGGED) ||                          \
+   (f->type == VNET_FLOW_TYPE_IP6_VXLAN) ||                                   \
+   (f->type == VNET_FLOW_TYPE_IP6_IP4) ||                                     \
+   (f->type == VNET_FLOW_TYPE_IP6_IP6) ||                                     \
+   (f->type == VNET_FLOW_TYPE_IP6_IP4_N_TUPLE) ||                             \
+   (f->type == VNET_FLOW_TYPE_IP6_IP6_N_TUPLE))
 
 /* check if flow is VLAN sensitive */
 #define FLOW_HAS_VLAN_TAG(f) \
@@ -69,6 +77,13 @@
     (f->type == VNET_FLOW_TYPE_IP6_VXLAN) || \
     (f->type == VNET_FLOW_TYPE_IP4_GTPC) || \
     (f->type == VNET_FLOW_TYPE_IP4_GTPU))
+
+/* check if flow has a inner TCP/UDP header */
+#define FLOW_HAS_INNER_N_TUPLE(f)                                             \
+  ((f->type == VNET_FLOW_TYPE_IP4_IP4_N_TUPLE) ||                             \
+   (f->type == VNET_FLOW_TYPE_IP4_IP6_N_TUPLE) ||                             \
+   (f->type == VNET_FLOW_TYPE_IP6_IP4_N_TUPLE) ||                             \
+   (f->type == VNET_FLOW_TYPE_IP6_IP6_N_TUPLE))
 
 /* constant structs */
 static const struct rte_flow_attr ingress = {.ingress = 1 };
@@ -103,6 +118,25 @@ dpdk_flow_convert_rss_types (u64 type, u64 * dpdk_rss_type)
     return;
 }
 
+/** Maximum number of queue indices in struct rte_flow_action_rss. */
+#define ACTION_RSS_QUEUE_NUM 128
+
+static inline void
+dpdk_flow_convert_rss_queues (u32 queue_index, u32 queue_num,
+			      struct rte_flow_action_rss *rss)
+{
+  u16 *queues = clib_mem_alloc (sizeof (*queues) * ACTION_RSS_QUEUE_NUM);
+  int i;
+
+  for (i = 0; i < queue_num; i++)
+    queues[i] = queue_index++;
+
+  rss->queue_num = queue_num;
+  rss->queue = queues;
+
+  return;
+}
+
 static inline enum rte_eth_hash_function
 dpdk_flow_convert_rss_func (vnet_rss_function_t func)
 {
@@ -134,14 +168,15 @@ static int
 dpdk_flow_add (dpdk_device_t * xd, vnet_flow_t * f, dpdk_flow_entry_t * fe)
 {
   struct rte_flow_item_eth eth[2] = { };
-  struct rte_flow_item_ipv4 ip4[2] = { };
-  struct rte_flow_item_ipv6 ip6[2] = { };
-  struct rte_flow_item_udp udp[2] = { };
-  struct rte_flow_item_tcp tcp[2] = { };
+  struct rte_flow_item_ipv4 ip4[2] = {}, in_ip4[2] = {};
+  struct rte_flow_item_ipv6 ip6[2] = {}, in_ip6[2] = {};
+  struct rte_flow_item_udp udp[2] = {}, in_UDP[2] = {};
+  struct rte_flow_item_tcp tcp[2] = {}, in_TCP[2] = {};
   struct rte_flow_item_gtp gtp[2] = { };
   struct rte_flow_item_l2tpv3oip l2tp[2] = { };
   struct rte_flow_item_esp esp[2] = { };
   struct rte_flow_item_ah ah[2] = { };
+  struct rte_flow_item_raw generic[2] = {};
   struct rte_flow_action_mark mark = { 0 };
   struct rte_flow_action_queue queue = { 0 };
   struct rte_flow_action_rss rss = { 0 };
@@ -164,6 +199,20 @@ dpdk_flow_add (dpdk_device_t * xd, vnet_flow_t * f, dpdk_flow_entry_t * fe)
   u16 src_port = 0, dst_port = 0, src_port_mask = 0, dst_port_mask = 0;
   u8 protocol = IP_PROTOCOL_RESERVED;
   int rv = 0;
+
+  /* Handle generic flow first */
+  if (f->type == VNET_FLOW_TYPE_GENERIC)
+    {
+      generic[0].pattern = f->generic.pattern.spec;
+      generic[1].pattern = f->generic.pattern.mask;
+
+      vec_add2 (items, item, 1);
+      item->type = RTE_FLOW_ITEM_TYPE_RAW;
+      item->spec = generic;
+      item->mask = generic + 1;
+
+      goto pattern_end;
+    }
 
   enum
   {
@@ -285,7 +334,8 @@ dpdk_flow_add (dpdk_device_t * xd, vnet_flow_t * f, dpdk_flow_entry_t * fe)
 
       if ((ip6_ptr->src_addr.mask.as_u64[0] == 0) &&
 	  (ip6_ptr->src_addr.mask.as_u64[1] == 0) &&
-	  (!ip6_ptr->protocol.mask))
+	  (ip6_ptr->dst_addr.mask.as_u64[0] == 0) &&
+	  (ip6_ptr->dst_addr.mask.as_u64[1] == 0) && (!ip6_ptr->protocol.mask))
 	{
 	  item->spec = NULL;
 	  item->mask = NULL;
@@ -437,13 +487,127 @@ dpdk_flow_add (dpdk_device_t * xd, vnet_flow_t * f, dpdk_flow_entry_t * fe)
 	  item->mask = raw + 1;
 	}
       break;
+    case IP_PROTOCOL_IPV6:
+      item->type = RTE_FLOW_ITEM_TYPE_IPV6;
 
+#define fill_inner_ip6_with_outer_ipv(OUTER_IP_VER)                           \
+  if (f->type == VNET_FLOW_TYPE_IP##OUTER_IP_VER##_IP6 ||                     \
+      f->type == VNET_FLOW_TYPE_IP##OUTER_IP_VER##_IP6_N_TUPLE)               \
+    {                                                                         \
+      vnet_flow_ip##OUTER_IP_VER##_ip6_t *ptr = &f->ip##OUTER_IP_VER##_ip6;   \
+      if ((ptr->in_src_addr.mask.as_u64[0] == 0) &&                           \
+	  (ptr->in_src_addr.mask.as_u64[1] == 0) &&                           \
+	  (ptr->in_dst_addr.mask.as_u64[0] == 0) &&                           \
+	  (ptr->in_dst_addr.mask.as_u64[1] == 0) && (!ptr->in_protocol.mask)) \
+	{                                                                     \
+	  item->spec = NULL;                                                  \
+	  item->mask = NULL;                                                  \
+	}                                                                     \
+      else                                                                    \
+	{                                                                     \
+	  clib_memcpy (in_ip6[0].hdr.src_addr, &ptr->in_src_addr.addr,        \
+		       ARRAY_LEN (ptr->in_src_addr.addr.as_u8));              \
+	  clib_memcpy (in_ip6[1].hdr.src_addr, &ptr->in_src_addr.mask,        \
+		       ARRAY_LEN (ptr->in_src_addr.mask.as_u8));              \
+	  clib_memcpy (in_ip6[0].hdr.dst_addr, &ptr->in_dst_addr.addr,        \
+		       ARRAY_LEN (ptr->in_dst_addr.addr.as_u8));              \
+	  clib_memcpy (in_ip6[1].hdr.dst_addr, &ptr->in_dst_addr.mask,        \
+		       ARRAY_LEN (ptr->in_dst_addr.mask.as_u8));              \
+	  item->spec = in_ip6;                                                \
+	  item->mask = in_ip6 + 1;                                            \
+	}                                                                     \
+    }
+      fill_inner_ip6_with_outer_ipv (6) fill_inner_ip6_with_outer_ipv (4)
+#undef fill_inner_ip6_with_outer_ipv
+	break;
+    case IP_PROTOCOL_IP_IN_IP:
+      item->type = RTE_FLOW_ITEM_TYPE_IPV4;
+
+#define fill_inner_ip4_with_outer_ipv(OUTER_IP_VER)                           \
+  if (f->type == VNET_FLOW_TYPE_IP##OUTER_IP_VER##_IP4 ||                     \
+      f->type == VNET_FLOW_TYPE_IP##OUTER_IP_VER##_IP4_N_TUPLE)               \
+    {                                                                         \
+      vnet_flow_ip##OUTER_IP_VER##_ip4_t *ptr = &f->ip##OUTER_IP_VER##_ip4;   \
+      if ((!ptr->in_src_addr.mask.as_u32) &&                                  \
+	  (!ptr->in_dst_addr.mask.as_u32) && (!ptr->in_protocol.mask))        \
+	{                                                                     \
+	  item->spec = NULL;                                                  \
+	  item->mask = NULL;                                                  \
+	}                                                                     \
+      else                                                                    \
+	{                                                                     \
+	  in_ip4[0].hdr.src_addr = ptr->in_src_addr.addr.as_u32;              \
+	  in_ip4[1].hdr.src_addr = ptr->in_src_addr.mask.as_u32;              \
+	  in_ip4[0].hdr.dst_addr = ptr->in_dst_addr.addr.as_u32;              \
+	  in_ip4[1].hdr.dst_addr = ptr->in_dst_addr.mask.as_u32;              \
+	  item->spec = in_ip4;                                                \
+	  item->mask = in_ip4 + 1;                                            \
+	}                                                                     \
+    }
+      fill_inner_ip4_with_outer_ipv (6) fill_inner_ip4_with_outer_ipv (4)
+#undef fill_inner_ip4_with_outer_ipv
+	break;
     default:
       rv = VNET_FLOW_ERROR_NOT_SUPPORTED;
       goto done;
     }
 
+  if (FLOW_HAS_INNER_N_TUPLE (f))
+    {
+      vec_add2 (items, item, 1);
+
+#define fill_inner_n_tuple_of(proto)                                          \
+  item->type = RTE_FLOW_ITEM_TYPE_##proto;                                    \
+  if ((ptr->in_src_port.mask == 0) && (ptr->in_dst_port.mask == 0))           \
+    {                                                                         \
+      item->spec = NULL;                                                      \
+      item->mask = NULL;                                                      \
+    }                                                                         \
+  else                                                                        \
+    {                                                                         \
+      in_##proto[0].hdr.src_port =                                            \
+	clib_host_to_net_u16 (ptr->in_src_port.port);                         \
+      in_##proto[1].hdr.src_port =                                            \
+	clib_host_to_net_u16 (ptr->in_src_port.mask);                         \
+      in_##proto[0].hdr.dst_port =                                            \
+	clib_host_to_net_u16 (ptr->in_dst_port.port);                         \
+      in_##proto[1].hdr.dst_port =                                            \
+	clib_host_to_net_u16 (ptr->in_dst_port.mask);                         \
+      item->spec = in_##proto;                                                \
+      item->mask = in_##proto + 1;                                            \
+    }
+
+#define fill_inner_n_tuple(OUTER_IP_VER, INNER_IP_VER)                        \
+  if (f->type ==                                                              \
+      VNET_FLOW_TYPE_IP##OUTER_IP_VER##_IP##INNER_IP_VER##_N_TUPLE)           \
+    {                                                                         \
+      vnet_flow_ip##OUTER_IP_VER##_ip##INNER_IP_VER##_n_tuple_t *ptr =        \
+	&f->ip##OUTER_IP_VER##_ip##INNER_IP_VER##_n_tuple;                    \
+      switch (ptr->in_protocol.prot)                                          \
+	{                                                                     \
+	case IP_PROTOCOL_UDP:                                                 \
+	  fill_inner_n_tuple_of (UDP) break;                                  \
+	case IP_PROTOCOL_TCP:                                                 \
+	  fill_inner_n_tuple_of (TCP) break;                                  \
+	default:                                                              \
+	  break;                                                              \
+	}                                                                     \
+    }
+      fill_inner_n_tuple (6, 4) fill_inner_n_tuple (4, 4)
+	fill_inner_n_tuple (6, 6) fill_inner_n_tuple (4, 6)
+#undef fill_inner_n_tuple
+#undef fill_inner_n_tuple_of
+    }
+
 pattern_end:
+  if ((f->actions & VNET_FLOW_ACTION_RSS) &&
+      (f->rss_types & (1ULL << VNET_FLOW_RSS_TYPES_ESP)))
+    {
+
+      vec_add2 (items, item, 1);
+      item->type = RTE_FLOW_ITEM_TYPE_ESP;
+    }
+
   vec_add2 (items, item, 1);
   item->type = RTE_FLOW_ITEM_TYPE_END;
 
@@ -481,6 +645,10 @@ pattern_end:
 
       /* convert types to DPDK rss bitmask */
       dpdk_flow_convert_rss_types (f->rss_types, &rss_type);
+
+      if (f->queue_num)
+	/* convert rss queues to array */
+	dpdk_flow_convert_rss_queues (f->queue_index, f->queue_num, &rss);
 
       rss.types = rss_type;
       if ((rss.func = dpdk_flow_convert_rss_func (f->rss_fun)) ==
@@ -547,6 +715,7 @@ int
 dpdk_flow_ops_fn (vnet_main_t * vnm, vnet_flow_dev_op_t op, u32 dev_instance,
 		  u32 flow_index, uword * private_data)
 {
+  vlib_main_t *vm = vlib_get_main ();
   dpdk_main_t *dm = &dpdk_main;
   vnet_flow_t *flow = vnet_get_flow (flow_index);
   dpdk_device_t *xd = vec_elt_at_index (dm->devices, dev_instance);
@@ -557,7 +726,7 @@ dpdk_flow_ops_fn (vnet_main_t * vnm, vnet_flow_dev_op_t op, u32 dev_instance,
   /* recycle old flow lookup entries only after the main loop counter
      increases - i.e. previously DMA'ed packets were handled */
   if (vec_len (xd->parked_lookup_indexes) > 0 &&
-      xd->parked_loop_count != dm->vlib_main->main_loop_count)
+      xd->parked_loop_count != vm->main_loop_count)
     {
       u32 *fl_index;
 
@@ -580,7 +749,7 @@ dpdk_flow_ops_fn (vnet_main_t * vnm, vnet_flow_dev_op_t op, u32 dev_instance,
 	  fle = pool_elt_at_index (xd->flow_lookup_entries, fe->mark);
 	  clib_memset (fle, -1, sizeof (*fle));
 	  vec_add1 (xd->parked_lookup_indexes, fe->mark);
-	  xd->parked_loop_count = dm->vlib_main->main_loop_count;
+	  xd->parked_loop_count = vm->main_loop_count;
 	}
 
       clib_memset (fe, 0, sizeof (*fe));
@@ -644,6 +813,15 @@ dpdk_flow_ops_fn (vnet_main_t * vnm, vnet_flow_dev_op_t op, u32 dev_instance,
     case VNET_FLOW_TYPE_IP4_L2TPV3OIP:
     case VNET_FLOW_TYPE_IP4_IPSEC_ESP:
     case VNET_FLOW_TYPE_IP4_IPSEC_AH:
+    case VNET_FLOW_TYPE_IP4_IP4:
+    case VNET_FLOW_TYPE_IP4_IP4_N_TUPLE:
+    case VNET_FLOW_TYPE_IP4_IP6:
+    case VNET_FLOW_TYPE_IP4_IP6_N_TUPLE:
+    case VNET_FLOW_TYPE_IP6_IP4:
+    case VNET_FLOW_TYPE_IP6_IP4_N_TUPLE:
+    case VNET_FLOW_TYPE_IP6_IP6:
+    case VNET_FLOW_TYPE_IP6_IP6_N_TUPLE:
+    case VNET_FLOW_TYPE_GENERIC:
       if ((rv = dpdk_flow_add (xd, flow, fe)))
 	goto done;
       break;

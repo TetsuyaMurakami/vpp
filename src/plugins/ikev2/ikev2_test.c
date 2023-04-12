@@ -32,7 +32,7 @@
 #include <vnet/format_fns.h>
 #include <ikev2/ikev2.api_enum.h>
 #include <ikev2/ikev2.api_types.h>
-#include <vpp/api/vpe.api_types.h>
+#include <vlibmemory/vlib.api_types.h>
 
 #define vl_endianfun		/* define message structures */
 #include <plugins/ikev2/ikev2.api.h>
@@ -1017,7 +1017,7 @@ static int
 api_ikev2_profile_set_udp_encap (vat_main_t * vam)
 {
   unformat_input_t *i = vam->input;
-  vl_api_ikev2_set_responder_t *mp;
+  vl_api_ikev2_profile_set_udp_encap_t *mp;
   int ret;
   u8 *name = 0;
 
@@ -1058,6 +1058,53 @@ static int
 api_ikev2_set_tunnel_interface (vat_main_t * vam)
 {
   return (0);
+}
+
+static int
+api_ikev2_set_responder_hostname (vat_main_t *vam)
+{
+  unformat_input_t *i = vam->input;
+  vl_api_ikev2_set_responder_hostname_t *mp;
+  int ret;
+  u8 *name = 0, *hn = 0;
+
+  while (unformat_check_input (i) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (i, "%U hostname %v", unformat_token, valid_chars, &name,
+		    &hn))
+	{
+	  vec_add1 (name, 0);
+	  vec_add1 (hn, 0);
+	}
+      else
+	{
+	  errmsg ("parse error '%U'", format_unformat_error, i);
+	  return -99;
+	}
+    }
+
+  if (!vec_len (name))
+    {
+      errmsg ("profile name must be specified");
+      return -99;
+    }
+
+  if (vec_len (name) > 64)
+    {
+      errmsg ("profile name too long");
+      return -99;
+    }
+
+  M (IKEV2_SET_RESPONDER_HOSTNAME, mp);
+
+  clib_memcpy (mp->name, name, vec_len (name));
+  clib_memcpy (mp->hostname, hn, vec_len (hn));
+  vec_free (name);
+  vec_free (hn);
+
+  S (mp);
+  W (ret);
+  return ret;
 }
 
 static int

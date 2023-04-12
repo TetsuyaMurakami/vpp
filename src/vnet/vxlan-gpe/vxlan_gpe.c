@@ -87,11 +87,12 @@ format_vxlan_gpe_tunnel (u8 * s, va_list * args)
   vxlan_gpe_tunnel_t *t = va_arg (*args, vxlan_gpe_tunnel_t *);
   vxlan_gpe_main_t *ngm = &vxlan_gpe_main;
 
-  s = format (s, "[%d] lcl %U rmt %U vni %d fib-idx %d sw-if-idx %d ",
-	      t - ngm->tunnels,
-	      format_ip46_address, &t->local, IP46_TYPE_ANY,
-	      format_ip46_address, &t->remote, IP46_TYPE_ANY,
-	      t->vni, t->encap_fib_index, t->sw_if_index);
+  s = format (s,
+	      "[%d] lcl %U rmt %U lcl_port %d rmt_port %d vni %d "
+	      "fib-idx %d sw-if-idx %d ",
+	      t - ngm->tunnels, format_ip46_address, &t->local, IP46_TYPE_ANY,
+	      format_ip46_address, &t->remote, IP46_TYPE_ANY, t->local_port,
+	      t->remote_port, t->vni, t->encap_fib_index, t->sw_if_index);
 
 #if 0
   /* next_dpo not yet used by vxlan-gpe-encap node */
@@ -248,12 +249,14 @@ const static fib_node_vft_t vxlan_gpe_vft = {
   .fnv_back_walk = vxlan_gpe_tunnel_back_walk,
 };
 
-#define foreach_gpe_copy_field                  \
-_(vni)                                          \
-_(protocol)                                     \
-_(mcast_sw_if_index)                            \
-_(encap_fib_index)                              \
-_(decap_fib_index)
+#define foreach_gpe_copy_field                                                \
+  _ (vni)                                                                     \
+  _ (protocol)                                                                \
+  _ (mcast_sw_if_index)                                                       \
+  _ (encap_fib_index)                                                         \
+  _ (decap_fib_index)                                                         \
+  _ (local_port)                                                              \
+  _ (remote_port)
 
 #define foreach_copy_ipv4 {                     \
   _(local.ip4.as_u32)                           \
@@ -304,8 +307,8 @@ vxlan4_gpe_rewrite (vxlan_gpe_tunnel_t * t, u32 extension_size,
   ip0->checksum = ip4_header_checksum (ip0);
 
   /* UDP header, randomize src port on something, maybe? */
-  h0->udp.src_port = clib_host_to_net_u16 (4790);
-  h0->udp.dst_port = clib_host_to_net_u16 (UDP_DST_PORT_VXLAN_GPE);
+  h0->udp.src_port = clib_host_to_net_u16 (t->local_port);
+  h0->udp.dst_port = clib_host_to_net_u16 (t->remote_port);
 
   /* VXLAN header. Are we having fun yet? */
   h0->vxlan.flags = VXLAN_GPE_FLAGS_I | VXLAN_GPE_FLAGS_P;
@@ -363,8 +366,8 @@ vxlan6_gpe_rewrite (vxlan_gpe_tunnel_t * t, u32 extension_size,
   ip0->dst_address.as_u64[1] = t->remote.ip6.as_u64[1];
 
   /* UDP header, randomize src port on something, maybe? */
-  h0->udp.src_port = clib_host_to_net_u16 (4790);
-  h0->udp.dst_port = clib_host_to_net_u16 (UDP_DST_PORT_VXLAN_GPE);
+  h0->udp.src_port = clib_host_to_net_u16 (t->local_port);
+  h0->udp.dst_port = clib_host_to_net_u16 (t->remote_port);
 
   /* VXLAN header. Are we having fun yet? */
   h0->vxlan.flags = VXLAN_GPE_FLAGS_I | VXLAN_GPE_FLAGS_P;
@@ -453,12 +456,19 @@ int vnet_vxlan_gpe_add_del_tunnel
   vxlan6_gpe_tunnel_key_t key6, *key6_copy;
   u32 is_ip6 = a->is_ip6;
 
+  /* Set udp-ports */
+  if (a->local_port == 0)
+    a->local_port = is_ip6 ? UDP_DST_PORT_VXLAN6_GPE : UDP_DST_PORT_VXLAN_GPE;
+
+  if (a->remote_port == 0)
+    a->remote_port = is_ip6 ? UDP_DST_PORT_VXLAN6_GPE : UDP_DST_PORT_VXLAN_GPE;
+
   if (!is_ip6)
     {
       key4.local = a->local.ip4.as_u32;
       key4.remote = a->remote.ip4.as_u32;
       key4.vni = clib_host_to_net_u32 (a->vni << 8);
-      key4.pad = 0;
+      key4.port = (u32) clib_host_to_net_u16 (a->local_port);
 
       p = hash_get_mem (ngm->vxlan4_gpe_tunnel_by_key, &key4);
     }
@@ -469,6 +479,7 @@ int vnet_vxlan_gpe_add_del_tunnel
       key6.remote.as_u64[0] = a->remote.ip6.as_u64[0];
       key6.remote.as_u64[1] = a->remote.ip6.as_u64[1];
       key6.vni = clib_host_to_net_u32 (a->vni << 8);
+      key6.port = (u32) clib_host_to_net_u16 (a->local_port);
 
       p = hash_get_mem (ngm->vxlan6_gpe_tunnel_by_key, &key6);
     }
@@ -533,7 +544,7 @@ int vnet_vxlan_gpe_add_del_tunnel
 	  vnet_interface_main_t *im = &vnm->interface_main;
 	  hw_if_index = ngm->free_vxlan_gpe_tunnel_hw_if_indices
 	    [vec_len (ngm->free_vxlan_gpe_tunnel_hw_if_indices) - 1];
-	  _vec_len (ngm->free_vxlan_gpe_tunnel_hw_if_indices) -= 1;
+	  vec_dec_len (ngm->free_vxlan_gpe_tunnel_hw_if_indices, 1);
 
 	  hi = vnet_get_hw_interface (vnm, hw_if_index);
 	  hi->dev_instance = t - ngm->tunnels;
@@ -583,7 +594,8 @@ int vnet_vxlan_gpe_add_del_tunnel
       fib_prefix_t tun_remote_pfx;
       vnet_flood_class_t flood_class = VNET_FLOOD_CLASS_TUNNEL_NORMAL;
 
-      fib_prefix_from_ip46_addr (&t->remote, &tun_remote_pfx);
+      fib_protocol_t fp = fib_ip_proto (is_ip6);
+      fib_prefix_from_ip46_addr (fp, &t->remote, &tun_remote_pfx);
       if (!ip46_address_is_multicast (&t->remote))
 	{
 	  /* Unicast tunnel -
@@ -607,8 +619,6 @@ int vnet_vxlan_gpe_add_del_tunnel
 	   * with different VNIs, create the output fib adjacency only if
 	   * it does not already exist
 	   */
-	  fib_protocol_t fp = fib_ip_proto (is_ip6);
-
 	  if (vtep_addr_ref (&ngm->vtep_table,
 			     t->encap_fib_index, &t->remote) == 1)
 	    {
@@ -634,17 +644,16 @@ int vnet_vxlan_gpe_add_del_tunnel
 	       *  - the forwarding interface is for-us
 	       *  - the accepting interface is that from the API
 	       */
-	      mfib_table_entry_path_update (t->encap_fib_index,
-					    &mpfx,
-					    MFIB_SOURCE_VXLAN_GPE, &path);
+	      mfib_table_entry_path_update (t->encap_fib_index, &mpfx,
+					    MFIB_SOURCE_VXLAN_GPE,
+					    MFIB_ENTRY_FLAG_NONE, &path);
 
 	      path.frp_sw_if_index = a->mcast_sw_if_index;
 	      path.frp_flags = FIB_ROUTE_PATH_FLAG_NONE;
 	      path.frp_mitf_flags = MFIB_ITF_FLAG_ACCEPT;
-	      mfei = mfib_table_entry_path_update (t->encap_fib_index,
-						   &mpfx,
-						   MFIB_SOURCE_VXLAN_GPE,
-						   &path);
+	      mfei = mfib_table_entry_path_update (
+		t->encap_fib_index, &mpfx, MFIB_SOURCE_VXLAN_GPE,
+		MFIB_ENTRY_FLAG_NONE, &path);
 
 	      /*
 	       * Create the mcast adjacency to send traffic to the group
@@ -719,12 +728,12 @@ int vnet_vxlan_gpe_add_del_tunnel
   if (a->is_add)
     {
       /* register udp ports */
-      if (!is_ip6 && !udp_is_valid_dst_port (UDP_DST_PORT_VXLAN_GPE, 1))
-	udp_register_dst_port (ngm->vlib_main, UDP_DST_PORT_VXLAN_GPE,
-			       vxlan4_gpe_input_node.index, 1 /* is_ip4 */ );
-      if (is_ip6 && !udp_is_valid_dst_port (UDP_DST_PORT_VXLAN6_GPE, 0))
-	udp_register_dst_port (ngm->vlib_main, UDP_DST_PORT_VXLAN6_GPE,
-			       vxlan6_gpe_input_node.index, 0 /* is_ip4 */ );
+      if (!is_ip6 && !udp_is_valid_dst_port (a->local_port, 1))
+	udp_register_dst_port (ngm->vlib_main, a->local_port,
+			       vxlan4_gpe_input_node.index, 1 /* is_ip4 */);
+      if (is_ip6 && !udp_is_valid_dst_port (a->remote_port, 0))
+	udp_register_dst_port (ngm->vlib_main, a->remote_port,
+			       vxlan6_gpe_input_node.index, 0 /* is_ip4 */);
     }
 
   return 0;
@@ -749,6 +758,8 @@ vxlan_gpe_add_del_tunnel_command_fn (vlib_main_t * vm,
   u8 protocol = VXLAN_GPE_PROTOCOL_IP4;
   u32 vni;
   u8 vni_set = 0;
+  u32 local_port = 0;
+  u32 remote_port = 0;
   int rv;
   u32 tmp;
   vnet_vxlan_gpe_add_del_tunnel_args_t _a, *a = &_a;
@@ -833,6 +844,10 @@ vxlan_gpe_add_del_tunnel_command_fn (vlib_main_t * vm,
 	}
       else if (unformat (line_input, "vni %d", &vni))
 	vni_set = 1;
+      else if (unformat (line_input, "local_port %d", &local_port))
+	;
+      else if (unformat (line_input, "remote_port %d", &remote_port))
+	;
       else if (unformat (line_input, "next-ip4"))
 	protocol = VXLAN_GPE_PROTOCOL_IP4;
       else if (unformat (line_input, "next-ip6"))
@@ -1087,11 +1102,12 @@ set_ip4_vxlan_gpe_bypass (vlib_main_t * vm,
 }
 
 /*?
- * This command adds the 'ip4-vxlan-gpe-bypass' graph node for a given interface.
- * By adding the IPv4 vxlan-gpe-bypass graph node to an interface, the node checks
- *  for and validate input vxlan_gpe packet and bypass ip4-lookup, ip4-local,
- * ip4-udp-lookup nodes to speedup vxlan_gpe packet forwarding. This node will
- * cause extra overhead to for non-vxlan_gpe packets which is kept at a minimum.
+ * This command adds the 'ip4-vxlan-gpe-bypass' graph node for a given
+ * interface. By adding the IPv4 vxlan-gpe-bypass graph node to an interface,
+ * the node checks for and validate input vxlan_gpe packet and bypass
+ * ip4-lookup, ip4-local, ip4-udp-lookup nodes to speedup vxlan_gpe packet
+ * forwarding. This node will cause extra overhead to for non-vxlan_gpe
+ * packets which is kept at a minimum.
  *
  * @cliexpar
  * @parblock
@@ -1108,10 +1124,10 @@ set_ip4_vxlan_gpe_bypass (vlib_main_t * vm,
  *
  * Example of graph node after ip4-vxlan-gpe-bypass is enabled:
  * @cliexstart{show vlib graph ip4-vxlan-gpe-bypass}
- *            Name                      Next                    Previous
- * ip4-vxlan-gpe-bypass                error-drop [0]               ip4-input
- *                                vxlan4-gpe-input [1]        ip4-input-no-checksum
- *                                 ip4-lookup [2]
+ *            Name             Next                      Previous
+ * ip4-vxlan-gpe-bypass       error-drop [0]            ip4-input
+ *                       vxlan4-gpe-input [1]      ip4-input-no-checksum
+ *                        ip4-lookup [2]
  * @cliexend
  *
  * Example of how to display the feature enabled on an interface:
@@ -1144,11 +1160,12 @@ set_ip6_vxlan_gpe_bypass (vlib_main_t * vm,
 }
 
 /*?
- * This command adds the 'ip6-vxlan-gpe-bypass' graph node for a given interface.
- * By adding the IPv6 vxlan-gpe-bypass graph node to an interface, the node checks
- *  for and validate input vxlan_gpe packet and bypass ip6-lookup, ip6-local,
- * ip6-udp-lookup nodes to speedup vxlan_gpe packet forwarding. This node will
- * cause extra overhead to for non-vxlan_gpe packets which is kept at a minimum.
+ * This command adds the 'ip6-vxlan-gpe-bypass' graph node for a given
+ * interface. By adding the IPv6 vxlan-gpe-bypass graph node to an interface,
+ * the node checks for and validate input vxlan_gpe packet and bypass
+ * ip6-lookup, ip6-local, ip6-udp-lookup nodes to speedup vxlan_gpe packet
+ * forwarding. This node will cause extra overhead to for non-vxlan_gpe packets
+ * which is kept at a minimum.
  *
  * @cliexpar
  * @parblock
@@ -1165,10 +1182,10 @@ set_ip6_vxlan_gpe_bypass (vlib_main_t * vm,
  *
  * Example of graph node after ip6-vxlan-gpe-bypass is enabled:
  * @cliexstart{show vlib graph ip6-vxlan-gpe-bypass}
- *            Name                      Next                    Previous
- * ip6-vxlan-gpe-bypass                error-drop [0]               ip6-input
- *                                vxlan6-gpe-input [1]        ip4-input-no-checksum
- *                                 ip6-lookup [2]
+ *            Name               Next                    Previous
+ * ip6-vxlan-gpe-bypass         error-drop [0]          ip6-input
+ *                         vxlan6-gpe-input [1]    ip4-input-no-checksum
+ *                          ip6-lookup [2]
  * @cliexend
  *
  * Example of how to display the feature enabled on an interface:

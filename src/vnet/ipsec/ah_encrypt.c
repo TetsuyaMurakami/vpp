@@ -22,6 +22,7 @@
 #include <vnet/ipsec/ipsec.h>
 #include <vnet/ipsec/esp.h>
 #include <vnet/ipsec/ah.h>
+#include <vnet/ipsec/ipsec.api_enum.h>
 #include <vnet/tunnel/tunnel_dp.h>
 
 #define foreach_ah_encrypt_next \
@@ -37,26 +38,6 @@ typedef enum
 #undef _
     AH_ENCRYPT_N_NEXT,
 } ah_encrypt_next_t;
-
-#define foreach_ah_encrypt_error                                \
- _(RX_PKTS, "AH pkts received")                                 \
- _(CRYPTO_ENGINE_ERROR, "crypto engine error (packet dropped)") \
- _(SEQ_CYCLED, "sequence number cycled")
-
-
-typedef enum
-{
-#define _(sym,str) AH_ENCRYPT_ERROR_##sym,
-  foreach_ah_encrypt_error
-#undef _
-    AH_ENCRYPT_N_ERROR,
-} ah_encrypt_error_t;
-
-static char *ah_encrypt_error_strings[] = {
-#define _(sym,string) string,
-  foreach_ah_encrypt_error
-#undef _
-};
 
 typedef struct
 {
@@ -100,8 +81,10 @@ ah_process_ops (vlib_main_t * vm, vlib_node_runtime_t * node,
       if (op->status != VNET_CRYPTO_OP_STATUS_COMPLETED)
 	{
 	  u32 bi = op->user_data;
-	  b[bi]->error = node->errors[AH_ENCRYPT_ERROR_CRYPTO_ENGINE_ERROR];
-	  nexts[bi] = AH_ENCRYPT_NEXT_DROP;
+	  ah_encrypt_set_next_index (b[bi], node, vm->thread_index,
+				     AH_ENCRYPT_ERROR_CRYPTO_ENGINE_ERROR, bi,
+				     nexts, AH_ENCRYPT_NEXT_DROP,
+				     vnet_buffer (b[bi])->ipsec.sad_index);
 	  n_fail--;
 	}
       op++;
@@ -172,19 +155,20 @@ ah_encrypt_inline (vlib_main_t * vm,
 	{
 	  if (current_sa_index != ~0)
 	    vlib_increment_combined_counter (&ipsec_sa_counters, thread_index,
-					     current_sa_index,
-					     current_sa_pkts,
+					     current_sa_index, current_sa_pkts,
 					     current_sa_bytes);
 	  current_sa_index = vnet_buffer (b[0])->ipsec.sad_index;
-	  sa0 = pool_elt_at_index (im->sad, current_sa_index);
+	  sa0 = ipsec_sa_get (current_sa_index);
 
 	  current_sa_bytes = current_sa_pkts = 0;
+	  vlib_prefetch_combined_counter (&ipsec_sa_counters, thread_index,
+					  current_sa_index);
 	}
 
       pd->sa_index = current_sa_index;
       next[0] = AH_ENCRYPT_NEXT_DROP;
 
-      if (PREDICT_FALSE (~0 == sa0->thread_index))
+      if (PREDICT_FALSE ((u16) ~0 == sa0->thread_index))
 	{
 	  /* this is the first packet to use this SA, claim the SA
 	   * for this thread. this could happen simultaneously on
@@ -202,7 +186,9 @@ ah_encrypt_inline (vlib_main_t * vm,
 
       if (PREDICT_FALSE (esp_seq_advance (sa0)))
 	{
-	  b[0]->error = node->errors[AH_ENCRYPT_ERROR_SEQ_CYCLED];
+	  ah_encrypt_set_next_index (b[0], node, vm->thread_index,
+				     AH_ENCRYPT_ERROR_SEQ_CYCLED, 0, next,
+				     AH_ENCRYPT_NEXT_DROP, current_sa_index);
 	  pd->skip = 1;
 	  goto next;
 	}
@@ -387,7 +373,7 @@ ah_encrypt_inline (vlib_main_t * vm,
     next:
       if (PREDICT_FALSE (b[0]->flags & VLIB_BUFFER_IS_TRACED))
 	{
-	  sa0 = vec_elt_at_index (im->sad, pd->sa_index);
+	  sa0 = ipsec_sa_get (pd->sa_index);
 	  ah_encrypt_trace_t *tr =
 	    vlib_add_trace (vm, node, b[0], sizeof (*tr));
 	  tr->spi = sa0->spi;
@@ -463,8 +449,8 @@ VLIB_REGISTER_NODE (ah4_encrypt_node) = {
   .format_trace = format_ah_encrypt_trace,
   .type = VLIB_NODE_TYPE_INTERNAL,
 
-  .n_errors = ARRAY_LEN(ah_encrypt_error_strings),
-  .error_strings = ah_encrypt_error_strings,
+  .n_errors = AH_ENCRYPT_N_ERROR,
+  .error_counters = ah_encrypt_error_counters,
 
   .n_next_nodes = AH_ENCRYPT_N_NEXT,
   .next_nodes = {
@@ -489,8 +475,8 @@ VLIB_REGISTER_NODE (ah6_encrypt_node) = {
   .format_trace = format_ah_encrypt_trace,
   .type = VLIB_NODE_TYPE_INTERNAL,
 
-  .n_errors = ARRAY_LEN(ah_encrypt_error_strings),
-  .error_strings = ah_encrypt_error_strings,
+  .n_errors = AH_ENCRYPT_N_ERROR,
+  .error_counters = ah_encrypt_error_counters,
 
   .n_next_nodes = AH_ENCRYPT_N_NEXT,
   .next_nodes = {
@@ -500,6 +486,25 @@ VLIB_REGISTER_NODE (ah6_encrypt_node) = {
   },
 };
 /* *INDENT-ON* */
+
+#ifndef CLIB_MARCH_VARIANT
+
+static clib_error_t *
+ah_encrypt_init (vlib_main_t *vm)
+{
+  ipsec_main_t *im = &ipsec_main;
+
+  im->ah4_enc_fq_index =
+    vlib_frame_queue_main_init (ah4_encrypt_node.index, 0);
+  im->ah6_enc_fq_index =
+    vlib_frame_queue_main_init (ah6_encrypt_node.index, 0);
+
+  return 0;
+}
+
+VLIB_INIT_FUNCTION (ah_encrypt_init);
+
+#endif
 
 /*
  * fd.io coding-style-patch-verification: ON

@@ -19,6 +19,7 @@
 #define _AVF_H_
 
 #include <avf/virtchnl.h>
+#include <avf/avf_advanced_flow.h>
 
 #include <vppinfra/types.h>
 #include <vppinfra/error_bootstrap.h>
@@ -29,11 +30,15 @@
 
 #include <vnet/interface.h>
 
+#include <vnet/devices/devices.h>
+#include <vnet/flow/flow.h>
+
 #define AVF_QUEUE_SZ_MAX                4096
 #define AVF_QUEUE_SZ_MIN                64
 
 #define AVF_AQ_ENQ_SUSPEND_TIME		50e-6
 #define AVF_AQ_ENQ_MAX_WAIT_TIME	250e-3
+#define AVF_AQ_BUF_SIZE			4096
 
 #define AVF_RESET_SUSPEND_TIME		20e-3
 #define AVF_RESET_MAX_WAIT_TIME		1
@@ -44,6 +49,7 @@
 #define AVF_RXD_STATUS(x)		(1ULL << x)
 #define AVF_RXD_STATUS_DD		AVF_RXD_STATUS(0)
 #define AVF_RXD_STATUS_EOP		AVF_RXD_STATUS(1)
+#define AVF_RXD_STATUS_FLM		AVF_RXD_STATUS (11)
 #define AVF_RXD_ERROR_SHIFT		19
 #define AVF_RXD_PTYPE_SHIFT		30
 #define AVF_RXD_LEN_SHIFT		38
@@ -81,6 +87,7 @@
 
 
 extern vlib_log_class_registration_t avf_log;
+extern vlib_log_class_registration_t avf_stats_log;
 
 #define avf_log_err(dev, f, ...)                        \
   vlib_log (VLIB_LOG_LEVEL_ERR, avf_log.class, "%U: " f, \
@@ -97,16 +104,20 @@ extern vlib_log_class_registration_t avf_log;
             format_vlib_pci_addr, &dev->pci_addr, \
             ## __VA_ARGS__)
 
-#define foreach_avf_device_flags \
-  _(0, INITIALIZED, "initialized") \
-  _(1, ERROR, "error") \
-  _(2, ADMIN_UP, "admin-up") \
-  _(3, VA_DMA, "vaddr-dma") \
-  _(4, LINK_UP, "link-up") \
-  _(5, SHARED_TXQ_LOCK, "shared-txq-lock") \
-  _(6, ELOG, "elog") \
-  _(7, PROMISC, "promisc") \
-  _(8, RX_INT, "rx-interrupts")
+#define avf_stats_log_debug(dev, f, ...)                                      \
+  vlib_log (VLIB_LOG_LEVEL_DEBUG, avf_stats_log.class, "%U: " f,              \
+	    format_vlib_pci_addr, &dev->pci_addr, ##__VA_ARGS__)
+
+#define foreach_avf_device_flags                                              \
+  _ (0, INITIALIZED, "initialized")                                           \
+  _ (1, ERROR, "error")                                                       \
+  _ (2, ADMIN_UP, "admin-up")                                                 \
+  _ (3, VA_DMA, "vaddr-dma")                                                  \
+  _ (4, LINK_UP, "link-up")                                                   \
+  _ (6, ELOG, "elog")                                                         \
+  _ (7, PROMISC, "promisc")                                                   \
+  _ (8, RX_INT, "rx-interrupts")                                              \
+  _ (9, RX_FLOW_OFFLOAD, "rx-flow-offload")
 
 enum
 {
@@ -130,6 +141,10 @@ typedef volatile struct
       u64 rsv2:3;
       u64 ptype:8;
       u64 length:26;
+
+      u64 rsv3 : 64;
+      u32 flex_lo;
+      u32 fdid_flex_hi;
     };
     u64 qword[4];
 #ifdef CLIB_HAVE_VEC256
@@ -140,7 +155,7 @@ typedef volatile struct
 
 STATIC_ASSERT_SIZEOF (avf_rx_desc_t, 32);
 
-typedef volatile struct
+typedef struct
 {
   union
   {
@@ -173,13 +188,33 @@ typedef struct
   volatile u32 *qtx_tail;
   u16 next;
   u16 size;
-  u32 ctx_desc_placeholder_bi;
+  u32 *ph_bufs;
   clib_spinlock_t lock;
   avf_tx_desc_t *descs;
   u32 *bufs;
   u16 n_enqueued;
   u16 *rs_slots;
+
+  avf_tx_desc_t *tmp_descs;
+  u32 *tmp_bufs;
+  u32 queue_index;
 } avf_txq_t;
+
+typedef struct
+{
+  u32 flow_index;
+  u32 mark;
+  u8 flow_type_flag;
+  struct avf_fdir_conf *rcfg;
+  struct virtchnl_rss_cfg *rss_cfg;
+} avf_flow_entry_t;
+
+typedef struct
+{
+  u32 flow_id;
+  u16 next_index;
+  i16 buffer_advance;
+} avf_flow_lookup_entry_t;
 
 typedef struct
 {
@@ -213,7 +248,7 @@ typedef struct
   virtchnl_pf_event_t *events;
 
   u16 vsi_id;
-  u32 feature_bitmap;
+  u32 cap_flags;
   u8 hwaddr[6];
   u16 num_queue_pairs;
   u16 max_vectors;
@@ -223,6 +258,10 @@ typedef struct
   u32 rss_lut_size;
   virtchnl_link_speed_t link_speed;
   vlib_pci_addr_t pci_addr;
+
+  /* flow */
+  avf_flow_entry_t *flow_entries;		/* pool */
+  avf_flow_lookup_entry_t *flow_lookup_entries; /* pool */
 
   /* stats */
   virtchnl_eth_stats_t eth_stats;
@@ -246,6 +285,7 @@ typedef enum
 {
   AVF_PROCESS_REQ_ADD_DEL_ETH_ADDR = 1,
   AVF_PROCESS_REQ_CONFIG_PROMISC_MDDE = 2,
+  AVF_PROCESS_REQ_PROGRAM_FLOW = 3,
 } avf_process_req_type_t;
 
 typedef struct
@@ -255,6 +295,14 @@ typedef struct
   u32 calling_process_index;
   u8 eth_addr[6];
   int is_add, is_enable;
+  enum virthnl_adv_ops vc_op;
+
+  /* below parameters are used for 'program flow' event */
+  u8 *rule;
+  u32 rule_len;
+  u8 *program_status;
+  u32 status_len;
+
   clib_error_t *error;
 } avf_process_req_t;
 
@@ -268,7 +316,9 @@ typedef struct
 {
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
   vlib_buffer_t *bufs[AVF_RX_VECTOR_SZ];
+  u16 next[AVF_RX_VECTOR_SZ];
   u64 qw1s[AVF_RX_VECTOR_SZ];
+  u32 flow_ids[AVF_RX_VECTOR_SZ];
   avf_rx_tail_t tails[AVF_RX_VECTOR_SZ];
   vlib_buffer_t buffer_template;
 } avf_per_thread_data_t;
@@ -289,6 +339,7 @@ typedef struct
   u8 *name;
   int enable_elog;
   u16 rxq_num;
+  u16 txq_num;
   u16 rxq_size;
   u16 txq_size;
   /* return */
@@ -303,16 +354,34 @@ extern vlib_node_registration_t avf_input_node;
 extern vlib_node_registration_t avf_process_node;
 extern vnet_device_class_t avf_device_class;
 
+clib_error_t *avf_program_flow (u32 dev_instance, int is_add,
+				enum virthnl_adv_ops vc_op, u8 *rule,
+				u32 rule_len, u8 *program_status,
+				u32 status_len);
+
 /* format.c */
 format_function_t format_avf_device;
 format_function_t format_avf_device_name;
 format_function_t format_avf_input_trace;
+format_function_t format_avf_vf_cap_flags;
+format_function_t format_avf_vlan_supported_caps;
+format_function_t format_avf_vlan_caps;
+format_function_t format_avf_vlan_support;
+format_function_t format_avf_eth_stats;
+vnet_flow_dev_ops_function_t avf_flow_ops_fn;
 
 static_always_inline avf_device_t *
 avf_get_device (u32 dev_instance)
 {
   return pool_elt_at_index (avf_main.devices, dev_instance)[0];
 }
+
+/* elog.c */
+void avf_elog_init ();
+void avf_elog_reg (avf_device_t *ad, u32 addr, u32 val, int is_read);
+void avf_elog_aq_enq_req (avf_device_t *ad, avf_aq_desc_t *d);
+void avf_elog_aq_enq_resp (avf_device_t *ad, avf_aq_desc_t *d);
+void avf_elog_arq_desc (avf_device_t *ad, avf_aq_desc_t *d);
 
 static inline u32
 avf_get_u32 (void *start, int offset)
@@ -357,13 +426,20 @@ avf_set_u32 (void *start, int offset, u32 value)
 static inline void
 avf_reg_write (avf_device_t * ad, u32 addr, u32 val)
 {
+  if (ad->flags & AVF_DEVICE_F_ELOG)
+    avf_elog_reg (ad, addr, val, 0);
   *(volatile u32 *) ((u8 *) ad->bar0 + addr) = val;
 }
 
 static inline u32
 avf_reg_read (avf_device_t * ad, u32 addr)
 {
-  return *(volatile u32 *) (ad->bar0 + addr);
+  u32 val = *(volatile u32 *) (ad->bar0 + addr);
+
+  if (ad->flags & AVF_DEVICE_F_ELOG)
+    avf_elog_reg (ad, addr, val, 1);
+
+  return val;
 }
 
 static inline void
@@ -401,6 +477,7 @@ typedef struct
   u16 qid;
   u16 next_index;
   u32 hw_if_index;
+  u32 flow_id;
   u64 qw1s[AVF_RX_MAX_DESC_IN_CHAIN];
 } avf_input_trace_t;
 

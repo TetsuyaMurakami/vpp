@@ -165,7 +165,8 @@ punt_socket_register_l4 (vlib_main_t * vm,
       punt_client_l4_db_add (af, port, c - pm->punt_client_pool);
     }
 
-  memcpy (c->caddr.sun_path, client_pathname, sizeof (c->caddr.sun_path));
+  snprintf (c->caddr.sun_path, sizeof (c->caddr.sun_path), "%s",
+	    client_pathname);
   c->caddr.sun_family = AF_UNIX;
   c->reg.type = PUNT_TYPE_L4;
   c->reg.punt.l4.port = port;
@@ -197,7 +198,8 @@ punt_socket_register_ip_proto (vlib_main_t * vm,
       punt_client_ip_proto_db_add (af, proto, c - pm->punt_client_pool);
     }
 
-  memcpy (c->caddr.sun_path, client_pathname, sizeof (c->caddr.sun_path));
+  snprintf (c->caddr.sun_path, sizeof (c->caddr.sun_path), "%s",
+	    client_pathname);
   c->caddr.sun_family = AF_UNIX;
   c->reg.type = PUNT_TYPE_IP_PROTO;
   c->reg.punt.ip_proto.protocol = proto;
@@ -227,7 +229,8 @@ punt_socket_register_exception (vlib_main_t * vm,
       punt_client_exception_db_add (reason, pc - pm->punt_client_pool);
     }
 
-  memcpy (pc->caddr.sun_path, client_pathname, sizeof (pc->caddr.sun_path));
+  snprintf (pc->caddr.sun_path, sizeof (pc->caddr.sun_path), "%s",
+	    client_pathname);
   pc->caddr.sun_family = AF_UNIX;
   pc->reg.type = PUNT_TYPE_EXCEPTION;
   pc->reg.punt.exception.reason = reason;
@@ -369,6 +372,8 @@ punt_l4_add_del (vlib_main_t * vm,
 		 ip_address_family_t af,
 		 ip_protocol_t protocol, u16 port, bool is_add)
 {
+  int is_ip4 = af == AF_IP4;
+
   /* For now we only support TCP and UDP punt */
   if (protocol != IP_PROTOCOL_UDP && protocol != IP_PROTOCOL_TCP)
     return clib_error_return (0,
@@ -378,19 +383,22 @@ punt_l4_add_del (vlib_main_t * vm,
   if (port == (u16) ~ 0)
     {
       if (protocol == IP_PROTOCOL_UDP)
-	udp_punt_unknown (vm, af == AF_IP4, is_add);
+	udp_punt_unknown (vm, is_ip4, is_add);
       else if (protocol == IP_PROTOCOL_TCP)
-	tcp_punt_unknown (vm, af == AF_IP4, is_add);
+	tcp_punt_unknown (vm, is_ip4, is_add);
 
       return 0;
     }
 
   else if (is_add)
     {
+      const vlib_node_registration_t *punt_node =
+	is_ip4 ? &udp4_punt_node : &udp6_punt_node;
+
       if (protocol == IP_PROTOCOL_TCP)
 	return clib_error_return (0, "punt TCP ports is not supported yet");
 
-      udp_register_dst_port (vm, port, udp4_punt_node.index, af == AF_IP4);
+      udp_register_dst_port (vm, port, punt_node->index, is_ip4);
 
       return 0;
     }
@@ -399,10 +407,36 @@ punt_l4_add_del (vlib_main_t * vm,
       if (protocol == IP_PROTOCOL_TCP)
 	return clib_error_return (0, "punt TCP ports is not supported yet");
 
-      udp_unregister_dst_port (vm, port, af == AF_IP4);
+      udp_unregister_dst_port (vm, port, is_ip4);
 
       return 0;
     }
+}
+
+/**
+ * @brief Request exception traffic punt.
+ *
+ * @param reason   Punting reason
+ *
+ * @returns 0 on success, non-zero value otherwise
+ */
+static clib_error_t *
+punt_exception_add_del (vlib_punt_reason_t reason, bool is_add)
+{
+  punt_main_t *pm = &punt_main;
+  int rv = 0;
+  vnet_punt_reason_flag_t flag = vlib_punt_reason_get_flags (reason);
+  const char *node_name =
+    vnet_punt_reason_flag_is_IP6_PACKET (flag) ? "ip6-punt" : "ip4-punt";
+  if (is_add)
+    rv = vlib_punt_register (pm->hdl, reason, node_name);
+  else
+    rv = vlib_punt_unregister (pm->hdl, reason, node_name);
+  if (!rv)
+    return 0;
+  else
+    return clib_error_return (0, is_add ? "Existing punting registration..." :
+					  "Punting registration not found...");
 }
 
 clib_error_t *
@@ -414,6 +448,7 @@ vnet_punt_add_del (vlib_main_t * vm, const punt_reg_t * pr, bool is_add)
       return (punt_l4_add_del (vm, pr->punt.l4.af, pr->punt.l4.protocol,
 			       pr->punt.l4.port, is_add));
     case PUNT_TYPE_EXCEPTION:
+      return punt_exception_add_del (pr->punt.exception.reason, is_add);
     case PUNT_TYPE_IP_PROTO:
       break;
     }
@@ -449,6 +484,9 @@ punt_cli (vlib_main_t * vm,
     {
       if (unformat (input, "del"))
 	is_add = false;
+      else if (unformat (input, "reason %U", unformat_punt_reason,
+			 &pr.punt.exception.reason))
+	pr.type = PUNT_TYPE_EXCEPTION;
       else if (unformat (input, "ipv4"))
 	pr.punt.l4.af = AF_IP4;
       else if (unformat (input, "ipv6"))
@@ -551,6 +589,9 @@ punt_socket_register_cmd (vlib_main_t * vm,
 	pr.punt.l4.port = ~0;
       else if (unformat (input, "socket %s", &socket_name))
 	;
+      else if (unformat (input, "reason %U", unformat_punt_reason,
+			 &pr.punt.exception.reason))
+	pr.type = PUNT_TYPE_EXCEPTION;
       else
 	{
 	  error = clib_error_return (0, "parse error: '%U'",
@@ -622,6 +663,9 @@ punt_socket_deregister_cmd (vlib_main_t * vm,
 	;
       else if (unformat (input, "all"))
 	pr.punt.l4.port = ~0;
+      else if (unformat (input, "reason %U", unformat_punt_reason,
+			 &pr.punt.exception.reason))
+	pr.type = PUNT_TYPE_EXCEPTION;
       else
 	{
 	  error = clib_error_return (0, "parse error: '%U'",
@@ -807,6 +851,19 @@ ip_punt_init (vlib_main_t * vm)
 			CLIB_CACHE_LINE_BYTES);
 
   return (error);
+}
+
+u8 *
+format_vnet_punt_reason_flags (u8 *s, va_list *args)
+{
+  vnet_punt_reason_flag_t flag = va_arg (*args, int);
+#define _(pos, len, value, name, str)                                         \
+  if (vnet_punt_reason_flag_is_##name (flag))                                 \
+    s = format (s, "%s ", str);
+
+  foreach_vnet_punt_reason_flag
+#undef _
+    return (s);
 }
 
 VLIB_INIT_FUNCTION (ip_punt_init);

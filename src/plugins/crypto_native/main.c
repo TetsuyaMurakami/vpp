@@ -63,15 +63,11 @@ clib_error_t *
 crypto_native_init (vlib_main_t * vm)
 {
   crypto_native_main_t *cm = &crypto_native_main;
-  vlib_thread_main_t *tm = vlib_get_thread_main ();
   clib_error_t *error = 0;
 
   if (clib_cpu_supports_x86_aes () == 0 &&
       clib_cpu_supports_aarch64_aes () == 0)
     return 0;
-
-  vec_validate_aligned (cm->per_thread_data, tm->n_vlib_mains - 1,
-			CLIB_CACHE_LINE_BYTES);
 
   cm->crypto_engine_index =
     vnet_crypto_register_engine (vm, "native", 100,
@@ -79,8 +75,11 @@ crypto_native_init (vlib_main_t * vm)
 
   if (0);
 #if __x86_64__
-  else if (crypto_native_aes_cbc_init_icl && clib_cpu_supports_vaes ())
+  else if (crypto_native_aes_cbc_init_icl && clib_cpu_supports_vaes () &&
+	   clib_cpu_supports_avx512f ())
     error = crypto_native_aes_cbc_init_icl (vm);
+  else if (crypto_native_aes_cbc_init_adl && clib_cpu_supports_vaes ())
+    error = crypto_native_aes_cbc_init_adl (vm);
   else if (crypto_native_aes_cbc_init_skx && clib_cpu_supports_avx512f ())
     error = crypto_native_aes_cbc_init_skx (vm);
   else if (crypto_native_aes_cbc_init_hsw && clib_cpu_supports_avx2 ())
@@ -96,13 +95,16 @@ crypto_native_init (vlib_main_t * vm)
     error = clib_error_return (0, "No AES CBC implemenation available");
 
   if (error)
-    goto error;
+    return error;
 
 #if __x86_64__
   if (clib_cpu_supports_pclmulqdq ())
     {
-      if (crypto_native_aes_gcm_init_icl && clib_cpu_supports_vaes ())
+      if (crypto_native_aes_gcm_init_icl && clib_cpu_supports_vaes () &&
+	  clib_cpu_supports_avx512f ())
 	error = crypto_native_aes_gcm_init_icl (vm);
+      else if (crypto_native_aes_gcm_init_adl && clib_cpu_supports_vaes ())
+	error = crypto_native_aes_gcm_init_adl (vm);
       else if (crypto_native_aes_gcm_init_skx && clib_cpu_supports_avx512f ())
 	error = crypto_native_aes_gcm_init_skx (vm);
       else if (crypto_native_aes_gcm_init_hsw && clib_cpu_supports_avx2 ())
@@ -113,7 +115,7 @@ crypto_native_init (vlib_main_t * vm)
 	error = clib_error_return (0, "No AES GCM implemenation available");
 
       if (error)
-	goto error;
+	return error;
     }
 #endif
 #if __aarch64__
@@ -123,18 +125,12 @@ crypto_native_init (vlib_main_t * vm)
     error = clib_error_return (0, "No AES GCM implemenation available");
 
   if (error)
-    goto error;
+    return error;
 #endif
 
   vnet_crypto_register_key_handler (vm, cm->crypto_engine_index,
 				    crypto_native_key_handler);
-
-
-error:
-  if (error)
-    vec_free (cm->per_thread_data);
-
-  return error;
+  return 0;
 }
 
 /* *INDENT-OFF* */

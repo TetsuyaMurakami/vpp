@@ -65,95 +65,6 @@ typedef CLIB_PACKED (struct
 #define MAX_DELAY_BETWEEN_RAS                    1800	/* seconds */
 #define MAX_RA_DELAY_TIME                                          .5	/* seconds */
 
-/* advertised prefix option */
-typedef struct
-{
-  /* basic advertised information */
-  ip6_address_t prefix;
-  u8 prefix_len;
-  int adv_on_link_flag;
-  int adv_autonomous_flag;
-  u32 adv_valid_lifetime_in_secs;
-  u32 adv_pref_lifetime_in_secs;
-
-  /* advertised values are computed from these times if decrementing */
-  f64 valid_lifetime_expires;
-  f64 pref_lifetime_expires;
-
-  /* local information */
-  int enabled;
-  int deprecated_prefix_flag;
-  int decrement_lifetime_flag;
-
-#define MIN_ADV_VALID_LIFETIME 7203	/* seconds */
-#define DEF_ADV_VALID_LIFETIME  2592000
-#define DEF_ADV_PREF_LIFETIME 604800
-
-  /* extensions are added here, mobile, DNS etc.. */
-} ip6_radv_prefix_t;
-
-typedef struct ip6_ra_t_
-{
-  /* advertised config information, zero means unspecified  */
-  u8 curr_hop_limit;
-  int adv_managed_flag;
-  int adv_other_flag;
-  u16 adv_router_lifetime_in_sec;
-  u32 adv_neighbor_reachable_time_in_msec;
-  u32 adv_time_in_msec_between_retransmitted_neighbor_solicitations;
-
-  /* mtu option */
-  u32 adv_link_mtu;
-
-  /* local information */
-  u32 sw_if_index;
-  int send_radv;		/* radv on/off on this interface -  set by config */
-  int cease_radv;		/* we are ceasing  to send  - set byf config */
-  int send_unicast;
-  int adv_link_layer_address;
-  int prefix_option;
-  int failed_device_check;
-  int ref_count;
-
-  /* prefix option */
-  ip6_radv_prefix_t *adv_prefixes_pool;
-
-  /* Hash table mapping address to index in interface advertised  prefix pool. */
-  mhash_t address_to_prefix_index;
-
-  f64 max_radv_interval;
-  f64 min_radv_interval;
-  f64 min_delay_between_radv;
-  f64 max_delay_between_radv;
-  f64 max_rtr_default_lifetime;
-
-  f64 last_radv_time;
-  f64 last_multicast_time;
-  f64 next_multicast_time;
-
-
-  u32 initial_adverts_count;
-  f64 initial_adverts_interval;
-  u32 initial_adverts_sent;
-
-  /* stats */
-  u32 n_advertisements_sent;
-  u32 n_solicitations_rcvd;
-  u32 n_solicitations_dropped;
-
-  /* router solicitations sending state */
-  u8 keep_sending_rs;		/* when true then next fields are valid */
-  icmp6_send_router_solicitation_params_t params;
-  f64 sleep_interval;
-  f64 due_time;
-  u32 n_left;
-  f64 start_time;
-  vlib_buffer_t *buffer;
-
-  u32 seed;
-
-} ip6_ra_t;
-
 static ip6_link_delegate_id_t ip6_ra_delegate_id;
 static ip6_ra_t *ip6_ra_pool;
 
@@ -191,7 +102,7 @@ ip6_ra_report_unregister (ip6_ra_report_notify_t fn)
   }
 }
 
-static inline ip6_ra_t *
+ip6_ra_t *
 ip6_ra_get_itf (u32 sw_if_index)
 {
   index_t rai;
@@ -202,6 +113,28 @@ ip6_ra_get_itf (u32 sw_if_index)
     return (pool_elt_at_index (ip6_ra_pool, rai));
 
   return (NULL);
+}
+
+u8
+ip6_ra_adv_enabled (u32 sw_if_index)
+{
+  ip6_ra_t *ra;
+
+  ra = ip6_ra_get_itf (sw_if_index);
+
+  return ((ra != NULL) && (ra->send_radv != 0));
+}
+
+void
+ip6_ra_itf_walk (ip6_ra_itf_walk_fn_t fn, void *ctx)
+{
+  ip6_ra_t *radv_info;
+
+  pool_foreach (radv_info, ip6_ra_pool)
+    {
+      if (WALK_STOP == fn (radv_info->sw_if_index, ctx))
+	break;
+    }
 }
 
 /* for "syslogging" - use elog for now */
@@ -252,9 +185,10 @@ ip6_neighbor_syslog (vlib_main_t * vm, int priority, char *fmt, ...)
       {
 	u32 s[2];
       } *ed;
-      ed = ELOG_DATA (&vm->elog_main, e);
-      ed->s[0] = elog_string (&vm->elog_main, log_level_strings[priority]);
-      ed->s[1] = elog_string (&vm->elog_main, (char *) what);
+      ed = ELOG_DATA (vlib_get_elog_main (), e);
+      ed->s[0] =
+	elog_string (vlib_get_elog_main (), log_level_strings[priority]);
+      ed->s[1] = elog_string (vlib_get_elog_main (), (char *) what);
     }
   va_end (va);
   return;
@@ -269,6 +203,9 @@ typedef enum
   ICMP6_ROUTER_SOLICITATION_N_NEXT,
 } icmp6_router_solicitation_or_advertisement_next_t;
 
+/*
+ * Note: Both periodic RAs and solicited RS come through here.
+ */
 static_always_inline uword
 icmp6_router_solicitation (vlib_main_t * vm,
 			   vlib_node_runtime_t * node, vlib_frame_t * frame)
@@ -409,10 +346,9 @@ icmp6_router_solicitation (vlib_main_t * vm,
 
 		  radv_info = ip6_ra_get_itf (sw_if_index0);
 
-		  error0 = ((!radv_info) ?
-			    ICMP6_ERROR_ROUTER_SOLICITATION_RADV_NOT_CONFIG :
-			    error0);
-
+		  error0 = ((!radv_info || 0 == radv_info->send_radv) ?
+			      ICMP6_ERROR_ROUTER_SOLICITATION_RADV_NOT_CONFIG :
+			      error0);
 		  if (error0 == ICMP6_ERROR_NONE)
 		    {
 		      f64 now = vlib_time_now (vm);
@@ -634,6 +570,8 @@ icmp6_router_solicitation (vlib_main_t * vm,
 			  /* Reuse current MAC header, copy SMAC to DMAC and
 			   * interface MAC to SMAC */
 			  vlib_buffer_reset (p0);
+			  vlib_buffer_advance (
+			    p0, vnet_buffer (p0)->l2_hdr_offset);
 			  eth0 = vlib_buffer_get_current (p0);
 			  clib_memcpy (eth0->dst_address, eth0->src_address,
 				       6);
@@ -1131,7 +1069,6 @@ create_buffer_for_rs (vlib_main_t * vm, ip6_ra_t * radv_info)
     }
 
   p0 = vlib_get_buffer (vm, bi0);
-  VLIB_BUFFER_TRACE_TRAJECTORY_INIT (p0);
   p0->flags |= VNET_BUFFER_F_LOCALLY_ORIGINATED;
 
   vnet_buffer (p0)->sw_if_index[VLIB_RX] = sw_if_index;
@@ -1388,9 +1325,6 @@ ip6_ra_link_enable (u32 sw_if_index)
   radv_info->initial_adverts_count = MAX_INITIAL_RTR_ADVERTISEMENTS;
   radv_info->initial_adverts_sent = radv_info->initial_adverts_count - 1;
   radv_info->initial_adverts_interval = MAX_INITIAL_RTR_ADVERT_INTERVAL;
-
-  /* deafult is to send */
-  radv_info->send_radv = 1;
 
   /* fill in delegate for this interface that will be needed later */
   radv_info->adv_link_mtu =
@@ -1698,6 +1632,9 @@ ip6_ra_config (vlib_main_t * vm, u32 sw_if_index,
 
   if (!radv_info)
     return (VNET_API_ERROR_IP6_NOT_ENABLED);
+
+  /* Start off believing that we're going to send radv's */
+  radv_info->send_radv = 1;
 
   if ((max_interval != 0) && (min_interval == 0))
     min_interval = .75 * max_interval;
@@ -2024,8 +1961,7 @@ ip6_ra_cmd (vlib_main_t * vm,
 	}
       else
 	{
-	  error = unformat_parse_error (line_input);
-	  goto done;
+	  break;
 	}
     }
 
@@ -2170,7 +2106,6 @@ format_ip6_ra (u8 * s, va_list * args)
   return (s);
 }
 
-
 /*?
  * This command is used to configure the neighbor discovery
  * parameters on a given interface. Use the '<em>show ip6 interface</em>'
@@ -2178,9 +2113,16 @@ format_ip6_ra (u8 * s, va_list * args)
  * on a given interface. This command has three formats:
  *
  *
- * <b>Format 1 - Router Advertisement Options:</b> (Only one can be entered in a single command)
+ * <b>Format 1 - Router Advertisement Options:</b> (Only one can be entered in
+ * a single command)
  *
- * '<em><b>ip6 nd <interface> [no] [ra-managed-config-flag] | [ra-other-config-flag] | [ra-suppress] | [ra-suppress-link-layer] | [ra-send-unicast] | [ra-lifetime <lifetime>] | [ra-initial <cnt> <interval>] | [ra-interval <max-interval> [<min-interval>]] | [ra-cease]</b></em>'
+ * @clistart
+ * ip6 nd <interface> [no] [ra-managed-config-flag] |
+ *   [ra-other-config-flag] | [ra-suppress] | [ra-suppress-link-layer] |
+ *   [ra-send-unicast] | [ra-lifetime <lifetime>] |
+ *   [ra-initial <cnt> <interval>] |
+ *   [ra-interval <max-interval> [<min-interval>]] | [ra-cease]
+ * @cliend
  *
  * Where:
  *
@@ -2206,7 +2148,7 @@ format_ip6_ra (u8 * s, va_list * args)
  * and the '<em>no</em>' option returns it to this default state.
  *
  * <em>[no] ra-send-unicast</em> - Use the source address of the
- * router-solicitation message if availiable. The default is to use
+ * router-solicitation message if available. The default is to use
  * multicast address of all nodes, and the '<em>no</em>' option returns
  * it to this default state.
  *
@@ -2237,52 +2179,60 @@ format_ip6_ra (u8 * s, va_list * args)
  *
  * <b>Format 2 - Prefix Options:</b>
  *
- * '<em><b>ip6 nd <interface> [no] prefix <ip6-address>/<width> [<valid-lifetime> <pref-lifetime> | infinite] [no-advertise] [off-link] [no-autoconfig] [no-onlink]</b></em>'
+ * @clistart
+ * ip6 nd <interface> [no] prefix <ip6-address>/<width>
+ *   [<valid-lifetime> <pref-lifetime> | infinite] [no-advertise] [off-link]
+ *   [no-autoconfig] [no-onlink]
+ * @cliend
  *
  * Where:
  *
  * <em>no</em> - All additional flags are ignored and the prefix is deleted.
  *
- * <em><valid-lifetime> <pref-lifetime></em> - '<em><valid-lifetime></em>' is the
- * length of time in seconds during what the prefix is valid for the purpose of
- * on-link determination. Range is 7203 to 2592000 seconds and default is 2592000
- * seconds (30 days). '<em><pref-lifetime></em>' is the prefered-lifetime and is the
- * length of time in seconds during what addresses generated from the prefix remain
- * preferred. Range is 0 to 604800 seconds and default is 604800 seconds (7 days).
+ * <em><valid-lifetime> <pref-lifetime></em> - '<em><valid-lifetime></em>' is
+ * the length of time in seconds during what the prefix is valid for the
+ * purpose of on-link determination. Range is 7203 to 2592000 seconds and
+ * default is 2592000 seconds (30 days). '<em><pref-lifetime></em>' is the
+ * preferred-lifetime and is the length of time in seconds during what
+ * addresses generated from the prefix remain preferred. Range is 0 to 604800
+ * seconds and default is 604800 seconds (7 days).
  *
- * <em>infinite</em> - Both '<em><valid-lifetime></em>' and '<em><<pref-lifetime></em>'
- * are inifinte, no timeout.
+ * <em>infinite</em> - Both '<em><valid-lifetime></em>' and
+ * '<em><pref-lifetime></em>' are infinite, no timeout.
  *
  * <em>no-advertise</em> - Do not send full router address in prefix
  * advertisement. Default is to advertise (i.e. - This flag is off by default).
  *
- * <em>off-link</em> - Prefix is off-link, clear L-bit in packet. Default is on-link
- * (i.e. - This flag is off and L-bit in packet is set by default and this prefix can
- * be used for on-link determination). '<em>no-onlink</em>' also controls the L-bit.
+ * <em>off-link</em> - Prefix is off-link, clear L-bit in packet. Default is
+ * on-link (i.e. - This flag is off and L-bit in packet is set by default
+ * and this prefix can be used for on-link determination). '<em>no-onlink</em>'
+ * also controls the L-bit.
  *
- * <em>no-autoconfig</em> - Do not use prefix for autoconfiguration, clear A-bit in packet.
- * Default is autoconfig (i.e. - This flag is off and A-bit in packet is set by default.
+ * <em>no-autoconfig</em> - Do not use prefix for autoconfiguration, clear
+ * A-bit in packet. Default is autoconfig (i.e. - This flag is off and A-bit
+ * in packet is set by default.
  *
- * <em>no-onlink</em> - Do not use prefix for onlink determination, clear L-bit in packet.
- * Default is on-link (i.e. - This flag is off and L-bit in packet is set by default and
- * this prefix can be used for on-link determination). '<em>off-link</em>' also controls
- * the L-bit.
+ * <em>no-onlink</em> - Do not use prefix for onlink determination, clear L-bit
+ * in packet. Default is on-link (i.e. - This flag is off and L-bit in packet
+ * is set by default and this prefix can be used for on-link determination).
+ * '<em>off-link</em>' also controls the L-bit.
  *
  *
  * <b>Format 3: - Default of Prefix:</b>
  *
- * '<em><b>ip6 nd <interface> [no] prefix <ip6-address>/<width> default</b></em>'
+ * @cliexcmd{ip6 nd <interface> [no] prefix <ip6-address>/<width> default}
  *
- * When a new prefix is added (or existing one is being overwritten) <em>default</em>
- * uses default values for the prefix. If <em>no</em> is used, the <em>default</em>
- * is ignored and the prefix is deleted.
+ * When a new prefix is added (or existing one is being overwritten)
+ * <em>default</em> uses default values for the prefix. If <em>no</em> is
+ * used, the <em>default</em> is ignored and the prefix is deleted.
  *
  *
  * @cliexpar
  * Example of how set a router advertisement option:
  * @cliexcmd{ip6 nd GigabitEthernet2/0/0 ra-interval 100 20}
  * Example of how to add a prefix:
- * @cliexcmd{ip6 nd GigabitEthernet2/0/0 prefix fe80::fe:28ff:fe9c:75b3/64 infinite no-advertise}
+ * @cliexcmd{ip6 nd GigabitEthernet2/0/0 prefix fe80::fe:28ff:fe9c:75b3/64
+ * infinite no-advertise}
  * Example of how to delete a prefix:
  * @cliexcmd{ip6 nd GigabitEthernet2/0/0 no prefix fe80::fe:28ff:fe9c:75b3/64}
 ?*/

@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 #include "pnat.h"
+#include <vnet/vnet.h>
 #include <pnat/pnat.api_enum.h>
 #include <pnat/pnat.api_types.h>
 #include <vlibmemory/api.h>
@@ -22,6 +23,7 @@
 #include <vnet/ip/reass/ip4_sv_reass.h>
 #include <vnet/ip/reass/ip6_full_reass.h>
 #include <vnet/ip/reass/ip6_sv_reass.h>
+#include <vpp/app/version.h>
 
 /*
  * This file contains the API handlers for the pnat.api
@@ -34,8 +36,23 @@ static void vl_api_pnat_binding_add_t_handler(vl_api_pnat_binding_add_t *mp) {
     pnat_main_t *pm = &pnat_main;
     vl_api_pnat_binding_add_reply_t *rmp;
     u32 binding_index;
+
+    // for backward compatibility
+    if (mp->match.proto == 0)
+        mp->match.mask |= PNAT_PROTO;
+
     int rv = pnat_binding_add(&mp->match, &mp->rewrite, &binding_index);
     REPLY_MACRO2_END(VL_API_PNAT_BINDING_ADD_REPLY,
+                     ({ rmp->binding_index = binding_index; }));
+}
+
+static void
+vl_api_pnat_binding_add_v2_t_handler(vl_api_pnat_binding_add_t *mp) {
+    pnat_main_t *pm = &pnat_main;
+    vl_api_pnat_binding_add_reply_t *rmp;
+    u32 binding_index;
+    int rv = pnat_binding_add(&mp->match, &mp->rewrite, &binding_index);
+    REPLY_MACRO2_END(VL_API_PNAT_BINDING_ADD_V2_REPLY,
                      ({ rmp->binding_index = binding_index; }));
 }
 
@@ -45,11 +62,7 @@ vl_api_pnat_binding_attach_t_handler(vl_api_pnat_binding_attach_t *mp) {
     vl_api_pnat_binding_attach_reply_t *rmp;
     int rv;
 
-    /* Ensure that the interface exists */
-    if (!vnet_sw_if_index_is_api_valid(mp->sw_if_index)) {
-        rv = VNET_API_ERROR_INVALID_SW_IF_INDEX;
-        goto bad_sw_if_index;
-    }
+    VALIDATE_SW_IF_INDEX_END(mp);
 
     rv =
         pnat_binding_attach(mp->sw_if_index, mp->attachment, mp->binding_index);
@@ -64,11 +77,7 @@ vl_api_pnat_binding_detach_t_handler(vl_api_pnat_binding_detach_t *mp) {
     vl_api_pnat_binding_detach_reply_t *rmp;
     int rv;
 
-    /* Ensure that the interface exists */
-    if (!vnet_sw_if_index_is_api_valid(mp->sw_if_index)) {
-        rv = VNET_API_ERROR_INVALID_SW_IF_INDEX;
-        goto bad_sw_if_index;
-    }
+    VALIDATE_SW_IF_INDEX_END(mp);
 
     rv =
         pnat_binding_detach(mp->sw_if_index, mp->attachment, mp->binding_index);
@@ -143,9 +152,9 @@ static void send_interfaces_details(u32 index, vl_api_registration_t *rp,
     REPLY_MACRO_DETAILS4(
         VL_API_PNAT_INTERFACES_DETAILS, rp, context, ({
             rmp->sw_if_index = i->sw_if_index;
-            clib_memcpy(rmp->enabled, i->enabled, PNAT_ATTACHMENT_POINT_MAX);
+            clib_memcpy(rmp->enabled, i->enabled, sizeof(rmp->enabled));
             clib_memcpy(rmp->lookup_mask, i->lookup_mask,
-                        sizeof(i->lookup_mask) * PNAT_ATTACHMENT_POINT_MAX);
+                        sizeof(rmp->lookup_mask));
 
             /* Endian hack until apigen registers _details
              * endian functions */
@@ -193,7 +202,7 @@ clib_error_t *pnat_plugin_api_hookup(vlib_main_t *vm) {
  */
 #include <vnet/plugin/plugin.h>
 VLIB_PLUGIN_REGISTER() = {
-    .version = "0.0.1",
+    .version = VPP_BUILD_VER,
     .description = "Policy 1:1 NAT",
 };
 

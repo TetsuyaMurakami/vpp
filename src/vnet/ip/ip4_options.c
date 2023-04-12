@@ -78,10 +78,17 @@ VLIB_NODE_FN (ip4_options_node) (vlib_main_t * vm,
 	    {
 	    case IP4_ROUTER_ALERT_OPTION:
 	      /*
+	       * check the option length
+	       */
+	      if (options[1] != 4)
+		break;
+	      /*
 	       * if it's an IGMP packet, pass up the local stack
 	       */
 	      if (IP_PROTOCOL_IGMP == ip4->protocol)
 		{
+		  ip_lookup_set_buffer_fib_index (
+		    ip4_main.fib_index_by_sw_if_index, b);
 		  next = IP4_OPTIONS_NEXT_LOCAL;
 		}
 	      break;

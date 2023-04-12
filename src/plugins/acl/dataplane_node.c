@@ -176,7 +176,7 @@ prefetch_session_entry (acl_main_t * am, fa_full_session_id_t f_sess_id)
 {
   fa_session_t *sess = get_session_ptr_no_check (am, f_sess_id.thread_index,
 						 f_sess_id.session_index);
-  CLIB_PREFETCH (sess, 2 * CLIB_CACHE_LINE_BYTES, STORE);
+  CLIB_PREFETCH (sess, sizeof (*sess), STORE);
 }
 
 always_inline u8
@@ -277,7 +277,7 @@ acl_fa_node_common_prepare_fn (vlib_main_t * vm,
 	for (ii = ACL_PLUGIN_PREFETCH_GAP * vec_sz;
 	     ii < (ACL_PLUGIN_PREFETCH_GAP + 1) * vec_sz; ii++)
 	  {
-	    CLIB_PREFETCH (b[ii], CLIB_CACHE_LINE_BYTES, LOAD);
+	    clib_prefetch_load (b[ii]);
 	    CLIB_PREFETCH (b[ii]->data, 2 * CLIB_CACHE_LINE_BYTES, LOAD);
 	  }
       }
@@ -418,7 +418,7 @@ acl_fa_inner_node_fn (vlib_main_t * vm,
 		    {
 		      trace_bitmap |= 0x80000000;
 		    }
-		  ASSERT (f_sess_id.thread_index < vec_len (vlib_mains));
+		  ASSERT (f_sess_id.thread_index < vlib_get_n_threads ());
 		  b[0]->error = no_error_existing_session;
 		  acl_check_needed = 0;
 		  pkts_exist_session += 1;
@@ -945,11 +945,10 @@ VLIB_REGISTER_NODE (acl_out_fa_ip6_node) =
   }
 };
 
-VNET_FEATURE_INIT (acl_out_ip6_fa_feature, static) =
-{
+VNET_FEATURE_INIT (acl_out_ip6_fa_feature, static) = {
   .arc_name = "ip6-output",
   .node_name = "acl-plugin-out-ip6-fa",
-  .runs_before = VNET_FEATURES ("interface-output"),
+  .runs_before = VNET_FEATURES ("ip6-dvr-reinject", "interface-output"),
 };
 
 VLIB_REGISTER_NODE (acl_out_fa_ip4_node) =
@@ -968,11 +967,10 @@ VLIB_REGISTER_NODE (acl_out_fa_ip4_node) =
   }
 };
 
-VNET_FEATURE_INIT (acl_out_ip4_fa_feature, static) =
-{
+VNET_FEATURE_INIT (acl_out_ip4_fa_feature, static) = {
   .arc_name = "ip4-output",
   .node_name = "acl-plugin-out-ip4-fa",
-  .runs_before = VNET_FEATURES ("interface-output"),
+  .runs_before = VNET_FEATURES ("ip4-dvr-reinject", "interface-output"),
 };
 
 /* *INDENT-ON* */

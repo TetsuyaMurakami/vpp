@@ -18,9 +18,8 @@
 #include <http_static/http_static.h>
 #include <vpp/app/version.h>
 
-int
-handle_get_version (http_builtin_method_type_t reqtype,
-		    u8 * request, http_session_t * hs)
+hss_url_handler_rc_t
+handle_get_version (hss_url_handler_args_t *args)
 {
   u8 *s = 0;
 
@@ -29,11 +28,10 @@ handle_get_version (http_builtin_method_type_t reqtype,
   s = format (s, "   \"version\": \"%s\",", VPP_BUILD_VER);
   s = format (s, "   \"build_date\": \"%s\"}}\r\n", VPP_BUILD_DATE);
 
-  hs->data = s;
-  hs->data_offset = 0;
-  hs->cache_pool_index = ~0;
-  hs->free_data = 1;
-  return 0;
+  args->data = s;
+  args->data_len = vec_len (s);
+  args->free_vec_data = 1;
+  return HSS_URL_HANDLER_OK;
 }
 
 void
@@ -56,16 +54,15 @@ trim_path_from_request (u8 * s, char *path)
 	   * like a c-string.
 	   */
 	  *cp = 0;
-	  _vec_len (s) = cp - s;
+	  vec_set_len (s, cp - s);
 	  break;
 	}
       cp++;
     }
 }
 
-int
-handle_get_interface_stats (http_builtin_method_type_t reqtype,
-			    u8 * request, http_session_t * hs)
+hss_url_handler_rc_t
+handle_get_interface_stats (hss_url_handler_args_t *args)
 {
   u8 *s = 0, *stats = 0;
   uword *p;
@@ -81,16 +78,16 @@ handle_get_interface_stats (http_builtin_method_type_t reqtype,
   vnet_interface_main_t *im = &vnm->interface_main;
 
   /* Get stats for a single interface via http POST */
-  if (reqtype == HTTP_BUILTIN_METHOD_POST)
+  if (args->reqtype == HTTP_REQ_POST)
     {
-      trim_path_from_request (request, "interface_stats.json");
+      trim_path_from_request (args->request, "interface_stats.json");
 
       /* Find the sw_if_index */
-      p = hash_get (im->hw_interface_by_name, request);
+      p = hash_get (im->hw_interface_by_name, args->request);
       if (!p)
 	{
 	  s = format (s, "{\"interface_stats\": {[\n");
-	  s = format (s, "   \"name\": \"%s\",", request);
+	  s = format (s, "   \"name\": \"%s\",", args->request);
 	  s = format (s, "   \"error\": \"%s\"", "UnknownInterface");
 	  s = format (s, "]}\n");
 	  goto out;
@@ -133,18 +130,16 @@ handle_get_interface_stats (http_builtin_method_type_t reqtype,
   s = format (s, "]}\n");
 
 out:
-  hs->data = s;
-  hs->data_offset = 0;
-  hs->cache_pool_index = ~0;
-  hs->free_data = 1;
+  args->data = s;
+  args->data_len = vec_len (s);
+  args->free_vec_data = 1;
   vec_free (sw_if_indices);
   vec_free (stats);
-  return 0;
+  return HSS_URL_HANDLER_OK;
 }
 
-int
-handle_get_interface_list (http_builtin_method_type_t reqtype,
-			   u8 * request, http_session_t * hs)
+hss_url_handler_rc_t
+handle_get_interface_list (hss_url_handler_args_t *args)
 {
   u8 *s = 0;
   int i;
@@ -177,25 +172,23 @@ handle_get_interface_list (http_builtin_method_type_t reqtype,
   s = format (s, "]}\n");
   vec_free (hw_if_indices);
 
-  hs->data = s;
-  hs->data_offset = 0;
-  hs->cache_pool_index = ~0;
-  hs->free_data = 1;
-  return 0;
+  args->data = s;
+  args->data_len = vec_len (s);
+  args->free_vec_data = 1;
+  return HSS_URL_HANDLER_OK;
 }
 
 void
 builtinurl_handler_init (builtinurl_main_t * bm)
 {
 
-  bm->register_handler (handle_get_version, "version.json",
-			HTTP_BUILTIN_METHOD_GET);
+  bm->register_handler (handle_get_version, "version.json", HTTP_REQ_GET);
   bm->register_handler (handle_get_interface_list, "interface_list.json",
-			HTTP_BUILTIN_METHOD_GET);
-  bm->register_handler (handle_get_interface_stats,
-			"interface_stats.json", HTTP_BUILTIN_METHOD_GET);
-  bm->register_handler (handle_get_interface_stats,
-			"interface_stats.json", HTTP_BUILTIN_METHOD_POST);
+			HTTP_REQ_GET);
+  bm->register_handler (handle_get_interface_stats, "interface_stats.json",
+			HTTP_REQ_GET);
+  bm->register_handler (handle_get_interface_stats, "interface_stats.json",
+			HTTP_REQ_POST);
 }
 
 /*

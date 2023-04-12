@@ -41,14 +41,16 @@ uword
 unformat_ip_address (unformat_input_t * input, va_list * args)
 {
   ip_address_t *a = va_arg (*args, ip_address_t *);
+  ip_address_t tmp, *p_tmp = &tmp;
 
-  clib_memset (a, 0, sizeof (*a));
-  if (unformat (input, "%U", unformat_ip4_address, &ip_addr_v4 (a)))
-    ip_addr_version (a) = AF_IP4;
-  else if (unformat_user (input, unformat_ip6_address, &ip_addr_v6 (a)))
-    ip_addr_version (a) = AF_IP6;
+  clib_memset (p_tmp, 0, sizeof (*p_tmp));
+  if (unformat (input, "%U", unformat_ip4_address, &ip_addr_v4 (p_tmp)))
+    ip_addr_version (p_tmp) = AF_IP4;
+  else if (unformat_user (input, unformat_ip6_address, &ip_addr_v6 (p_tmp)))
+    ip_addr_version (p_tmp) = AF_IP6;
   else
     return 0;
+  *a = *p_tmp;
   return 1;
 }
 
@@ -344,23 +346,24 @@ ip_prefix_copy (void *dst, void *src)
 }
 
 int
-ip_prefix_cmp (ip_prefix_t * p1, ip_prefix_t * p2)
+ip_prefix_cmp (const ip_prefix_t *ipp1, const ip_prefix_t *ipp2)
 {
+  ip_prefix_t p1 = *ipp1, p2 = *ipp2;
   int cmp = 0;
 
-  ip_prefix_normalize (p1);
-  ip_prefix_normalize (p2);
+  ip_prefix_normalize (&p1);
+  ip_prefix_normalize (&p2);
 
-  cmp = ip_address_cmp (&ip_prefix_addr (p1), &ip_prefix_addr (p2));
+  cmp = ip_address_cmp (&ip_prefix_addr (&p1), &ip_prefix_addr (&p2));
   if (cmp == 0)
     {
-      if (ip_prefix_len (p1) < ip_prefix_len (p2))
+      if (ip_prefix_len (&p1) < ip_prefix_len (&p2))
 	{
 	  cmp = 1;
 	}
       else
 	{
-	  if (ip_prefix_len (p1) > ip_prefix_len (p2))
+	  if (ip_prefix_len (&p1) > ip_prefix_len (&p2))
 	    cmp = 2;
 	}
     }

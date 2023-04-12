@@ -27,6 +27,8 @@
 #include <ctype.h>
 #include <tlsopenssl/tls_openssl.h>
 #include <tlsopenssl/tls_bios.h>
+#include <openssl/x509_vfy.h>
+#include <openssl/x509v3.h>
 
 #define MAX_CRYPTO_LEN 64
 
@@ -38,7 +40,8 @@ openssl_ctx_alloc_w_thread (u32 thread_index)
   openssl_main_t *om = &openssl_main;
   openssl_ctx_t **ctx;
 
-  pool_get (om->ctx_pool[thread_index], ctx);
+  pool_get_aligned_safe (om->ctx_pool[thread_index], ctx, 0);
+
   if (!(*ctx))
     *ctx = clib_mem_alloc (sizeof (openssl_ctx_t));
 
@@ -61,15 +64,20 @@ openssl_ctx_free (tls_ctx_t * ctx)
 {
   openssl_ctx_t *oc = (openssl_ctx_t *) ctx;
 
-  if (SSL_is_init_finished (oc->ssl) && !ctx->is_passive_close)
-    SSL_shutdown (oc->ssl);
+  /* Cleanup ssl ctx unless migrated */
+  if (!ctx->is_migrated)
+    {
+      if (SSL_is_init_finished (oc->ssl) && !ctx->is_passive_close)
+	SSL_shutdown (oc->ssl);
 
-  SSL_free (oc->ssl);
+      SSL_free (oc->ssl);
+      vec_free (ctx->srv_hostname);
 
 #ifdef HAVE_OPENSSL_ASYNC
   openssl_evt_free (ctx->evt_index, ctx->c_thread_index);
 #endif
-  vec_free (ctx->srv_hostname);
+    }
+
   pool_put_index (openssl_main.ctx_pool[ctx->c_thread_index],
 		  oc->openssl_ctx_index);
 }
@@ -92,7 +100,7 @@ openssl_ctx_attach (u32 thread_index, void *ctx_ptr)
   session_handle_t sh;
   openssl_ctx_t **oc;
 
-  pool_get (om->ctx_pool[thread_index], oc);
+  pool_get_aligned_safe (om->ctx_pool[thread_index], oc, 0);
   /* Free the old instance instead of looking for an empty spot */
   if (*oc)
     clib_mem_free (*oc);
@@ -150,6 +158,10 @@ openssl_lctx_get (u32 lctx_index)
   return pool_elt_at_index (openssl_main.lctx_pool, lctx_index);
 }
 
+#define ossl_check_err_is_fatal(_ssl, _rv)                                    \
+  if (PREDICT_FALSE (_rv < 0 && SSL_get_error (_ssl, _rv) == SSL_ERROR_SSL))  \
+    return -1;
+
 static int
 openssl_read_from_ssl_into_fifo (svm_fifo_t * f, SSL * ssl)
 {
@@ -159,6 +171,9 @@ openssl_read_from_ssl_into_fifo (svm_fifo_t * f, SSL * ssl)
   u32 max_enq;
 
   max_enq = svm_fifo_max_enqueue_prod (f);
+  if (!max_enq)
+    return 0;
+
   n_fs = svm_fifo_provision_chunks (f, fs, n_segs, max_enq);
   if (n_fs < 0)
     return 0;
@@ -166,17 +181,25 @@ openssl_read_from_ssl_into_fifo (svm_fifo_t * f, SSL * ssl)
   /* Return early if we can't read anything */
   read = SSL_read (ssl, fs[0].data, fs[0].len);
   if (read <= 0)
-    return 0;
-
-  for (i = 1; i < n_fs; i++)
     {
-      rv = SSL_read (ssl, fs[i].data, fs[i].len);
-      read += rv > 0 ? rv : 0;
-
-      if (rv < fs[i].len)
-	break;
+      ossl_check_err_is_fatal (ssl, read);
+      return 0;
     }
 
+  if (read == (int) fs[0].len)
+    {
+      for (i = 1; i < n_fs; i++)
+	{
+	  rv = SSL_read (ssl, fs[i].data, fs[i].len);
+	  read += rv > 0 ? rv : 0;
+
+	  if (rv < (int) fs[i].len)
+	    {
+	      ossl_check_err_is_fatal (ssl, rv);
+	      break;
+	    }
+	}
+    }
   svm_fifo_enqueue_nocopy (f, read);
 
   return read;
@@ -186,10 +209,10 @@ static int
 openssl_write_from_fifo_into_ssl (svm_fifo_t *f, SSL *ssl, u32 max_len)
 {
   int wrote = 0, rv, i = 0, len;
-  const int n_segs = 2;
+  u32 n_segs = 2;
   svm_fifo_seg_t fs[n_segs];
 
-  len = svm_fifo_segments (f, 0, fs, n_segs, max_len);
+  len = svm_fifo_segments (f, 0, fs, &n_segs, max_len);
   if (len <= 0)
     return 0;
 
@@ -197,8 +220,11 @@ openssl_write_from_fifo_into_ssl (svm_fifo_t *f, SSL *ssl, u32 max_len)
     {
       rv = SSL_write (ssl, fs[i].data, fs[i].len);
       wrote += (rv > 0) ? rv : 0;
-      if (rv < fs[i].len)
-	break;
+      if (rv < (int) fs[i].len)
+	{
+	  ossl_check_err_is_fatal (ssl, rv);
+	  break;
+	}
       i++;
     }
 
@@ -258,6 +284,7 @@ openssl_handle_handshake_failure (tls_ctx_t * ctx)
        * Also handles cleanup of the pre-allocated session
        */
       tls_notify_app_connected (ctx, SESSION_E_TLS_HANDSHAKE);
+      tls_disconnect_transport (ctx);
     }
 }
 
@@ -323,19 +350,32 @@ openssl_ctx_handshake_rx (tls_ctx_t * ctx, session_t * tls_session)
 	   */
 	  if (ctx->srv_hostname)
 	    {
-	      tls_notify_app_connected (ctx, SESSION_E_TLS_HANDSHAKE);
+	      openssl_handle_handshake_failure (ctx);
 	      return -1;
 	    }
 	}
-      tls_notify_app_connected (ctx, SESSION_E_NONE);
+      if (tls_notify_app_connected (ctx, SESSION_E_NONE))
+	{
+	  tls_disconnect_transport (ctx);
+	  return -1;
+	}
     }
   else
     {
       /* Need to check transport status */
       if (ctx->is_passive_close)
-	openssl_handle_handshake_failure (ctx);
-      else
-	tls_notify_app_accept (ctx);
+	{
+	  openssl_handle_handshake_failure (ctx);
+	  return -1;
+	}
+
+      /* Accept failed, cleanup */
+      if (tls_notify_app_accept (ctx))
+	{
+	  ctx->c_s_index = SESSION_INVALID_INDEX;
+	  tls_disconnect_transport (ctx);
+	  return -1;
+	}
     }
 
   TLS_DBG (1, "Handshake for %u complete. TLS cipher is %s",
@@ -346,6 +386,8 @@ openssl_ctx_handshake_rx (tls_ctx_t * ctx, session_t * tls_session)
 static void
 openssl_confirm_app_close (tls_ctx_t * ctx)
 {
+  openssl_ctx_t *oc = (openssl_ctx_t *) ctx;
+  SSL_shutdown (oc->ssl);
   tls_disconnect_transport (ctx);
   session_transport_closed_notify (&ctx->connection);
 }
@@ -374,7 +416,22 @@ openssl_ctx_write_tls (tls_ctx_t *ctx, session_t *app_session,
 
   deq_max = clib_min (deq_max, sp->max_burst_size);
 
+  /* Make sure tcp's tx fifo can actually buffer all bytes to be dequeued.
+   * If under memory pressure, tls's fifo segment might not be able to
+   * allocate the chunks needed. This also avoids errors from the underlying
+   * custom bio to the ssl infra which at times can get stuck. */
+  if (svm_fifo_provision_chunks (ts->tx_fifo, 0, 0, deq_max + TLSO_CTRL_BYTES))
+    goto check_tls_fifo;
+
   wrote = openssl_write_from_fifo_into_ssl (f, oc->ssl, deq_max);
+
+  /* Unrecoverable protocol error. Reset connection */
+  if (PREDICT_FALSE (wrote < 0))
+    {
+      tls_notify_app_io_error (ctx);
+      return 0;
+    }
+
   if (!wrote)
     goto check_tls_fifo;
 
@@ -382,6 +439,9 @@ openssl_ctx_write_tls (tls_ctx_t *ctx, session_t *app_session,
     session_dequeue_notify (app_session);
 
 check_tls_fifo:
+
+  if (PREDICT_FALSE (ctx->app_closed && BIO_ctrl_pending (oc->rbio) <= 0))
+    openssl_confirm_app_close (ctx);
 
   /* Deschedule and wait for deq notification if fifo is almost full */
   enq_buf = clib_min (svm_fifo_size (ts->tx_fifo) / 2, TLSO_MIN_ENQ_SPACE);
@@ -404,10 +464,10 @@ openssl_ctx_write_dtls (tls_ctx_t *ctx, session_t *app_session,
 {
   openssl_main_t *om = &openssl_main;
   openssl_ctx_t *oc = (openssl_ctx_t *) ctx;
+  u32 read = 0, to_deq, dgram_sz, enq_max;
   session_dgram_pre_hdr_t hdr;
   session_t *us;
   int wrote, rv;
-  u32 read = 0, to_deq, dgram_sz;
   u8 *buf;
 
   us = session_get_from_handle (ctx->tls_session_handle);
@@ -422,7 +482,9 @@ openssl_ctx_write_dtls (tls_ctx_t *ctx, session_t *app_session,
       ASSERT (to_deq >= hdr.data_length + SESSION_CONN_HDR_LEN);
 
       dgram_sz = hdr.data_length + SESSION_CONN_HDR_LEN;
-      if (svm_fifo_max_enqueue_prod (us->tx_fifo) < dgram_sz + TLSO_CTRL_BYTES)
+      enq_max = dgram_sz + TLSO_CTRL_BYTES;
+      if (svm_fifo_max_enqueue_prod (us->tx_fifo) < enq_max ||
+	  svm_fifo_provision_chunks (us->tx_fifo, 0, 0, enq_max))
 	{
 	  svm_fifo_add_want_deq_ntf (us->tx_fifo, SVM_FIFO_WANT_DEQ_NOTIF);
 	  transport_connection_deschedule (&ctx->connection);
@@ -472,13 +534,16 @@ openssl_ctx_read_tls (tls_ctx_t *ctx, session_t *tls_session)
 {
   openssl_ctx_t *oc = (openssl_ctx_t *) ctx;
   session_t *app_session;
-  int read, wrote = 0;
+  int read;
   svm_fifo_t *f;
 
   if (PREDICT_FALSE (SSL_in_init (oc->ssl)))
     {
       if (openssl_ctx_handshake_rx (ctx, tls_session) < 0)
 	return 0;
+
+      /* Application might force a session pool realloc on accept */
+      tls_session = session_get_from_handle (ctx->tls_session_handle);
     }
 
   app_session = session_get_from_handle (ctx->app_session_handle);
@@ -486,14 +551,22 @@ openssl_ctx_read_tls (tls_ctx_t *ctx, session_t *tls_session)
 
   read = openssl_read_from_ssl_into_fifo (f, oc->ssl);
 
+  /* Unrecoverable protocol error. Reset connection */
+  if (PREDICT_FALSE (read < 0))
+    {
+      tls_notify_app_io_error (ctx);
+      return 0;
+    }
+
   /* If handshake just completed, session may still be in accepting state */
   if (read && app_session->session_state >= SESSION_STATE_READY)
     tls_notify_app_enqueue (ctx, app_session);
 
-  if (SSL_pending (oc->ssl) > 0)
+  if ((SSL_pending (oc->ssl) > 0) ||
+      svm_fifo_max_dequeue_cons (tls_session->rx_fifo))
     tls_add_vpp_q_builtin_rx_evt (tls_session);
 
-  return wrote;
+  return read;
 }
 
 static inline int
@@ -567,6 +640,88 @@ openssl_ctx_read (tls_ctx_t *ctx, session_t *ts)
 }
 
 static int
+openssl_set_ckpair (SSL *ssl, u32 ckpair_index)
+{
+  app_cert_key_pair_t *ckpair;
+  BIO *cert_bio;
+  EVP_PKEY *pkey;
+  X509 *srvcert;
+
+  /* Configure a ckpair index only if non-default/test provided */
+  if (ckpair_index == 0)
+    return 0;
+
+  ckpair = app_cert_key_pair_get_if_valid (ckpair_index);
+  if (!ckpair)
+    return -1;
+
+  if (!ckpair->cert || !ckpair->key)
+    {
+      TLS_DBG (1, "tls cert and/or key not configured");
+      return -1;
+    }
+  /*
+   * Set the key and cert
+   */
+  cert_bio = BIO_new (BIO_s_mem ());
+  BIO_write (cert_bio, ckpair->cert, vec_len (ckpair->cert));
+  srvcert = PEM_read_bio_X509 (cert_bio, NULL, NULL, NULL);
+  if (!srvcert)
+    {
+      clib_warning ("unable to parse certificate");
+      return -1;
+    }
+  SSL_use_certificate (ssl, srvcert);
+  BIO_free (cert_bio);
+
+  cert_bio = BIO_new (BIO_s_mem ());
+  BIO_write (cert_bio, ckpair->key, vec_len (ckpair->key));
+  pkey = PEM_read_bio_PrivateKey (cert_bio, NULL, NULL, NULL);
+  if (!pkey)
+    {
+      clib_warning ("unable to parse pkey");
+      return -1;
+    }
+  SSL_use_PrivateKey (ssl, pkey);
+  BIO_free (cert_bio);
+  TLS_DBG (1, "TLS client using ckpair index: %d", ckpair_index);
+  return 0;
+}
+
+static int
+openssl_client_init_verify (SSL *ssl, const char *srv_hostname,
+			    int set_hostname_verification,
+			    int set_hostname_strict_check)
+{
+  if (set_hostname_verification)
+    {
+      X509_VERIFY_PARAM *param = SSL_get0_param (ssl);
+      if (!param)
+	{
+	  TLS_DBG (1, "Couldn't fetch SSL param");
+	  return -1;
+	}
+
+      if (set_hostname_strict_check)
+	X509_VERIFY_PARAM_set_hostflags (param,
+					 X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+
+      if (!X509_VERIFY_PARAM_set1_host (param, srv_hostname, 0))
+	{
+	  TLS_DBG (1, "Couldn't set hostname for verification");
+	  return -1;
+	}
+      SSL_set_verify (ssl, SSL_VERIFY_PEER, 0);
+    }
+  if (!SSL_set_tlsext_host_name (ssl, srv_hostname))
+    {
+      TLS_DBG (1, "Couldn't set hostname");
+      return -1;
+    }
+  return 0;
+}
+
+static int
 openssl_ctx_init_client (tls_ctx_t * ctx)
 {
   long flags = SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_COMPRESSION;
@@ -627,11 +782,17 @@ openssl_ctx_init_client (tls_ctx_t * ctx)
   SSL_set_bio (oc->ssl, oc->wbio, oc->rbio);
   SSL_set_connect_state (oc->ssl);
 
-  rv = SSL_set_tlsext_host_name (oc->ssl, ctx->srv_hostname);
-  if (rv != 1)
+  /* Hostname validation and strict check by name are disabled by default */
+  rv = openssl_client_init_verify (oc->ssl, (const char *) ctx->srv_hostname,
+				   0, 0);
+  if (rv)
     {
-      TLS_DBG (1, "Couldn't set hostname");
+      TLS_DBG (1, "ERROR:verify init failed:%d", rv);
       return -1;
+    }
+  if (openssl_set_ckpair (oc->ssl, ctx->ckpair_index))
+    {
+      TLS_DBG (1, "Couldn't set client certificate-key pair");
     }
 
   /*
@@ -719,29 +880,59 @@ openssl_start_listen (tls_ctx_t * lctx)
       return -1;
     }
 
+  /* use the default OpenSSL built-in DH parameters */
+  rv = SSL_CTX_set_dh_auto (ssl_ctx, 1);
+  if (rv != 1)
+    {
+      TLS_DBG (1, "Couldn't set temp DH parameters");
+      return -1;
+    }
+
   /*
    * Set the key and cert
    */
   cert_bio = BIO_new (BIO_s_mem ());
+  if (!cert_bio)
+    {
+      clib_warning ("unable to allocate memory");
+      return -1;
+    }
   BIO_write (cert_bio, ckpair->cert, vec_len (ckpair->cert));
   srvcert = PEM_read_bio_X509 (cert_bio, NULL, NULL, NULL);
   if (!srvcert)
     {
       clib_warning ("unable to parse certificate");
-      return -1;
+      goto err;
     }
-  SSL_CTX_use_certificate (ssl_ctx, srvcert);
+  rv = SSL_CTX_use_certificate (ssl_ctx, srvcert);
+  if (rv != 1)
+    {
+      clib_warning ("unable to use SSL certificate");
+      goto err;
+    }
+
   BIO_free (cert_bio);
 
   cert_bio = BIO_new (BIO_s_mem ());
+  if (!cert_bio)
+    {
+      clib_warning ("unable to allocate memory");
+      return -1;
+    }
   BIO_write (cert_bio, ckpair->key, vec_len (ckpair->key));
   pkey = PEM_read_bio_PrivateKey (cert_bio, NULL, NULL, NULL);
   if (!pkey)
     {
       clib_warning ("unable to parse pkey");
-      return -1;
+      goto err;
     }
-  SSL_CTX_use_PrivateKey (ssl_ctx, pkey);
+  rv = SSL_CTX_use_PrivateKey (ssl_ctx, pkey);
+  if (rv != 1)
+    {
+      clib_warning ("unable to use SSL PrivateKey");
+      goto err;
+    }
+
   BIO_free (cert_bio);
 
   olc_index = openssl_listen_ctx_alloc ();
@@ -755,6 +946,10 @@ openssl_start_listen (tls_ctx_t * lctx)
 
   return 0;
 
+err:
+  if (cert_bio)
+    BIO_free (cert_bio);
+  return -1;
 }
 
 static int
@@ -877,25 +1072,6 @@ openssl_app_close (tls_ctx_t * ctx)
   return 0;
 }
 
-const static tls_engine_vft_t openssl_engine = {
-  .ctx_alloc = openssl_ctx_alloc,
-  .ctx_alloc_w_thread = openssl_ctx_alloc_w_thread,
-  .ctx_free = openssl_ctx_free,
-  .ctx_attach = openssl_ctx_attach,
-  .ctx_detach = openssl_ctx_detach,
-  .ctx_get = openssl_ctx_get,
-  .ctx_get_w_thread = openssl_ctx_get_w_thread,
-  .ctx_init_server = openssl_ctx_init_server,
-  .ctx_init_client = openssl_ctx_init_client,
-  .ctx_write = openssl_ctx_write,
-  .ctx_read = openssl_ctx_read,
-  .ctx_handshake_is_over = openssl_handshake_is_over,
-  .ctx_start_listen = openssl_start_listen,
-  .ctx_stop_listen = openssl_stop_listen,
-  .ctx_transport_close = openssl_transport_close,
-  .ctx_app_close = openssl_app_close,
-};
-
 int
 tls_init_ca_chain (void)
 {
@@ -945,6 +1121,39 @@ tls_init_ca_chain (void)
 }
 
 int
+openssl_reinit_ca_chain (void)
+{
+  openssl_main_t *om = &openssl_main;
+
+  /* Remove/free existing x509_store */
+  if (om->cert_store)
+    {
+      X509_STORE_free (om->cert_store);
+    }
+  return tls_init_ca_chain ();
+}
+
+const static tls_engine_vft_t openssl_engine = {
+  .ctx_alloc = openssl_ctx_alloc,
+  .ctx_alloc_w_thread = openssl_ctx_alloc_w_thread,
+  .ctx_free = openssl_ctx_free,
+  .ctx_attach = openssl_ctx_attach,
+  .ctx_detach = openssl_ctx_detach,
+  .ctx_get = openssl_ctx_get,
+  .ctx_get_w_thread = openssl_ctx_get_w_thread,
+  .ctx_init_server = openssl_ctx_init_server,
+  .ctx_init_client = openssl_ctx_init_client,
+  .ctx_write = openssl_ctx_write,
+  .ctx_read = openssl_ctx_read,
+  .ctx_handshake_is_over = openssl_handshake_is_over,
+  .ctx_start_listen = openssl_start_listen,
+  .ctx_stop_listen = openssl_stop_listen,
+  .ctx_transport_close = openssl_transport_close,
+  .ctx_app_close = openssl_app_close,
+  .ctx_reinit_cachain = openssl_reinit_ca_chain,
+};
+
+int
 tls_openssl_set_ciphers (char *ciphers)
 {
   openssl_main_t *om = &openssl_main;
@@ -955,8 +1164,8 @@ tls_openssl_set_ciphers (char *ciphers)
       return -1;
     }
 
-  vec_validate (om->ciphers, strlen (ciphers) - 1);
-  for (i = 0; i < vec_len (om->ciphers); i++)
+  vec_validate (om->ciphers, strlen (ciphers));
+  for (i = 0; i < vec_len (om->ciphers) - 1; i++)
     {
       om->ciphers[i] = toupper (ciphers[i]);
     }
@@ -979,12 +1188,6 @@ tls_openssl_init (vlib_main_t * vm)
   SSL_library_init ();
   SSL_load_error_strings ();
 
-  if (tls_init_ca_chain ())
-    {
-      clib_warning ("failed to initialize TLS CA chain");
-      return 0;
-    }
-
   vec_validate (om->ctx_pool, num_threads - 1);
   vec_validate (om->rx_bufs, num_threads - 1);
   vec_validate (om->tx_bufs, num_threads - 1);
@@ -1000,6 +1203,12 @@ tls_openssl_init (vlib_main_t * vm)
   /* default ciphers */
   tls_openssl_set_ciphers
     ("ALL:!ADH:!LOW:!EXP:!MD5:!RC4-SHA:!DES-CBC3-SHA:@STRENGTH");
+
+  if (tls_init_ca_chain ())
+    {
+      clib_warning ("failed to initialize TLS CA chain");
+      return 0;
+    }
 
   return error;
 }

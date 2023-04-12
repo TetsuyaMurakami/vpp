@@ -78,16 +78,15 @@ format_fib_mpls_label (u8 *s, va_list *ap)
 }
 
 void
-fib_prefix_from_ip46_addr (const ip46_address_t *addr,
+fib_prefix_from_ip46_addr (fib_protocol_t fproto,
+			   const ip46_address_t *addr,
 			   fib_prefix_t *pfx)
 {
-    ASSERT(!ip46_address_is_zero(addr));
+    ASSERT(FIB_PROTOCOL_MPLS != fproto);
 
-    pfx->fp_proto = ((ip46_address_is_ip4(addr) ?
-		      FIB_PROTOCOL_IP4 :
-		      FIB_PROTOCOL_IP6));
-    pfx->fp_len = ((ip46_address_is_ip4(addr) ?
-		    32 : 128));
+    pfx->fp_proto = fproto;
+    pfx->fp_len = ((FIB_PROTOCOL_IP4 == fproto) ?
+		    32 : 128);
     pfx->fp_addr = *addr;
     pfx->___fp___pad = 0;
 }
@@ -541,6 +540,7 @@ unformat_fib_route_path (unformat_input_t * input, va_list * args)
 {
     fib_route_path_t *rpath = va_arg (*args, fib_route_path_t *);
     dpo_proto_t *payload_proto = va_arg (*args, void*);
+    dpo_proto_t explicit_proto = DPO_PROTO_NONE;
     u32 weight, preference, udp_encap_id, fi;
     mpls_label_t out_label;
     vnet_main_t *vnm;
@@ -715,9 +715,6 @@ unformat_fib_route_path (unformat_input_t * input, va_list * args)
 	  rpath->frp_weight = 1;
 	  rpath->frp_flags |= FIB_ROUTE_PATH_LOCAL;
         }
-      else if (unformat (input, "%U",
-			 unformat_mfib_itf_flags, &rpath->frp_mitf_flags))
-	;
       else if (unformat (input, "out-labels"))
         {
             while (unformat (input, "%U",
@@ -729,12 +726,23 @@ unformat_fib_route_path (unformat_input_t * input, va_list * args)
                 vec_add1(rpath->frp_label_stack, fml);
             }
         }
+      else if (unformat (input, "ip4"))
+        {
+	  explicit_proto = DPO_PROTO_IP4;
+        }
+      else if (unformat (input, "ip6"))
+        {
+	  explicit_proto = DPO_PROTO_IP6;
+        }
         else if (unformat (input, "%U",
                            unformat_vnet_sw_interface, vnm,
                            &rpath->frp_sw_if_index))
         {
             rpath->frp_proto = *payload_proto;
         }
+        else if (unformat (input, "%U",
+			 unformat_mfib_itf_flags, &rpath->frp_mitf_flags))
+	;
         else if (unformat (input, "via"))
         {
             /* new path, back up and return */
@@ -750,5 +758,94 @@ unformat_fib_route_path (unformat_input_t * input, va_list * args)
         }
     }
 
+    if (DPO_PROTO_NONE != explicit_proto)
+      *payload_proto = rpath->frp_proto = explicit_proto;
+
     return (1);
+}
+
+/*
+ * Return true if the path is attached
+ */
+int
+fib_route_path_is_attached (const fib_route_path_t *rpath)
+{
+    /*
+     * DVR paths are not attached, since we are not playing the
+     * L3 game with these
+     */
+    if (rpath->frp_flags & (FIB_ROUTE_PATH_DVR |
+                            FIB_ROUTE_PATH_UDP_ENCAP))
+    {
+        return (0);
+    }
+
+    /*
+     * - All zeros next-hop
+     * - a valid interface
+     */
+    if (ip46_address_is_zero(&rpath->frp_addr) &&
+	(~0 != rpath->frp_sw_if_index))
+    {
+	return (!0);
+    }
+    else if (rpath->frp_flags & FIB_ROUTE_PATH_ATTACHED ||
+             rpath->frp_flags & FIB_ROUTE_PATH_GLEAN)
+    {
+        return (!0);
+    }
+    return (0);
+}
+
+static void
+fib_prefix_ip4_addr_increment (fib_prefix_t *pfx)
+{
+    /* Calculate the addend based on the host length of address */
+    u32 incr = 1ULL << (32 - pfx->fp_len);
+    ip4_address_t dst = (pfx->fp_addr).ip4;
+    dst.as_u32 = clib_host_to_net_u32 (incr + clib_net_to_host_u32 (dst.as_u32));
+    pfx->fp_addr.ip4.as_u32 = dst.as_u32;
+}
+
+static void
+fib_prefix_ip6_addr_increment (fib_prefix_t *pfx)
+{
+    /*
+     * Calculate the addend based on the host length of address
+     * and which part(lower 64 bits or higher 64 bits) it lies
+     * in
+     */
+    u32 host_len = 128 - pfx->fp_len;
+    u64 incr = 1ULL << ((host_len > 64) ? (host_len - 64) : host_len);
+    i32 bucket = (host_len < 64 ? 1 : 0);
+    ip6_address_t dst = (pfx->fp_addr).ip6;
+    u64 tmp = incr + clib_net_to_host_u64 (dst.as_u64[bucket]);
+    /* Handle overflow */
+    if (bucket && (tmp < incr))
+    {
+        dst.as_u64[1] = clib_host_to_net_u64 (tmp);
+        dst.as_u64[0] = clib_host_to_net_u64 (1ULL + clib_net_to_host_u64 (dst.as_u64[0]));
+    }
+    else
+        dst.as_u64[bucket] = clib_host_to_net_u64 (tmp);
+
+    pfx->fp_addr.ip6.as_u128 = dst.as_u128;
+}
+
+/*
+ * Increase IPv4/IPv6 address according to the prefix length
+ */
+void fib_prefix_increment (fib_prefix_t *pfx)
+{
+    switch (pfx->fp_proto)
+    {
+    case FIB_PROTOCOL_IP4:
+        fib_prefix_ip4_addr_increment (pfx);
+        break;
+    case FIB_PROTOCOL_IP6:
+        fib_prefix_ip6_addr_increment (pfx);
+        break;
+    case FIB_PROTOCOL_MPLS:
+        break;
+    }
 }

@@ -19,7 +19,6 @@
 #include <vnet/plugin/plugin.h>
 #include <nsh/nsh.h>
 #include <vnet/gre/packet.h>
-#include <vnet/vxlan/vxlan.h>
 #include <vnet/vxlan-gpe/vxlan_gpe.h>
 #include <vnet/l2/l2_classify.h>
 
@@ -110,11 +109,6 @@ nsh_pop_inline (vlib_main_t * vm,
 
 	  /* Entry should point to a mapping ...*/
 	  map0 = pool_elt_at_index(nm->nsh_mappings, entry0[0]);
-	  if (PREDICT_FALSE(map0 == 0))
-	    {
-	      error0 = NSH_NODE_ERROR_NO_MAPPING;
-	      goto trace0;
-	    }
 
 	  /* set up things for next node to transmit ie which node to handle it and where */
 	  next0 = map0->next_node;
@@ -163,11 +157,6 @@ nsh_pop_inline (vlib_main_t * vm,
 
 	  /* Entry should point to a mapping ...*/
 	  map1 = pool_elt_at_index(nm->nsh_mappings, entry1[0]);
-	  if (PREDICT_FALSE(map1 == 0))
-	    {
-	      error1 = NSH_NODE_ERROR_NO_MAPPING;
-	      goto trace1;
-	    }
 
 	  /* set up things for next node to transmit ie which node to handle it and where */
 	  next1 = map1->next_node;
@@ -249,11 +238,6 @@ nsh_pop_inline (vlib_main_t * vm,
 	  /* Entry should point to a mapping ...*/
 	  map0 = pool_elt_at_index(nm->nsh_mappings, entry0[0]);
 
-	  if (PREDICT_FALSE(map0 == 0))
-	    {
-	      error0 = NSH_NODE_ERROR_NO_MAPPING;
-	      goto trace00;
-	    }
 
 	  /* set up things for next node to transmit ie which node to handle it and where */
 	  next0 = map0->next_node;

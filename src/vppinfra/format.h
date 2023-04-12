@@ -98,21 +98,15 @@ _(format_hex_bytes_no_wrap);
 _(format_white_space);
 _(format_f64);
 _(format_time_interval);
+_ (format_duration);
 
 #ifdef CLIB_UNIX
 /* Unix specific formats. */
 _(format_address_family);
-_(format_unix_arphrd);
-_(format_unix_interface_flags);
 _(format_network_address);
 _(format_network_protocol);
 _(format_network_port);
 _(format_sockaddr);
-_(format_ip4_tos_byte);
-_(format_ip4_packet);
-_(format_icmp4_type_and_code);
-_(format_ethernet_packet);
-_(format_hostname);
 _(format_timeval);
 _(format_time_float);
 _(format_signal);
@@ -206,6 +200,22 @@ unformat_put_input (unformat_input_t * input)
   input->index -= 1;
 }
 
+always_inline uword
+is_white_space (uword c)
+{
+  switch (c)
+    {
+    case ' ':
+    case '\t':
+    case '\n':
+    case '\r':
+      return 1;
+
+    default:
+      return 0;
+    }
+}
+
 /* Peek current input character without advancing. */
 always_inline uword
 unformat_peek_input (unformat_input_t * input)
@@ -249,8 +259,8 @@ uword va_unformat (unformat_input_t * i, const char *fmt, va_list * args);
 void unformat_init_command_line (unformat_input_t * input, char *argv[]);
 
 /* Setup for unformat of given string. */
-void unformat_init_string (unformat_input_t * input,
-			   char *string, int string_len);
+void unformat_init_string (unformat_input_t *input, const char *string,
+			   int string_len);
 
 always_inline void
 unformat_init_cstring (unformat_input_t * input, char *string)
@@ -294,6 +304,9 @@ unformat_function_t unformat_eof;
 /* Parse memory size e.g. 100, 100k, 100m, 100g. */
 unformat_function_t unformat_memory_size;
 
+/* Format base 10 e.g. 100, 100K, 100M, 100G */
+u8 *format_base10 (u8 *s, va_list *va);
+
 /* Unparse memory size e.g. 100, 100k, 100m, 100g. */
 u8 *format_memory_size (u8 * s, va_list * va);
 
@@ -308,6 +321,9 @@ u8 *format_c_identifier (u8 * s, va_list * va);
 
 /* Format hexdump with both hex and printable chars - compatible with text2pcap */
 u8 *format_hexdump (u8 * s, va_list * va);
+
+/* Format bitmap of array of uword numbers */
+u8 *format_uword_bitmap (u8 *s, va_list *va);
 
 /* Unix specific formats. */
 #ifdef CLIB_UNIX

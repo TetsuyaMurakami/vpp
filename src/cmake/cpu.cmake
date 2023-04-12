@@ -11,49 +11,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+macro(set_log2_cacheline_size var n)
+  if(${n} EQUAL 128)
+    set(${var} 7)
+  elseif(${n} EQUAL 64)
+    set(${var} 6)
+  else()
+     message(FATAL_ERROR "Cacheline size ${n} not supported")
+  endif()
+endmacro()
+
 ##############################################################################
-# Cache line size detection
+# Cache line size
 ##############################################################################
-if(CMAKE_CROSSCOMPILING)
-  message(STATUS "Cross-compiling - cache line size detection disabled")
-  set(VPP_LOG2_CACHE_LINE_SIZE 6)
-elseif(DEFINED VPP_LOG2_CACHE_LINE_SIZE)
+if(DEFINED VPP_CACHE_LINE_SIZE)
   # Cache line size assigned via cmake args
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64.*|AARCH64.*)")
-  file(READ "/proc/cpuinfo" cpuinfo)
-  string(REPLACE "\n" ";" cpuinfo ${cpuinfo})
-  foreach(l ${cpuinfo})
-    string(REPLACE ":" ";" l ${l})
-    list(GET l 0 name)
-    list(GET l 1 value)
-    string(STRIP ${name} name)
-    string(STRIP ${value} value)
-    if(${name} STREQUAL "CPU implementer")
-      set(CPU_IMPLEMENTER ${value})
-    endif()
-    if(${name} STREQUAL "CPU part")
-      set(CPU_PART ${value})
-    endif()
-  endforeach()
-  # Implementer 0x43 - Cavium
-  #  Part 0x0af - ThunderX2 is 64B, rest all are 128B
-  if (${CPU_IMPLEMENTER} STREQUAL "0x43")
-    if (${CPU_PART} STREQUAL "0x0af")
-      set(VPP_LOG2_CACHE_LINE_SIZE 6)
-    else()
-      set(VPP_LOG2_CACHE_LINE_SIZE 7)
-    endif()
-  else()
-      set(VPP_LOG2_CACHE_LINE_SIZE 6)
-  endif()
-  math(EXPR VPP_CACHE_LINE_SIZE "1 << ${VPP_LOG2_CACHE_LINE_SIZE}")
-  message(STATUS "ARM AArch64 CPU implementer ${CPU_IMPLEMENTER} part ${CPU_PART} cacheline size ${VPP_CACHE_LINE_SIZE}")
+  set(VPP_CACHE_LINE_SIZE 128)
 else()
-  set(VPP_LOG2_CACHE_LINE_SIZE 6)
+  set(VPP_CACHE_LINE_SIZE 64)
 endif()
 
-set(VPP_LOG2_CACHE_LINE_SIZE ${VPP_LOG2_CACHE_LINE_SIZE}
-    CACHE STRING "Target CPU cache line size (power of 2)")
+set(VPP_CACHE_LINE_SIZE ${VPP_CACHE_LINE_SIZE}
+    CACHE STRING "Target CPU cache line size")
+
+set_log2_cacheline_size(VPP_LOG2_CACHE_LINE_SIZE ${VPP_CACHE_LINE_SIZE})
 
 ##############################################################################
 # Gnu Assembler AVX-512 bug detection
@@ -74,66 +56,154 @@ endif()
 ##############################################################################
 # CPU optimizations and multiarch support
 ##############################################################################
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "amd64.*|x86_64.*|AMD64.*")
-  set(CMAKE_C_FLAGS "-march=corei7 -mtune=corei7-avx ${CMAKE_C_FLAGS}")
-  check_c_compiler_flag("-march=haswell" compiler_flag_march_haswell)
-  if(compiler_flag_march_haswell)
-    list(APPEND MARCH_VARIANTS "hsw\;-march=haswell -mtune=haswell")
+
+option(VPP_BUILD_NATIVE_ONLY "Build only for native CPU." OFF)
+
+if(VPP_BUILD_NATIVE_ONLY)
+  check_c_compiler_flag("-march=native" compiler_flag_march_native)
+  if(NOT compiler_flag_march_native)
+    message(FATAL_ERROR "Native-only build not supported by compiler")
   endif()
-  check_c_compiler_flag("-march=tremont" compiler_flag_march_tremont)
-  if(compiler_flag_march_tremont)
-    list(APPEND MARCH_VARIANTS "trm\;-march=tremont -mtune=tremont")
+endif()
+
+macro(add_vpp_march_variant v)
+  cmake_parse_arguments(ARG
+    "OFF"
+    "N_PREFETCHES;CACHE_PREFETCH_BYTES"
+    "FLAGS"
+    ${ARGN}
+  )
+
+  if(ARG_FLAGS)
+    set(flags_ok 1)
+    set(fs "")
+    foreach(f ${ARG_FLAGS})
+      string(APPEND fs " ${f}")
+      string(REGEX REPLACE "[-=+]" "_" sfx ${f})
+      if(NOT DEFINED compiler_flag${sfx})
+        check_c_compiler_flag(${f} compiler_flag${sfx})
+      endif()
+      if(NOT compiler_flag${sfx})
+        unset(flags_ok)
+      endif()
+    endforeach()
+    if(ARG_N_PREFETCHES)
+      string(APPEND fs " -DCLIB_N_PREFETCHES=${ARG_N_PREFETCHES}")
+    endif()
+    if(ARG_CACHE_PREFETCH_BYTES)
+      set_log2_cacheline_size(log2 ${ARG_CACHE_PREFETCH_BYTES})
+      string(APPEND fs " -DCLIB_LOG2_CACHE_PREFETCH_BYTES=${log2}")
+    endif()
+    if(flags_ok)
+      string(TOUPPER ${v} uv)
+      if(ARG_OFF)
+        option(VPP_MARCH_VARIANT_${uv} "Build ${v} multiarch variant." OFF)
+      else()
+        option(VPP_MARCH_VARIANT_${uv} "Build ${v} multiarch variant." ON)
+      endif()
+      if (VPP_MARCH_VARIANT_${uv})
+        list(APPEND MARCH_VARIANTS "${v}\;${fs}")
+        list(APPEND MARCH_VARIANTS_NAMES "${v}")
+      else()
+        list(APPEND MARCH_VARIANTS_DISABLED "${v}\;${fs}")
+      endif()
+    endif()
   endif()
+endmacro()
+
+if(VPP_BUILD_NATIVE_ONLY)
+  set(VPP_DEFAULT_MARCH_FLAGS -march=native)
+  set(MARCH_VARIANTS_NAMES "native-only")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "amd64.*|x86_64.*|AMD64.*")
+  set(VPP_DEFAULT_MARCH_FLAGS -march=corei7 -mtune=corei7-avx)
+
+  add_vpp_march_variant(hsw
+    FLAGS -march=haswell -mtune=haswell
+  )
+
+  add_vpp_march_variant(trm
+    FLAGS -march=tremont -mtune=tremont
+    OFF
+  )
+
+  add_vpp_march_variant(adl
+    FLAGS -march=alderlake -mtune=alderlake -mprefer-vector-width=256
+    OFF
+  )
+
   if (GNU_ASSEMBLER_AVX512_BUG)
      message(WARNING "AVX-512 multiarch variant(s) disabled due to GNU Assembler bug")
   else()
-    check_c_compiler_flag("-mprefer-vector-width=256" compiler_flag_mprefer_vector_width)
-    check_c_compiler_flag("-march=skylake-avx512" compiler_flag_march_skylake_avx512)
-    check_c_compiler_flag("-march=icelake-client" compiler_flag_march_icelake_client)
-    if(compiler_flag_march_skylake_avx512 AND compiler_flag_mprefer_vector_width)
-      list(APPEND MARCH_VARIANTS "skx\;-march=skylake-avx512 -mtune=skylake-avx512 -mprefer-vector-width=256")
-    endif()
-    if(compiler_flag_march_icelake_client AND compiler_flag_mprefer_vector_width)
-      list(APPEND MARCH_VARIANTS "icl\;-march=icelake-client -mtune=icelake-client -mprefer-vector-width=512")
-    endif()
+    add_vpp_march_variant(skx
+      FLAGS -march=skylake-avx512 -mtune=skylake-avx512 -mprefer-vector-width=256
+    )
+
+    add_vpp_march_variant(icl
+      FLAGS -march=icelake-client -mtune=icelake-client -mprefer-vector-width=512
+    )
+
+    add_vpp_march_variant(spr
+      FLAGS -march=sapphirerapids -mtune=sapphirerapids -mprefer-vector-width=512
+      OFF
+    )
   endif()
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64.*|AARCH64.*)")
-  set(CMAKE_C_FLAGS "-march=armv8-a+crc ${CMAKE_C_FLAGS}")
-  check_c_compiler_flag("-march=armv8-a+crc+crypto -mtune=qdf24xx" compiler_flag_march_core_qdf24xx)
-  if(compiler_flag_march_core_qdf24xx)
-    list(APPEND MARCH_VARIANTS "qdf24xx\;-march=armv8-a+crc+crypto -DCLIB_N_PREFETCHES=8")
-  endif()
-  check_c_compiler_flag("-march=armv8.2-a+crc+crypto+lse" compiler_flag_march_core_octeontx2)
-  if(compiler_flag_march_core_octeontx2)
-    list(APPEND MARCH_VARIANTS "octeontx2\;-march=armv8.2-a+crc+crypto+lse -DCLIB_N_PREFETCHES=8")
-  endif()
-  check_c_compiler_flag("-march=armv8.1-a+crc+crypto -mtune=thunderx2t99" compiler_flag_march_thunderx2t99)
-  if(compiler_flag_march_thunderx2t99)
-    if (CMAKE_C_COMPILER_ID STREQUAL "GNU" AND (NOT CMAKE_C_COMPILER_VERSION VERSION_LESS 8.3))
-      list(APPEND MARCH_VARIANTS "thunderx2t99\;-march=armv8.1-a+crc+crypto -mtune=thunderx2t99 -DCLIB_N_PREFETCHES=8")
-    else()
-      list(APPEND MARCH_VARIANTS "thunderx2t99\;-march=armv8.1-a+crc+crypto -DCLIB_N_PREFETCHES=8")
-    endif()
-  endif()
-  check_c_compiler_flag("-march=armv8-a+crc+crypto -mtune=cortex-a72" compiler_flag_march_cortexa72)
-  if(compiler_flag_march_cortexa72)
-    list(APPEND MARCH_VARIANTS "cortexa72\;-march=armv8-a+crc+crypto -mtune=cortex-a72 -DCLIB_N_PREFETCHES=6")
-  endif()
-  check_c_compiler_flag("-march=armv8.2-a+crc+crypto -mtune=neoverse-n1" compiler_flag_march_neoversen1)
-  if(compiler_flag_march_neoversen1)
-    list(APPEND MARCH_VARIANTS "neoversen1\;-march=armv8.2-a+crc+crypto -mtune=neoverse-n1 -DCLIB_N_PREFETCHES=6")
-  endif()
+  set(VPP_DEFAULT_MARCH_FLAGS -march=armv8-a+crc)
+
+  add_vpp_march_variant(qdf24xx
+    FLAGS -march=armv8-a+crc+crypto -mtune=qdf24xx
+    N_PREFETCHES 8
+    CACHE_PREFETCH_BYTES 64
+    OFF
+  )
+
+  add_vpp_march_variant(octeontx2
+    FLAGS -march=armv8.2-a+crc+crypto+lse
+    N_PREFETCHES 8
+  )
+
+  add_vpp_march_variant(thunderx2t99
+    FLAGS -march=armv8.1-a+crc+crypto -mtune=thunderx2t99
+    N_PREFETCHES 8
+    CACHE_PREFETCH_BYTES 64
+  )
+
+  add_vpp_march_variant(cortexa72
+    FLAGS -march=armv8-a+crc+crypto -mtune=cortex-a72
+    N_PREFETCHES 6
+    CACHE_PREFETCH_BYTES 64
+  )
+
+  add_vpp_march_variant(neoversen1
+    FLAGS -march=armv8.2-a+crc+crypto -mtune=neoverse-n1
+    N_PREFETCHES 6
+    CACHE_PREFETCH_BYTES 64
+  )
 endif()
 
 macro(vpp_library_set_multiarch_sources lib)
   cmake_parse_arguments(ARG
     ""
     ""
-    "SOURCES;DEPENDS"
+    "SOURCES;DEPENDS;FORCE_ON"
     ${ARGN}
   )
 
-  foreach(V ${MARCH_VARIANTS})
+  set(VARIANTS "${MARCH_VARIANTS}")
+
+  if(ARG_FORCE_ON)
+    foreach(F ${ARG_FORCE_ON})
+      foreach(V ${MARCH_VARIANTS_DISABLED})
+        list(GET V 0 VARIANT)
+	if (VARIANT STREQUAL F)
+          list(GET V 1 VARIANT_FLAGS)
+          list(APPEND VARIANTS "${VARIANT}\;${VARIANT_FLAGS}")
+	endif()
+      endforeach()
+    endforeach()
+  endif()
+
+  foreach(V ${VARIANTS})
     list(GET V 0 VARIANT)
     list(GET V 1 VARIANT_FLAGS)
     set(l ${lib}_${VARIANT})
@@ -142,7 +212,7 @@ macro(vpp_library_set_multiarch_sources lib)
       add_dependencies(${l} ${ARG_DEPENDS})
     endif()
     set_target_properties(${l} PROPERTIES POSITION_INDEPENDENT_CODE ON)
-    target_compile_options(${l} PUBLIC "-DCLIB_MARCH_VARIANT=${VARIANT}")
+    target_compile_definitions(${l} PUBLIC CLIB_MARCH_VARIANT=${VARIANT})
     separate_arguments(VARIANT_FLAGS)
     target_compile_options(${l} PUBLIC ${VARIANT_FLAGS})
     target_sources(${lib} PRIVATE $<TARGET_OBJECTS:${l}>)

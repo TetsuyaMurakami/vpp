@@ -365,7 +365,7 @@ ila_ila2sir (vlib_main_t * vm,
 	    {
 	      ila_ila2sir_trace_t *tr =
 		vlib_add_trace (vm, node, p0, sizeof (*tr));
-	      tr->ila_index = ie0 ? (ie0 - ilm->entries) : ~0;
+	      tr->ila_index = ie0 - ilm->entries;
 	      tr->initial_dst = ip60->dst_address;
 	      tr->adj_index = vnet_buffer (p0)->ip.adj_index[VLIB_TX];
 	    }
@@ -939,7 +939,7 @@ ila_init (vlib_main_t * vm)
 			 ilm->lookup_table_nbuckets, ilm->lookup_table_size);
 
   ila_dpo_type = dpo_register_new_type(&ila_vft, ila_nodes);
-  ila_fib_node_type = fib_node_register_new_type(&ila_fib_node_vft);
+  ila_fib_node_type = fib_node_register_new_type ("ila", &ila_fib_node_vft);
   ila_fib_src = fib_source_allocate("ila",
                                     FIB_SOURCE_PRIORITY_HI,
                                     FIB_SOURCE_BH_SIMPLE);

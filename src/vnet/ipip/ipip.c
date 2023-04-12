@@ -348,9 +348,6 @@ ipip_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai)
   if (!(t->flags & TUNNEL_ENCAP_DECAP_FLAG_ENCAP_INNER_HASH))
     af |= ADJ_FLAG_MIDCHAIN_IP_STACK;
 
-  if (VNET_LINK_ETHERNET == adj_get_link_type (ai))
-    af |= ADJ_FLAG_MIDCHAIN_NO_COUNT;
-
   fixup = ipip_get_fixup (t, adj_get_link_type (ai), &af);
   adj_nbr_midchain_update_rewrite
     (ai, fixup,
@@ -726,8 +723,6 @@ ipip_add_tunnel (ipip_transport_t transport,
 {
   ipip_main_t *gm = &ipip_main;
   vnet_main_t *vnm = gm->vnet_main;
-  ip4_main_t *im4 = &ip4_main;
-  ip6_main_t *im6 = &ip6_main;
   ipip_tunnel_t *t;
   vnet_hw_interface_t *hi;
   u32 hw_if_index, sw_if_index;
@@ -787,18 +782,16 @@ ipip_add_tunnel (ipip_transport_t transport,
   gm->tunnel_index_by_sw_if_index[sw_if_index] = t_idx;
 
   if (t->transport == IPIP_TRANSPORT_IP4)
-    {
-      vec_validate (im4->fib_index_by_sw_if_index, sw_if_index);
-      hi->min_packet_bytes = 64 + sizeof (ip4_header_t);
-    }
+    hi->frame_overhead = sizeof (ip4_header_t);
   else
-    {
-      vec_validate (im6->fib_index_by_sw_if_index, sw_if_index);
-      hi->min_packet_bytes = 64 + sizeof (ip6_header_t);
-    }
+    hi->frame_overhead = sizeof (ip6_header_t);
+
+  hi->min_frame_size = hi->frame_overhead + 64;
 
   /* Standard default ipip MTU. */
   vnet_sw_interface_set_mtu (vnm, sw_if_index, 9000);
+  vnet_set_interface_l3_output_node (gm->vlib_main, sw_if_index,
+				     (u8 *) "tunnel-output");
 
   t->tunnel_src = *src;
   t->tunnel_dst = *dst;
@@ -844,6 +837,7 @@ ipip_del_tunnel (u32 sw_if_index)
     teib_walk_itf (t->sw_if_index, ipip_tunnel_delete_teib_walk, t);
 
   vnet_sw_interface_set_flags (vnm, sw_if_index, 0 /* down */ );
+  vnet_reset_interface_l3_output_node (gm->vlib_main, t->sw_if_index);
   gm->tunnel_index_by_sw_if_index[sw_if_index] = ~0;
   vnet_delete_hw_interface (vnm, t->hw_if_index);
   hash_unset (gm->instance_used, t->user_instance);

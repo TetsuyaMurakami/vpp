@@ -49,105 +49,161 @@ vlib_combined_counter_main_t policer_counters[] = {
   },
 };
 
-clib_error_t *
-policer_add_del (vlib_main_t *vm, u8 *name, qos_pol_cfg_params_st *cfg,
-		 u32 *policer_index, u8 is_add)
+int
+policer_add (vlib_main_t *vm, const u8 *name, const qos_pol_cfg_params_st *cfg,
+	     u32 *policer_index)
 {
   vnet_policer_main_t *pm = &vnet_policer_main;
   policer_t test_policer;
   policer_t *policer;
+  policer_t *pp;
+  qos_pol_cfg_params_st *cp;
   uword *p;
   u32 pi;
   int rv;
+  int i;
 
   p = hash_get_mem (pm->policer_config_by_name, name);
 
-  if (is_add == 0)
-    {
-      /* free policer config and template */
-      if (p == 0)
-	{
-	  vec_free (name);
-	  return clib_error_return (0, "No such policer configuration");
-	}
-      pool_put_index (pm->configs, p[0]);
-      pool_put_index (pm->policer_templates, p[0]);
-      hash_unset_mem (pm->policer_config_by_name, name);
-
-      /* free policer */
-      p = hash_get_mem (pm->policer_index_by_name, name);
-      if (p == 0)
-	{
-	  vec_free (name);
-	  return clib_error_return (0, "No such policer");
-	}
-      pool_put_index (pm->policers, p[0]);
-      hash_unset_mem (pm->policer_index_by_name, name);
-
-      vec_free (name);
-      return 0;
-    }
-
-  if (p != 0)
-    {
-      vec_free (name);
-      return clib_error_return (0, "Policer already exists");
-    }
+  if (p != NULL)
+    return VNET_API_ERROR_VALUE_EXIST;
 
   /* Vet the configuration before adding it to the table */
   rv = pol_logical_2_physical (cfg, &test_policer);
 
-  if (rv == 0)
+  if (rv != 0)
+    return VNET_API_ERROR_INVALID_VALUE;
+
+  pool_get (pm->configs, cp);
+  pool_get_aligned (pm->policers, policer, CLIB_CACHE_LINE_BYTES);
+
+  clib_memcpy (cp, cfg, sizeof (*cp));
+  clib_memcpy (policer, &test_policer, sizeof (*pp));
+
+  policer->name = format (0, "%s%c", name, 0);
+  pi = policer - pm->policers;
+
+  hash_set_mem (pm->policer_config_by_name, policer->name, cp - pm->configs);
+  hash_set_mem (pm->policer_index_by_name, policer->name, pi);
+  *policer_index = pi;
+  policer->thread_index = ~0;
+
+  for (i = 0; i < NUM_POLICE_RESULTS; i++)
     {
-      policer_t *pp;
-      qos_pol_cfg_params_st *cp;
-      int i;
-
-      pool_get (pm->configs, cp);
-      pool_get (pm->policer_templates, pp);
-
-      ASSERT (cp - pm->configs == pp - pm->policer_templates);
-
-      clib_memcpy (cp, cfg, sizeof (*cp));
-      clib_memcpy (pp, &test_policer, sizeof (*pp));
-
-      hash_set_mem (pm->policer_config_by_name, name, cp - pm->configs);
-      pool_get_aligned (pm->policers, policer, CLIB_CACHE_LINE_BYTES);
-      policer[0] = pp[0];
-      pi = policer - pm->policers;
-      hash_set_mem (pm->policer_index_by_name, name, pi);
-      *policer_index = pi;
-      policer->thread_index = ~0;
-
-      for (i = 0; i < NUM_POLICE_RESULTS; i++)
-	{
-	  vlib_validate_combined_counter (&policer_counters[i], pi);
-	  vlib_zero_combined_counter (&policer_counters[i], pi);
-	}
-    }
-  else
-    {
-      vec_free (name);
-      return clib_error_return (0, "Config failed sanity check");
+      vlib_validate_combined_counter (&policer_counters[i], pi);
+      vlib_zero_combined_counter (&policer_counters[i], pi);
     }
 
   return 0;
 }
 
 int
-policer_bind_worker (u8 *name, u32 worker, bool bind)
+policer_del (vlib_main_t *vm, u32 policer_index)
 {
   vnet_policer_main_t *pm = &vnet_policer_main;
   policer_t *policer;
   uword *p;
 
-  p = hash_get_mem (pm->policer_index_by_name, name);
-  if (p == 0)
+  if (pool_is_free_index (pm->policers, policer_index))
+    return VNET_API_ERROR_NO_SUCH_ENTRY;
+
+  policer = &pm->policers[policer_index];
+
+  p = hash_get_mem (pm->policer_config_by_name, policer->name);
+
+  /* free policer config */
+  if (p != NULL)
     {
-      return VNET_API_ERROR_NO_SUCH_ENTRY;
+      pool_put_index (pm->configs, p[0]);
+      hash_unset_mem (pm->policer_config_by_name, policer->name);
     }
 
-  policer = &pm->policers[p[0]];
+  /* free policer */
+  hash_unset_mem (pm->policer_index_by_name, policer->name);
+  vec_free (policer->name);
+  pool_put_index (pm->policers, policer_index);
+
+  return 0;
+}
+
+int
+policer_update (vlib_main_t *vm, u32 policer_index,
+		const qos_pol_cfg_params_st *cfg)
+{
+  vnet_policer_main_t *pm = &vnet_policer_main;
+  policer_t test_policer;
+  policer_t *policer;
+  qos_pol_cfg_params_st *cp;
+  uword *p;
+  u8 *name;
+  int rv;
+  int i;
+
+  if (pool_is_free_index (pm->policers, policer_index))
+    return VNET_API_ERROR_NO_SUCH_ENTRY;
+
+  policer = &pm->policers[policer_index];
+
+  /* Vet the configuration before adding it to the table */
+  rv = pol_logical_2_physical (cfg, &test_policer);
+  if (rv != 0)
+    return VNET_API_ERROR_INVALID_VALUE;
+
+  p = hash_get_mem (pm->policer_config_by_name, policer->name);
+
+  if (PREDICT_TRUE (p != NULL))
+    {
+      cp = &pm->configs[p[0]];
+    }
+  else
+    {
+      /* recover from a missing configuration */
+      pool_get (pm->configs, cp);
+      hash_set_mem (pm->policer_config_by_name, policer->name,
+		    cp - pm->configs);
+    }
+
+  name = policer->name;
+
+  clib_memcpy (cp, cfg, sizeof (*cp));
+  clib_memcpy (policer, &test_policer, sizeof (*policer));
+
+  policer->name = name;
+  policer->thread_index = ~0;
+
+  for (i = 0; i < NUM_POLICE_RESULTS; i++)
+    vlib_zero_combined_counter (&policer_counters[i], policer_index);
+
+  return 0;
+}
+
+int
+policer_reset (vlib_main_t *vm, u32 policer_index)
+{
+  vnet_policer_main_t *pm = &vnet_policer_main;
+  policer_t *policer;
+
+  if (pool_is_free_index (pm->policers, policer_index))
+    return VNET_API_ERROR_NO_SUCH_ENTRY;
+
+  policer = &pm->policers[policer_index];
+
+  policer->current_bucket = policer->current_limit;
+  policer->extended_bucket = policer->extended_limit;
+
+  return 0;
+}
+
+int
+policer_bind_worker (u32 policer_index, u32 worker, bool bind)
+{
+  vnet_policer_main_t *pm = &vnet_policer_main;
+  policer_t *policer;
+
+  if (pool_is_free_index (pm->policers, policer_index))
+    return VNET_API_ERROR_NO_SUCH_ENTRY;
+
+  policer = &pm->policers[policer_index];
 
   if (bind)
     {
@@ -165,23 +221,54 @@ policer_bind_worker (u8 *name, u32 worker, bool bind)
   return 0;
 }
 
+int
+policer_input (u32 policer_index, u32 sw_if_index, vlib_dir_t dir, bool apply)
+{
+  vnet_policer_main_t *pm = &vnet_policer_main;
+
+  if (apply)
+    {
+      vec_validate (pm->policer_index_by_sw_if_index[dir], sw_if_index);
+      pm->policer_index_by_sw_if_index[dir][sw_if_index] = policer_index;
+    }
+  else
+    {
+      pm->policer_index_by_sw_if_index[dir][sw_if_index] = ~0;
+    }
+
+  if (dir == VLIB_RX)
+    {
+      vnet_feature_enable_disable ("device-input", "policer-input",
+				   sw_if_index, apply, 0, 0);
+    }
+  else
+    {
+      vnet_feature_enable_disable ("ip4-output", "policer-output", sw_if_index,
+				   apply, 0, 0);
+      vnet_feature_enable_disable ("ip6-output", "policer-output", sw_if_index,
+				   apply, 0, 0);
+    }
+  return 0;
+}
+
 u8 *
 format_policer_instance (u8 * s, va_list * va)
 {
+  vnet_policer_main_t *pm = &vnet_policer_main;
   policer_t *i = va_arg (*va, policer_t *);
-  uword pi = va_arg (*va, uword);
+  u32 policer_index = i - pm->policers;
   int result;
   vlib_counter_t counts[NUM_POLICE_RESULTS];
 
   for (result = 0; result < NUM_POLICE_RESULTS; result++)
     {
-      vlib_get_combined_counter (&policer_counters[result], pi,
+      vlib_get_combined_counter (&policer_counters[result], policer_index,
 				 &counts[result]);
     }
 
-  s = format (s, "policer at %llx: %s rate, %s color-aware\n",
-	      i, i->single_rate ? "single" : "dual",
-	      i->color_aware ? "is" : "not");
+  s =
+    format (s, "Policer at index %d: %s rate, %s color-aware\n", policer_index,
+	    i->single_rate ? "single" : "dual", i->color_aware ? "is" : "not");
   s = format (s, "cir %u tok/period, pir %u tok/period, scale %u\n",
 	      i->cir_tokens_per_period, i->pir_tokens_per_period, i->scale);
   s = format (s, "cur lim %u, cur bkt %u, ext lim %u, ext bkt %u\n",
@@ -433,6 +520,7 @@ unformat_policer_classify_next_index (unformat_input_t * input, va_list * va)
     return 0;
 
   p = hash_get_mem (pm->policer_index_by_name, match_name);
+  vec_free (match_name);
 
   if (p == 0)
     return 0;
@@ -468,16 +556,19 @@ _(type)                                         \
 _(action)
 
 static clib_error_t *
-configure_policer_command_fn (vlib_main_t * vm,
-			      unformat_input_t * input,
-			      vlib_cli_command_t * cmd)
+policer_add_command_fn (vlib_main_t *vm, unformat_input_t *input,
+			vlib_cli_command_t *cmd)
 {
+  vnet_policer_main_t *pm = &vnet_policer_main;
   qos_pol_cfg_params_st c;
   unformat_input_t _line_input, *line_input = &_line_input;
-  u8 is_add = 1;
   u8 *name = 0;
+  uword *p;
   u32 pi;
+  u32 policer_index = ~0;
+  int rv = 0;
   clib_error_t *error = NULL;
+  u8 is_update = cmd->function_arg;
 
   /* Get a line of input. */
   if (!unformat_user (input, unformat_line_input, line_input))
@@ -487,9 +578,9 @@ configure_policer_command_fn (vlib_main_t * vm,
 
   while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
-      if (unformat (line_input, "del"))
-	is_add = 0;
-      else if (unformat (line_input, "name %s", &name))
+      if (unformat (line_input, "name %s", &name))
+	;
+      else if (is_update && unformat (line_input, "index %u", &policer_index))
 	;
       else if (unformat (line_input, "color-aware"))
 	c.color_aware = 1;
@@ -505,65 +596,423 @@ configure_policer_command_fn (vlib_main_t * vm,
 	}
     }
 
-  error = policer_add_del (vm, name, &c, &pi, is_add);
+  if (is_update)
+    {
+      if (~0 == policer_index && 0 != name)
+	{
+	  p = hash_get_mem (pm->policer_index_by_name, name);
+	  if (p != NULL)
+	    policer_index = p[0];
+	}
+
+      if (~0 != policer_index)
+	{
+	  rv = policer_update (vm, policer_index, &c);
+	}
+    }
+  else
+    {
+      rv = policer_add (vm, name, &c, &pi);
+    }
+
+  switch (rv)
+    {
+    case VNET_API_ERROR_NO_SUCH_ENTRY:
+      error = clib_error_return (0, "No such policer");
+      break;
+    case VNET_API_ERROR_VALUE_EXIST:
+      error = clib_error_return (0, "Policer already exists");
+      break;
+    case VNET_API_ERROR_INVALID_VALUE:
+      error = clib_error_return (0, "Config failed sanity check");
+      break;
+    }
 
 done:
   unformat_free (line_input);
+  vec_free (name);
 
   return error;
 }
 
-/* *INDENT-OFF* */
+static clib_error_t *
+policer_del_command_fn (vlib_main_t *vm, unformat_input_t *input,
+			vlib_cli_command_t *cmd)
+{
+  unformat_input_t _line_input, *line_input = &_line_input;
+  clib_error_t *error = NULL;
+  vnet_policer_main_t *pm = &vnet_policer_main;
+  int rv;
+  u32 policer_index = ~0;
+  uword *p;
+  u8 *name = 0;
+
+  /* Get a line of input. */
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "name %s", &name))
+	;
+      else if (unformat (line_input, "index %u", &policer_index))
+	;
+      else
+	{
+	  error = clib_error_return (0, "unknown input `%U'",
+				     format_unformat_error, line_input);
+	  goto done;
+	}
+    }
+
+  if (~0 == policer_index && 0 != name)
+    {
+      p = hash_get_mem (pm->policer_index_by_name, name);
+      if (p != NULL)
+	policer_index = p[0];
+    }
+
+  rv = VNET_API_ERROR_NO_SUCH_ENTRY;
+  if (~0 != policer_index)
+    rv = policer_del (vm, policer_index);
+
+  switch (rv)
+    {
+    case VNET_API_ERROR_INVALID_VALUE:
+      error = clib_error_return (0, "No such policer configuration");
+      break;
+    case VNET_API_ERROR_NO_SUCH_ENTRY:
+      error = clib_error_return (0, "No such policer");
+      break;
+    }
+
+done:
+  unformat_free (line_input);
+  vec_free (name);
+
+  return error;
+}
+
+static clib_error_t *
+policer_bind_command_fn (vlib_main_t *vm, unformat_input_t *input,
+			 vlib_cli_command_t *cmd)
+{
+  unformat_input_t _line_input, *line_input = &_line_input;
+  clib_error_t *error = NULL;
+  vnet_policer_main_t *pm = &vnet_policer_main;
+  u8 bind = 1;
+  u8 *name = 0;
+  u32 worker = ~0;
+  u32 policer_index = ~0;
+  uword *p;
+  int rv;
+
+  /* Get a line of input. */
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "name %s", &name))
+	;
+      else if (unformat (line_input, "index %u", &policer_index))
+	;
+      else if (unformat (line_input, "unbind"))
+	bind = 0;
+      else if (unformat (line_input, "%d", &worker))
+	;
+      else
+	{
+	  error = clib_error_return (0, "unknown input `%U'",
+				     format_unformat_error, line_input);
+	  goto done;
+	}
+    }
+
+  if (bind && ~0 == worker)
+    {
+      error = clib_error_return (0, "specify worker to bind to: `%U'",
+				 format_unformat_error, line_input);
+    }
+  else
+    {
+      if (~0 == policer_index && 0 != name)
+	{
+	  p = hash_get_mem (pm->policer_index_by_name, name);
+	  if (p != NULL)
+	    policer_index = p[0];
+	}
+
+      rv = VNET_API_ERROR_NO_SUCH_ENTRY;
+      if (~0 != policer_index)
+	rv = policer_bind_worker (policer_index, worker, bind);
+
+      if (rv)
+	error = clib_error_return (0, "failed: `%d'", rv);
+    }
+
+done:
+  unformat_free (line_input);
+  vec_free (name);
+
+  return error;
+}
+
+static clib_error_t *
+policer_input_command_fn (vlib_main_t *vm, unformat_input_t *input,
+			  vlib_cli_command_t *cmd)
+{
+  unformat_input_t _line_input, *line_input = &_line_input;
+  clib_error_t *error = NULL;
+  vnet_policer_main_t *pm = &vnet_policer_main;
+  u8 apply = 1;
+  u8 *name = 0;
+  u32 sw_if_index = ~0;
+  u32 policer_index = ~0;
+  uword *p;
+  int rv;
+  vlib_dir_t dir = cmd->function_arg;
+
+  /* Get a line of input. */
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "name %s", &name))
+	;
+      else if (unformat (line_input, "index %u", &policer_index))
+	;
+      else if (unformat (line_input, "unapply"))
+	apply = 0;
+      else if (unformat (line_input, "%U", unformat_vnet_sw_interface,
+			 vnet_get_main (), &sw_if_index))
+	;
+      else
+	{
+	  error = clib_error_return (0, "unknown input `%U'",
+				     format_unformat_error, line_input);
+	  goto done;
+	}
+    }
+
+  if (~0 == sw_if_index)
+    {
+      error = clib_error_return (0, "specify interface to apply to: `%U'",
+				 format_unformat_error, line_input);
+    }
+  else
+    {
+      if (~0 == policer_index && 0 != name)
+	{
+	  p = hash_get_mem (pm->policer_index_by_name, name);
+	  if (p != NULL)
+	    policer_index = p[0];
+	}
+
+      rv = VNET_API_ERROR_NO_SUCH_ENTRY;
+      if (~0 != policer_index)
+	rv = policer_input (policer_index, sw_if_index, dir, apply);
+
+      if (rv)
+	error = clib_error_return (0, "failed: `%d'", rv);
+    }
+
+done:
+  unformat_free (line_input);
+  vec_free (name);
+
+  return error;
+}
+
+static clib_error_t *
+policer_reset_command_fn (vlib_main_t *vm, unformat_input_t *input,
+			  vlib_cli_command_t *cmd)
+{
+  unformat_input_t _line_input, *line_input = &_line_input;
+  clib_error_t *error = NULL;
+  vnet_policer_main_t *pm = &vnet_policer_main;
+  int rv;
+  u32 policer_index = ~0;
+  uword *p;
+  u8 *name = 0;
+
+  /* Get a line of input. */
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "name %s", &name))
+	;
+      else if (unformat (line_input, "index %u", &policer_index))
+	;
+      else
+	{
+	  error = clib_error_return (0, "unknown input `%U'",
+				     format_unformat_error, line_input);
+	  goto done;
+	}
+    }
+
+  if (~0 == policer_index && 0 != name)
+    {
+      p = hash_get_mem (pm->policer_index_by_name, name);
+      if (p != NULL)
+	policer_index = p[0];
+    }
+
+  rv = VNET_API_ERROR_NO_SUCH_ENTRY;
+  if (~0 != policer_index)
+    rv = policer_reset (vm, policer_index);
+
+  switch (rv)
+    {
+    case VNET_API_ERROR_NO_SUCH_ENTRY:
+      error = clib_error_return (0, "No such policer");
+      break;
+    }
+
+done:
+  unformat_free (line_input);
+  vec_free (name);
+
+  return error;
+}
+
 VLIB_CLI_COMMAND (configure_policer_command, static) = {
-    .path = "configure policer",
-    .short_help = "configure policer name <name> <params> ",
-    .function = configure_policer_command_fn,
+  .path = "configure policer",
+  .short_help = "configure policer [name <name> | index <index>] [type 1r2c | "
+		"1r3c | 2r3c-2698 "
+		"| 2r3c-4115] [color-aware] [cir <cir>] [cb <cb>] [eir <eir>] "
+		"[eb <eb>] [rate kbps | pps] [round closest | up | down] "
+		"[conform-action drop | transmit | mark-and-transmit <dscp>] "
+		"[exceed-action drop | transmit | mark-and-transmit <dscp>] "
+		"[violate-action drop | transmit | mark-and-transmit <dscp>]",
+  .function = policer_add_command_fn,
+  .function_arg = 1
 };
-/* *INDENT-ON* */
+
+VLIB_CLI_COMMAND (policer_add_command, static) = {
+  .path = "policer add",
+  .short_help = "policer add name <name> [type 1r2c | 1r3c | 2r3c-2698 | "
+		"2r3c-4115] [color-aware] [cir <cir>] [cb <cb>] [eir <eir>] "
+		"[eb <eb>] [rate kbps | pps] [round closest | up | down] "
+		"[conform-action drop | transmit | mark-and-transmit <dscp>] "
+		"[exceed-action drop | transmit | mark-and-transmit <dscp>] "
+		"[violate-action drop | transmit | mark-and-transmit <dscp>]",
+  .function = policer_add_command_fn,
+  .function_arg = 0
+};
+
+VLIB_CLI_COMMAND (policer_del_command, static) = {
+  .path = "policer del",
+  .short_help = "policer del [name <name> | index <index>]",
+  .function = policer_del_command_fn,
+};
+
+VLIB_CLI_COMMAND (policer_bind_command, static) = {
+  .path = "policer bind",
+  .short_help = "policer bind [unbind] [name <name> | index <index>] <worker>",
+  .function = policer_bind_command_fn,
+};
+
+VLIB_CLI_COMMAND (policer_input_command, static) = {
+  .path = "policer input",
+  .short_help =
+    "policer input [unapply] [name <name> | index <index>] <interface>",
+  .function = policer_input_command_fn,
+  .function_arg = VLIB_RX,
+};
+
+VLIB_CLI_COMMAND (policer_output_command, static) = {
+  .path = "policer output",
+  .short_help =
+    "policer output [unapply] [name <name> | index <index>] <interface>",
+  .function = policer_input_command_fn,
+  .function_arg = VLIB_TX,
+};
+
+VLIB_CLI_COMMAND (policer_reset_command, static) = {
+  .path = "policer reset",
+  .short_help = "policer reset [name <name> | index <index>]",
+  .function = policer_reset_command_fn
+};
 
 static clib_error_t *
 show_policer_command_fn (vlib_main_t * vm,
 			 unformat_input_t * input, vlib_cli_command_t * cmd)
 {
   vnet_policer_main_t *pm = &vnet_policer_main;
-  hash_pair_t *p;
-  u32 pool_index;
-  u8 *match_name = 0;
-  u8 *name;
-  uword *pi;
+  unformat_input_t _line_input, *line_input = &_line_input;
+  policer_t *policer;
+  u32 policer_index = ~0;
+  u8 *name = 0;
+  uword *ci, *pi;
   qos_pol_cfg_params_st *config;
-  policer_t *templ;
+  clib_error_t *error = 0;
 
-  (void) unformat (input, "name %s", &match_name);
+  /* Get a line of input. */
+  if (!unformat_user (input, unformat_line_input, line_input))
+    {
+      pool_foreach (policer, pm->policers)
+	{
+	  ci = hash_get_mem (pm->policer_config_by_name, policer->name);
+	  config = pool_elt_at_index (pm->configs, ci[0]);
 
-  /* *INDENT-OFF* */
-  hash_foreach_pair (p, pm->policer_config_by_name,
-  ({
-    name = (u8 *) p->key;
-    if (match_name == 0 || !strcmp((char *) name, (char *) match_name))
-      {
-	pi = hash_get_mem (pm->policer_index_by_name, name);
+	  vlib_cli_output (vm, "Name \"%s\" %U ", policer->name,
+			   format_policer_config, config);
+	  vlib_cli_output (vm, "%U", format_policer_instance, policer);
+	  vlib_cli_output (vm, "-----------");
+	}
+      return 0;
+    }
 
-	pool_index = p->value[0];
-	config = pool_elt_at_index (pm->configs, pool_index);
-	templ = pool_elt_at_index (pm->policer_templates, pool_index);
-	vlib_cli_output (vm, "Name \"%s\" %U ", name, format_policer_config,
-			 config);
-	vlib_cli_output (vm, "Template %U", format_policer_instance, templ,
-			 pi[0]);
-	vlib_cli_output (vm, "-----------");
-      }
-  }));
-  /* *INDENT-ON* */
-  return 0;
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "name %s", &name))
+	;
+      else if (unformat (line_input, "index %u", &policer_index))
+	;
+      else
+	{
+	  error = clib_error_return (0, "unknown input `%U'",
+				     format_unformat_error, line_input);
+	  goto done;
+	}
+    }
+
+  if (~0 == policer_index && 0 != name)
+    {
+      pi = hash_get_mem (pm->policer_index_by_name, name);
+      if (pi != NULL)
+	policer_index = pi[0];
+    }
+
+  if (~0 == policer_index || pool_is_free_index (pm->policers, policer_index))
+    goto done;
+
+  policer = &pm->policers[policer_index];
+  ci = hash_get_mem (pm->policer_config_by_name, policer->name);
+  config = pool_elt_at_index (pm->configs, ci[0]);
+  vlib_cli_output (vm, "Name \"%s\" %U ", policer->name, format_policer_config,
+		   config);
+  vlib_cli_output (vm, "%U", format_policer_instance, policer);
+  vlib_cli_output (vm, "-----------");
+
+done:
+  unformat_free (line_input);
+  vec_free (name);
+
+  return error;
 }
 
 
 /* *INDENT-OFF* */
 VLIB_CLI_COMMAND (show_policer_command, static) = {
-    .path = "show policer",
-    .short_help = "show policer [name]",
-    .function = show_policer_command_fn,
+  .path = "show policer",
+  .short_help = "show policer [name <name> | index <index>]",
+  .function = show_policer_command_fn,
 };
 /* *INDENT-ON* */
 
@@ -574,10 +1023,8 @@ show_policer_pools_command_fn (vlib_main_t * vm,
 {
   vnet_policer_main_t *pm = &vnet_policer_main;
 
-  vlib_cli_output (vm, "pool sizes: configs=%d templates=%d policers=%d",
-		   pool_elts (pm->configs),
-		   pool_elts (pm->policer_templates),
-		   pool_elts (pm->policers));
+  vlib_cli_output (vm, "pool sizes: configs=%d policers=%d",
+		   pool_elts (pm->configs), pool_elts (pm->policers));
   return 0;
 }
 /* *INDENT-OFF* */
@@ -592,13 +1039,14 @@ clib_error_t *
 policer_init (vlib_main_t * vm)
 {
   vnet_policer_main_t *pm = &vnet_policer_main;
-  void vnet_policer_node_funcs_reference (void);
-
-  vnet_policer_node_funcs_reference ();
 
   pm->vlib_main = vm;
   pm->vnet_main = vnet_get_main ();
   pm->log_class = vlib_log_register_class ("policer", 0);
+  pm->fq_index[VLIB_RX] =
+    vlib_frame_queue_main_init (policer_input_node.index, 0);
+  pm->fq_index[VLIB_TX] =
+    vlib_frame_queue_main_init (policer_output_node.index, 0);
 
   pm->policer_config_by_name = hash_create_string (0, sizeof (uword));
   pm->policer_index_by_name = hash_create_string (0, sizeof (uword));

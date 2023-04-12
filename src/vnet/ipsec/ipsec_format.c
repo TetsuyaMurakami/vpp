@@ -153,8 +153,8 @@ format_ipsec_replay_window (u8 * s, va_list * args)
   return s;
 }
 
-u8 *
-format_ipsec_policy (u8 * s, va_list * args)
+static u8 *
+format_ipsec_policy_with_suffix (u8 *s, va_list *args, u8 *suffix)
 {
   u32 pi = va_arg (*args, u32);
   ip46_type_t ip_type = IP46_TYPE_IP4;
@@ -168,7 +168,7 @@ format_ipsec_policy (u8 * s, va_list * args)
 	      pi, p->priority,
 	      format_ipsec_policy_action, p->policy,
 	      format_ipsec_policy_type, p->type);
-  if (p->protocol)
+  if (p->protocol != IPSEC_POLICY_PROTOCOL_ANY)
     {
       s = format (s, "%U", format_ip_protocol, p->protocol);
     }
@@ -180,6 +180,9 @@ format_ipsec_policy (u8 * s, va_list * args)
     {
       s = format (s, " sa %u", p->sa_id);
     }
+  if (suffix)
+    s = format (s, " %s", suffix);
+
   if (p->is_ipv6)
     {
       ip_type = IP46_TYPE_IP6;
@@ -201,6 +204,152 @@ format_ipsec_policy (u8 * s, va_list * args)
 }
 
 u8 *
+format_ipsec_policy (u8 *s, va_list *args)
+{
+  return format_ipsec_policy_with_suffix (s, args, 0);
+}
+
+u8 *
+format_ipsec_fp_policy (u8 *s, va_list *args)
+{
+  return format_ipsec_policy_with_suffix (s, args, (u8 *) "<fast-path>");
+}
+
+/**
+ * @brief Context when walking the fp bihash  table. We need to filter
+ * only those policies that are of given type as we walk the table.
+ */
+typedef struct ipsec_spd_policy_ctx_t_
+{
+  u32 *policies;
+  ipsec_spd_policy_type_t t;
+} ipsec_fp_walk_ctx_t;
+
+static int
+ipsec_fp_table_walk_ip4_cb (clib_bihash_kv_16_8_t *kvp, void *arg)
+{
+  ipsec_fp_walk_ctx_t *ctx = (ipsec_fp_walk_ctx_t *) arg;
+  ipsec_main_t *im = &ipsec_main;
+  ipsec_policy_t *p;
+
+  ipsec_fp_lookup_value_t *val = (ipsec_fp_lookup_value_t *) &kvp->value;
+
+  u32 *policy_id;
+
+  vec_foreach (policy_id, val->fp_policies_ids)
+    {
+      p = pool_elt_at_index (im->policies, *policy_id);
+      if (p->type == ctx->t)
+	vec_add1 (ctx->policies, *policy_id);
+    }
+
+  return BIHASH_WALK_CONTINUE;
+}
+
+static int
+ipsec_fp_table_walk_ip6_cb (clib_bihash_kv_40_8_t *kvp, void *arg)
+{
+  ipsec_fp_walk_ctx_t *ctx = (ipsec_fp_walk_ctx_t *) arg;
+  ipsec_main_t *im = &ipsec_main;
+  ipsec_policy_t *p;
+
+  ipsec_fp_lookup_value_t *val = (ipsec_fp_lookup_value_t *) &kvp->value;
+
+  u32 *policy_id;
+
+  vec_foreach (policy_id, val->fp_policies_ids)
+    {
+      p = pool_elt_at_index (im->policies, *policy_id);
+      if (p->type == ctx->t)
+	vec_add1 (ctx->policies, *policy_id);
+    }
+
+  return BIHASH_WALK_CONTINUE;
+}
+
+u8 *
+format_ipsec_fp_policies (u8 *s, va_list *args)
+{
+  ipsec_main_t *im = &ipsec_main;
+  ipsec_spd_t *spd = va_arg (*args, ipsec_spd_t *);
+  ipsec_spd_policy_type_t t = va_arg (*args, ipsec_spd_policy_type_t);
+  u32 *i;
+  ipsec_fp_walk_ctx_t ctx = {
+    .policies = 0,
+    .t = t,
+  };
+
+  u32 ip4_in_lookup_hash_idx = spd->fp_spd.ip4_in_lookup_hash_idx;
+  u32 ip4_out_lookup_hash_idx = spd->fp_spd.ip4_out_lookup_hash_idx;
+  u32 ip6_in_lookup_hash_idx = spd->fp_spd.ip6_in_lookup_hash_idx;
+  u32 ip6_out_lookup_hash_idx = spd->fp_spd.ip6_out_lookup_hash_idx;
+
+  switch (t)
+    {
+    case IPSEC_SPD_POLICY_IP4_INBOUND_PROTECT:
+    case IPSEC_SPD_POLICY_IP4_INBOUND_BYPASS:
+    case IPSEC_SPD_POLICY_IP4_INBOUND_DISCARD:
+      if (INDEX_INVALID != ip4_in_lookup_hash_idx)
+	{
+	  clib_bihash_16_8_t *bihash_table = pool_elt_at_index (
+	    im->fp_ip4_lookup_hashes_pool, ip4_in_lookup_hash_idx);
+
+	  clib_bihash_foreach_key_value_pair_16_8 (
+	    bihash_table, ipsec_fp_table_walk_ip4_cb, &ctx);
+	}
+
+      break;
+
+    case IPSEC_SPD_POLICY_IP6_INBOUND_PROTECT:
+    case IPSEC_SPD_POLICY_IP6_INBOUND_BYPASS:
+    case IPSEC_SPD_POLICY_IP6_INBOUND_DISCARD:
+      if (INDEX_INVALID != ip6_in_lookup_hash_idx)
+	{
+	  clib_bihash_40_8_t *bihash_table = pool_elt_at_index (
+	    im->fp_ip6_lookup_hashes_pool, ip6_in_lookup_hash_idx);
+
+	  clib_bihash_foreach_key_value_pair_40_8 (
+	    bihash_table, ipsec_fp_table_walk_ip6_cb, &ctx);
+	}
+
+      break;
+    case IPSEC_SPD_POLICY_IP4_OUTBOUND:
+      if (INDEX_INVALID != ip4_out_lookup_hash_idx)
+	{
+	  clib_bihash_16_8_t *bihash_table = pool_elt_at_index (
+	    im->fp_ip4_lookup_hashes_pool, ip4_out_lookup_hash_idx);
+
+	  clib_bihash_foreach_key_value_pair_16_8 (
+	    bihash_table, ipsec_fp_table_walk_ip4_cb, &ctx);
+	}
+
+      break;
+    case IPSEC_SPD_POLICY_IP6_OUTBOUND:
+      if (INDEX_INVALID != ip6_out_lookup_hash_idx)
+	{
+	  clib_bihash_40_8_t *bihash_table = pool_elt_at_index (
+	    im->fp_ip6_lookup_hashes_pool, ip6_out_lookup_hash_idx);
+
+	  clib_bihash_foreach_key_value_pair_40_8 (
+	    bihash_table, ipsec_fp_table_walk_ip6_cb, &ctx);
+	}
+
+      break;
+    default:
+      break;
+    }
+
+  vec_foreach (i, ctx.policies)
+    {
+      s = format (s, "\n %U", format_ipsec_fp_policy, *i);
+    }
+
+  vec_free (ctx.policies);
+
+  return s;
+}
+
+u8 *
 format_ipsec_spd (u8 * s, va_list * args)
 {
   u32 si = va_arg (*args, u32);
@@ -218,16 +367,39 @@ format_ipsec_spd (u8 * s, va_list * args)
 
   s = format (s, "spd %u", spd->id);
 
-#define _(v, n)                                                 \
-  s = format (s, "\n %s:", n);                                  \
-  vec_foreach(i, spd->policies[IPSEC_SPD_POLICY_##v])           \
-  {                                                             \
-    s = format (s, "\n %U", format_ipsec_policy, *i);           \
-  }
+#define _(v, n)                                                               \
+  s = format (s, "\n %s:", n);                                                \
+  vec_foreach (i, spd->policies[IPSEC_SPD_POLICY_##v])                        \
+    {                                                                         \
+      s = format (s, "\n %U", format_ipsec_policy, *i);                       \
+    }                                                                         \
+  s = format (s, "\n %U", format_ipsec_fp_policies, spd, IPSEC_SPD_POLICY_##v);
   foreach_ipsec_spd_policy_type;
 #undef _
 
 done:
+  return (s);
+}
+
+u8 *
+format_ipsec_out_spd_flow_cache (u8 *s, va_list *args)
+{
+  ipsec_main_t *im = &ipsec_main;
+
+  s = format (s, "\nipv4-outbound-spd-flow-cache-entries: %u",
+	      im->ipsec4_out_spd_flow_cache_entries);
+
+  return (s);
+}
+
+u8 *
+format_ipsec_in_spd_flow_cache (u8 *s, va_list *args)
+{
+  ipsec_main_t *im = &ipsec_main;
+
+  s = format (s, "\nipv4-inbound-spd-flow-cache-entries: %u",
+	      im->ipsec4_in_spd_flow_cache_entries);
+
   return (s);
 }
 
@@ -271,17 +443,17 @@ format_ipsec_sa (u8 * s, va_list * args)
 {
   u32 sai = va_arg (*args, u32);
   ipsec_format_flags_t flags = va_arg (*args, ipsec_format_flags_t);
-  ipsec_main_t *im = &ipsec_main;
   vlib_counter_t counts;
+  counter_t errors;
   ipsec_sa_t *sa;
 
-  if (pool_is_free_index (im->sad, sai))
+  if (pool_is_free_index (ipsec_sa_pool, sai))
     {
       s = format (s, "No such SA index: %d", sai);
       goto done;
     }
 
-  sa = pool_elt_at_index (im->sad, sai);
+  sa = ipsec_sa_get (sai);
 
   s = format (s, "[%d] sa %u (0x%x) spi %u (0x%08x) protocol:%s flags:[%U]",
 	      sai, sa->id, sa->id, sa->spi, sa->spi,
@@ -294,9 +466,8 @@ format_ipsec_sa (u8 * s, va_list * args)
   s = format (s, "\n   salt 0x%x", clib_net_to_host_u32 (sa->salt));
   s = format (s, "\n   thread-index:%d", sa->thread_index);
   s = format (s, "\n   seq %u seq-hi %u", sa->seq, sa->seq_hi);
-  s = format (s, "\n   last-seq %u last-seq-hi %u window %U",
-	      sa->last_seq, sa->last_seq_hi,
-	      format_ipsec_replay_window, sa->replay_window);
+  s = format (s, "\n   window %U", format_ipsec_replay_window,
+	      sa->replay_window);
   s = format (s, "\n   crypto alg %U",
 	      format_ipsec_crypto_alg, sa->crypto_alg);
   if (sa->crypto_alg && (flags & IPSEC_FORMAT_INSECURE))
@@ -314,10 +485,17 @@ format_ipsec_sa (u8 * s, va_list * args)
 	      clib_host_to_net_u16 (sa->udp_hdr.dst_port));
 
   vlib_get_combined_counter (&ipsec_sa_counters, sai, &counts);
-  s = format (s, "\n   packets %u bytes %u", counts.packets, counts.bytes);
+  s = format (s, "\n   tx/rx:[packets:%Ld bytes:%Ld]", counts.packets,
+	      counts.bytes);
+  s = format (s, "\n   SA errors:");
+#define _(index, val, err, desc)                                              \
+  errors = vlib_get_simple_counter (&ipsec_sa_err_counters[index], sai);      \
+  s = format (s, "\n   " #desc ":[packets:%Ld]", errors);
+  foreach_ipsec_sa_err
+#undef _
 
-  if (ipsec_sa_is_set_IS_TUNNEL (sa))
-    s = format (s, "\n%U", format_tunnel, &sa->tunnel, 3);
+    if (ipsec_sa_is_set_IS_TUNNEL (sa)) s =
+      format (s, "\n%U", format_tunnel, &sa->tunnel, 3);
 
 done:
   return (s);

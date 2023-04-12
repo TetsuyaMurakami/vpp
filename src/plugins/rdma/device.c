@@ -183,11 +183,11 @@ rdma_mac_change (vnet_hw_interface_t * hw, const u8 * old, const u8 * new)
   return 0;
 }
 
-static u32
-rdma_dev_change_mtu (rdma_device_t * rd)
+static clib_error_t *
+rdma_set_max_frame_size (vnet_main_t *vnm, vnet_hw_interface_t *hw,
+			 u32 frame_size)
 {
-  rdma_log__ (VLIB_LOG_LEVEL_ERR, rd, "MTU change not supported");
-  return ~0;
+  return vnet_error (VNET_ERR_UNSUPPORTED, 0);
 }
 
 static u32
@@ -202,8 +202,6 @@ rdma_flag_change (vnet_main_t * vnm, vnet_hw_interface_t * hw, u32 flags)
       return rdma_dev_set_ucast (rd);
     case ETHERNET_INTERFACE_FLAG_ACCEPT_ALL:
       return rdma_dev_set_promisc (rd);
-    case ETHERNET_INTERFACE_FLAG_MTU:
-      return rdma_dev_change_mtu (rd);
     }
 
   rdma_log__ (VLIB_LOG_LEVEL_ERR, rd, "unknown flag %x requested", flags);
@@ -311,7 +309,7 @@ rdma_async_event_read_ready (clib_file_t * f)
       vlib_log_emerg (rm->log_class, "%s: fatal error", rd->name);
       break;
     default:
-      rdma_log__ (VLIB_LOG_LEVEL_ERR, rd, "unhandeld RDMA async event %i",
+      rdma_log__ (VLIB_LOG_LEVEL_ERR, rd, "unhandeld RDMA async event %d",
 		  event.event_type);
       break;
     }
@@ -355,18 +353,20 @@ rdma_async_event_cleanup (rdma_device_t * rd)
 static clib_error_t *
 rdma_register_interface (vnet_main_t * vnm, rdma_device_t * rd)
 {
-  clib_error_t *err =
-    ethernet_register_interface (vnm, rdma_device_class.index,
-				 rd->dev_instance, rd->hwaddr.bytes,
-				 &rd->hw_if_index, rdma_flag_change);
+  vnet_eth_interface_registration_t eir = {};
 
+  eir.dev_class_index = rdma_device_class.index;
+  eir.dev_instance = rd->dev_instance;
+  eir.address = rd->hwaddr.bytes;
+  eir.cb.flag_change = rdma_flag_change;
+  eir.cb.set_max_frame_size = rdma_set_max_frame_size;
+  rd->hw_if_index = vnet_eth_register_interface (vnm, &eir);
   /* Indicate ability to support L3 DMAC filtering and
    * initialize interface to L3 non-promisc mode */
-  vnet_hw_interface_t *hi = vnet_get_hw_interface (vnm, rd->hw_if_index);
-  hi->flags |= VNET_HW_INTERFACE_FLAG_SUPPORTS_MAC_FILTER;
+  vnet_hw_if_set_caps (vnm, rd->hw_if_index, VNET_HW_IF_CAP_MAC_FILTER);
   ethernet_set_flags (vnm, rd->hw_if_index,
 		      ETHERNET_INTERFACE_FLAG_DEFAULT_L3);
-  return err;
+  return 0;
 }
 
 static void
@@ -445,9 +445,10 @@ rdma_rxq_init (vlib_main_t * vm, rdma_device_t * rd, u16 qid, u32 n_desc,
   if (is_mlx5dv)
     {
       struct mlx5dv_cq_init_attr dvcq = { };
-      dvcq.comp_mask = MLX5DV_CQ_INIT_ATTR_MASK_COMPRESSED_CQE;
+      dvcq.comp_mask = MLX5DV_CQ_INIT_ATTR_MASK_COMPRESSED_CQE |
+		       MLX5DV_CQ_INIT_ATTR_MASK_CQE_SIZE;
       dvcq.cqe_comp_res_format = MLX5DV_CQE_RES_FORMAT_HASH;
-
+      dvcq.cqe_size = 64;
       if ((cqex = mlx5dv_create_cq (rd->ctx, &cqa, &dvcq)) == 0)
 	return clib_error_return_unix (0, "Create mlx5dv rx CQ Failed");
     }
@@ -611,21 +612,73 @@ rdma_rxq_init (vlib_main_t * vm, rdma_device_t * rd, u16 qid, u32 n_desc,
   return 0;
 }
 
+static uint64_t
+rdma_rss42ibv (const rdma_rss4_t rss4)
+{
+  switch (rss4)
+    {
+    case RDMA_RSS4_IP:
+      return IBV_RX_HASH_SRC_IPV4 | IBV_RX_HASH_DST_IPV4;
+    case RDMA_RSS4_IP_UDP:
+      return IBV_RX_HASH_SRC_IPV4 | IBV_RX_HASH_DST_IPV4 |
+	     IBV_RX_HASH_SRC_PORT_UDP | IBV_RX_HASH_DST_PORT_UDP;
+    case RDMA_RSS4_AUTO: /* fallthrough */
+    case RDMA_RSS4_IP_TCP:
+      return IBV_RX_HASH_SRC_IPV4 | IBV_RX_HASH_DST_IPV4 |
+	     IBV_RX_HASH_SRC_PORT_TCP | IBV_RX_HASH_DST_PORT_TCP;
+    }
+  ASSERT (0);
+  return 0;
+}
+
+static uint64_t
+rdma_rss62ibv (const rdma_rss6_t rss6)
+{
+  switch (rss6)
+    {
+    case RDMA_RSS6_IP:
+      return IBV_RX_HASH_SRC_IPV6 | IBV_RX_HASH_DST_IPV6;
+    case RDMA_RSS6_IP_UDP:
+      return IBV_RX_HASH_SRC_IPV6 | IBV_RX_HASH_DST_IPV6 |
+	     IBV_RX_HASH_SRC_PORT_UDP | IBV_RX_HASH_DST_PORT_UDP;
+    case RDMA_RSS6_AUTO: /* fallthrough */
+    case RDMA_RSS6_IP_TCP:
+      return IBV_RX_HASH_SRC_IPV6 | IBV_RX_HASH_DST_IPV6 |
+	     IBV_RX_HASH_SRC_PORT_TCP | IBV_RX_HASH_DST_PORT_TCP;
+    }
+  ASSERT (0);
+  return 0;
+}
+
 static clib_error_t *
-rdma_rxq_finalize (vlib_main_t * vm, rdma_device_t * rd)
+rdma_rxq_finalize (vlib_main_t *vm, rdma_device_t *rd)
 {
   struct ibv_rwq_ind_table_init_attr rwqia;
   struct ibv_qp_init_attr_ex qpia;
   struct ibv_wq **ind_tbl;
+  const u32 rxq_sz = vec_len (rd->rxqs);
+  u32 ind_tbl_sz = rxq_sz;
   u32 i;
 
-  ASSERT (is_pow2 (vec_len (rd->rxqs))
-	  && "rxq number should be a power of 2");
+  if (!is_pow2 (ind_tbl_sz))
+    {
+      /* in case we do not have a power-of-2 number of rxq, we try to use the
+       * maximum supported to minimize the imbalance */
+      struct ibv_device_attr_ex attr;
+      if (ibv_query_device_ex (rd->ctx, 0, &attr))
+	return clib_error_return_unix (0, "device query failed");
+      ind_tbl_sz = attr.rss_caps.max_rwq_indirection_table_size;
+      if (ind_tbl_sz < rxq_sz)
+	return clib_error_create ("too many rxqs requested (%d) compared to "
+				  "max indirection table size (%d)",
+				  rxq_sz, ind_tbl_sz);
+    }
 
-  ind_tbl = vec_new (struct ibv_wq *, vec_len (rd->rxqs));
-  vec_foreach_index (i, rd->rxqs)
-    ind_tbl[i] = vec_elt_at_index (rd->rxqs, i)->wq;
+  ind_tbl = vec_new (struct ibv_wq *, ind_tbl_sz);
+  vec_foreach_index (i, ind_tbl)
+    vec_elt (ind_tbl, i) = vec_elt (rd->rxqs, i % rxq_sz).wq;
   memset (&rwqia, 0, sizeof (rwqia));
+  ASSERT (is_pow2 (vec_len (ind_tbl)));
   rwqia.log_ind_tbl_size = min_log2 (vec_len (ind_tbl));
   rwqia.ind_tbl = ind_tbl;
   if ((rd->rx_rwq_ind_tbl = ibv_create_rwq_ind_table (rd->ctx, &rwqia)) == 0)
@@ -644,15 +697,11 @@ rdma_rxq_finalize (vlib_main_t * vm, rdma_device_t * rd)
   qpia.rx_hash_conf.rx_hash_key = rdma_rss_hash_key;
   qpia.rx_hash_conf.rx_hash_function = IBV_RX_HASH_FUNC_TOEPLITZ;
 
-  qpia.rx_hash_conf.rx_hash_fields_mask =
-    IBV_RX_HASH_SRC_IPV4 | IBV_RX_HASH_DST_IPV4 | IBV_RX_HASH_SRC_PORT_TCP |
-    IBV_RX_HASH_DST_PORT_TCP;
+  qpia.rx_hash_conf.rx_hash_fields_mask = rdma_rss42ibv (rd->rss4);
   if ((rd->rx_qp4 = ibv_create_qp_ex (rd->ctx, &qpia)) == 0)
     return clib_error_return_unix (0, "IPv4 Queue Pair create failed");
 
-  qpia.rx_hash_conf.rx_hash_fields_mask =
-    IBV_RX_HASH_SRC_IPV6 | IBV_RX_HASH_DST_IPV6 | IBV_RX_HASH_SRC_PORT_TCP |
-    IBV_RX_HASH_DST_PORT_TCP;
+  qpia.rx_hash_conf.rx_hash_fields_mask = rdma_rss62ibv (rd->rss6);
   if ((rd->rx_qp6 = ibv_create_qp_ex (rd->ctx, &qpia)) == 0)
     return clib_error_return_unix (0, "IPv6 Queue Pair create failed");
 
@@ -669,15 +718,30 @@ rdma_txq_init (vlib_main_t * vm, rdma_device_t * rd, u16 qid, u32 n_desc)
   struct ibv_qp_init_attr qpia;
   struct ibv_qp_attr qpa;
   int qp_flags;
+  int is_mlx5dv = !!(rd->flags & RDMA_DEVICE_F_MLX5DV);
 
   vec_validate_aligned (rd->txqs, qid, CLIB_CACHE_LINE_BYTES);
   txq = vec_elt_at_index (rd->txqs, qid);
   ASSERT (is_pow2 (n_desc));
   txq->bufs_log2sz = min_log2 (n_desc);
   vec_validate_aligned (txq->bufs, n_desc - 1, CLIB_CACHE_LINE_BYTES);
-
-  if ((txq->cq = ibv_create_cq (rd->ctx, n_desc, NULL, NULL, 0)) == 0)
-    return clib_error_return_unix (0, "Create CQ Failed");
+  if (is_mlx5dv)
+    {
+      struct ibv_cq_init_attr_ex cqa = {};
+      struct ibv_cq_ex *cqex;
+      struct mlx5dv_cq_init_attr dvcq = {};
+      dvcq.comp_mask = MLX5DV_CQ_INIT_ATTR_MASK_CQE_SIZE;
+      dvcq.cqe_size = 64;
+      cqa.cqe = n_desc;
+      if ((cqex = mlx5dv_create_cq (rd->ctx, &cqa, &dvcq)) == 0)
+	return clib_error_return_unix (0, "Create mlx5dv tx CQ Failed");
+      txq->cq = ibv_cq_ex_to_cq (cqex);
+    }
+  else
+    {
+      if ((txq->cq = ibv_create_cq (rd->ctx, n_desc, NULL, NULL, 0)) == 0)
+	return clib_error_return_unix (0, "Create CQ Failed");
+    }
 
   memset (&qpia, 0, sizeof (qpia));
   qpia.send_cq = txq->cq;
@@ -788,11 +852,8 @@ rdma_dev_init (vlib_main_t * vm, rdma_device_t * rd,
 
   ethernet_mac_address_generate (rd->hwaddr.bytes);
 
-  if ((rd->mr = ibv_reg_mr (rd->pd, (void *) bm->buffer_mem_start,
-			    bm->buffer_mem_size,
-			    IBV_ACCESS_LOCAL_WRITE)) == 0)
-    return clib_error_return_unix (0, "Register MR Failed");
-  rd->lkey = rd->mr->lkey;	/* avoid indirection in datapath */
+  rd->rss4 = args->rss4;
+  rd->rss6 = args->rss6;
 
   /*
    * /!\ WARNING /!\ creation order is important
@@ -849,21 +910,14 @@ rdma_create_if (vlib_main_t * vm, rdma_create_if_args_t * args)
   args->txq_size = args->txq_size ? args->txq_size : 1024;
   args->rxq_num = args->rxq_num ? args->rxq_num : 2;
 
-  if (!is_pow2 (args->rxq_num))
-    {
-      args->rv = VNET_API_ERROR_INVALID_VALUE;
-      args->error =
-	clib_error_return (0, "rx queue number must be a power of two");
-      goto err0;
-    }
-
   if (args->rxq_size < VLIB_FRAME_SIZE || args->txq_size < VLIB_FRAME_SIZE ||
       args->rxq_size > 65535 || args->txq_size > 65535 ||
       !is_pow2 (args->rxq_size) || !is_pow2 (args->txq_size))
     {
       args->rv = VNET_API_ERROR_INVALID_VALUE;
-      args->error = clib_error_return (0, "queue size must be a power of two "
-				       "between %i and 65535",
+      args->error = clib_error_return (0,
+				       "queue size must be a power of two "
+				       "between %d and 65535",
 				       VLIB_FRAME_SIZE);
       goto err0;
     }
@@ -984,7 +1038,7 @@ are explicitly disabled, and if the interface supports it.*/
   /*
    * FIXME: add support for interrupt mode
    * vnet_hw_interface_t *hw = vnet_get_hw_interface (vnm, rd->hw_if_index);
-   * hw->flags |= VNET_HW_INTERFACE_FLAG_SUPPORTS_INT_MODE;
+   * hw->caps |= VNET_HW_IF_CAP_INT_MODE;
    */
   vnet_hw_if_set_input_node (vnm, rd->hw_if_index, rdma_input_node.index);
 

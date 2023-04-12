@@ -238,50 +238,50 @@ gdb_show_traces ()
 
   /* Get active traces from pool. */
 
-  /* *INDENT-OFF* */
-  foreach_vlib_main (
-  ({
-    fmt = "------------------- Start of thread %d %s -------------------\n";
-    s = format (s, fmt, index, vlib_worker_threads[index].name);
+  foreach_vlib_main ()
+    {
+      fmt = "------------------- Start of thread %d %s -------------------\n";
+      s = format (s, fmt, index, vlib_worker_threads[index].name);
 
-    tm = &this_vlib_main->trace_main;
+      tm = &this_vlib_main->trace_main;
 
-    trace_apply_filter(this_vlib_main);
+      trace_apply_filter (this_vlib_main);
 
-    traces = 0;
-    pool_foreach (h, tm->trace_buffer_pool)
-     {
-      vec_add1 (traces, h[0]);
+      traces = 0;
+      pool_foreach (h, tm->trace_buffer_pool)
+	{
+	  vec_add1 (traces, h[0]);
+	}
+
+      if (vec_len (traces) == 0)
+	{
+	  s = format (s, "No packets in trace buffer\n");
+	  goto done;
+	}
+
+      /* Sort them by increasing time. */
+      vec_sort_with_function (traces, trace_cmp);
+
+      for (i = 0; i < vec_len (traces); i++)
+	{
+	  if (i == max)
+	    {
+	      fformat (stderr,
+		       "Limiting display to %d packets."
+		       " To display more specify max.",
+		       max);
+	      goto done;
+	    }
+
+	  s = format (s, "Packet %d\n%U\n\n", i + 1, format_vlib_trace,
+		      vlib_get_first_main (), traces[i]);
+	}
+
+    done:
+      vec_free (traces);
+
+      index++;
     }
-
-    if (vec_len (traces) == 0)
-      {
-        s = format (s, "No packets in trace buffer\n");
-        goto done;
-      }
-
-    /* Sort them by increasing time. */
-    vec_sort_with_function (traces, trace_cmp);
-
-    for (i = 0; i < vec_len (traces); i++)
-      {
-        if (i == max)
-          {
-            fformat (stderr, "Limiting display to %d packets."
-                                 " To display more specify max.", max);
-            goto done;
-          }
-
-        s = format (s, "Packet %d\n%U\n\n", i + 1,
-                         format_vlib_trace, vlib_mains[0], traces[i]);
-      }
-
-  done:
-    vec_free (traces);
-
-    index++;
-  }));
-  /* *INDENT-ON* */
 
   fformat (stderr, "%v", s);
   vec_free (s);
@@ -378,6 +378,53 @@ gdb_validate_buffer (vlib_buffer_t * b)
     }
   fformat (stderr, "gdb_validate_buffer(): no error found\n");
   return 0;
+}
+
+/**
+ * Dump a trajectory trace, reasonably easy to call from gdb
+ */
+void
+gdb_dump_trajectory_trace (u32 bi)
+{
+#if VLIB_BUFFER_TRACE_TRAJECTORY > 0
+  vlib_main_t *vm = vlib_get_main ();
+  vlib_node_main_t *vnm = &vm->node_main;
+  vlib_buffer_t *b;
+  u16 *trace;
+  u8 i;
+
+  b = vlib_get_buffer (vm, bi);
+
+  trace = b->trajectory_trace;
+
+  fformat (stderr, "Context trace for bi %d b 0x%llx, visited %d\n", bi, b,
+	   b->trajectory_nb);
+
+  for (i = 0; i < b->trajectory_nb; i++)
+    {
+      u32 node_index;
+
+      node_index = trace[i];
+
+      if (node_index >= vec_len (vnm->nodes))
+	{
+	  fformat (stderr, "Skip bogus node index %d\n", node_index);
+	  continue;
+	}
+
+      fformat (stderr, "%v (%d)\n", vnm->nodes[node_index]->name, node_index);
+    }
+#else
+  fformat (stderr, "in vlib/buffers.h, "
+		   "#define VLIB_BUFFER_TRACE_TRAJECTORY 1\n");
+
+#endif
+}
+
+void
+gdb_dump_buffer (vlib_buffer_t *b)
+{
+  fformat (stderr, "%U\n", format_vnet_buffer, b);
 }
 
 /* Cafeteria plan, maybe you don't want these functions */

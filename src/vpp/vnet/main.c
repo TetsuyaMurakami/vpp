@@ -17,6 +17,7 @@
 #include <pthread.h>
 #include <sched.h>
 
+#include <vppinfra/clib.h>
 #include <vppinfra/cpu.h>
 #include <vlib/vlib.h>
 #include <vlib/unix/unix.h>
@@ -25,7 +26,7 @@
 #include <vnet/ethernet/ethernet.h>
 #include <vpp/app/version.h>
 #include <vpp/vnet/config.h>
-#include <vpp/api/vpe_msg_enum.h>
+#include <vlibmemory/memclnt.api_enum.h> /* To get the last static message id */
 #include <limits.h>
 
 /*
@@ -60,13 +61,11 @@ vpp_find_plugin_path ()
     return;
   *p = 0;
 
-  s = format (0, "%s/lib/" CLIB_TARGET_TRIPLET "/vpp_plugins:"
-	      "%s/lib/vpp_plugins", path, path);
+  s = format (0, "%s/" CLIB_LIB_DIR "/vpp_plugins", path, path);
   vec_add1 (s, 0);
   vlib_plugin_path = (char *) s;
 
-  s = format (0, "%s/lib/" CLIB_TARGET_TRIPLET "/vpp_api_test_plugins:"
-	      "%s/lib/vpp_api_test_plugins", path, path);
+  s = format (0, "%s/" CLIB_LIB_DIR "/vpp_api_test_plugins", path, path);
   vec_add1 (s, 0);
   vat_plugin_path = (char *) s;
 }
@@ -106,15 +105,15 @@ int
 main (int argc, char *argv[])
 {
   int i;
-  vlib_main_t *vm = &vlib_global_main;
   void vl_msg_api_set_first_available_msg_id (u16);
   uword main_heap_size = (1ULL << 30);
   u8 *sizep;
   u32 size;
   clib_mem_page_sz_t main_heap_log2_page_sz = CLIB_MEM_PAGE_SZ_DEFAULT;
+  clib_mem_page_sz_t default_log2_hugepage_sz = CLIB_MEM_PAGE_SZ_UNKNOWN;
   unformat_input_t input, sub_input;
   u8 *s = 0, *v = 0;
-  int main_core = 1;
+  int main_core = ~0;
   cpu_set_t cpuset;
   void *main_heap;
 
@@ -292,6 +291,10 @@ defaulted:
 				 unformat_log2_page_size,
 				 &main_heap_log2_page_sz))
 		;
+	      else if (unformat (&sub_input, "default-hugepage-size %U",
+				 unformat_log2_page_size,
+				 &default_log2_hugepage_sz))
+		;
 	      else
 		{
 		  fformat (stderr, "unknown 'memory' config input '%U'\n",
@@ -314,12 +317,15 @@ defaulted:
   unformat_free (&input);
 
   /* set process affinity for main thread */
-  CPU_ZERO (&cpuset);
-  CPU_SET (main_core, &cpuset);
-  pthread_setaffinity_np (pthread_self (), sizeof (cpu_set_t), &cpuset);
+  if (main_core != ~0)
+    {
+      CPU_ZERO (&cpuset);
+      CPU_SET (main_core, &cpuset);
+      pthread_setaffinity_np (pthread_self (), sizeof (cpu_set_t), &cpuset);
+    }
 
   /* Set up the plugin message ID allocator right now... */
-  vl_msg_api_set_first_available_msg_id (VL_MSG_FIRST_AVAILABLE);
+  vl_msg_api_set_first_available_msg_id (VL_MSG_MEMCLNT_LAST + 1);
 
   /* destroy temporary heap and create main one */
   clib_mem_destroy ();
@@ -330,11 +336,13 @@ defaulted:
       /* Figure out which numa runs the main thread */
       __os_numa_index = clib_get_current_numa_node ();
 
+      if (default_log2_hugepage_sz != CLIB_MEM_PAGE_SZ_UNKNOWN)
+	clib_mem_set_log2_default_hugepage_size (default_log2_hugepage_sz);
+
       /* and use the main heap as that numa's numa heap */
       clib_mem_set_per_numa_heap (main_heap);
-
-      vm->init_functions_called = hash_create (0, /* value bytes */ 0);
-      vpe_main_init (vm);
+      vlib_main_init ();
+      vpe_main_init (vlib_get_first_main ());
       return vlib_unix_main (argc, argv);
     }
   else

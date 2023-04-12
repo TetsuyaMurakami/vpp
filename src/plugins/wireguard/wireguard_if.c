@@ -32,13 +32,17 @@ static uword *wg_if_instances;
 static index_t *wg_if_index_by_sw_if_index;
 
 /* vector of interfaces key'd on their UDP port (in network order) */
-index_t *wg_if_index_by_port;
+index_t **wg_if_indexes_by_port;
+
+/* pool of ratelimit entries */
+static ratelimit_entry_t *wg_ratelimit_pool;
 
 static u8 *
 format_wg_if_name (u8 * s, va_list * args)
 {
   u32 dev_instance = va_arg (*args, u32);
-  return format (s, "wg%d", dev_instance);
+  wg_if_t *wgi = wg_if_get (dev_instance);
+  return format (s, "wg%d", wgi->user_instance);
 }
 
 u8 *
@@ -48,7 +52,6 @@ format_wg_if (u8 * s, va_list * args)
   wg_if_t *wgi = wg_if_get (wgii);
   noise_local_t *local = noise_local_get (wgi->local_idx);
   u8 key[NOISE_KEY_LEN_BASE64];
-
 
   s = format (s, "[%d] %U src:%U port:%d",
 	      wgii,
@@ -113,20 +116,20 @@ wg_remote_get (const uint8_t public[NOISE_PUBLIC_KEY_LEN])
 }
 
 static uint32_t
-wg_index_set (noise_remote_t * remote)
+wg_index_set (vlib_main_t *vm, noise_remote_t *remote)
 {
   wg_main_t *wmp = &wg_main;
   u32 rnd_seed = (u32) (vlib_time_now (wmp->vlib_main) * 1e6);
   u32 ret =
-    wg_index_table_add (&wmp->index_table, remote->r_peer_idx, rnd_seed);
+    wg_index_table_add (vm, &wmp->index_table, remote->r_peer_idx, rnd_seed);
   return ret;
 }
 
 static void
-wg_index_drop (uint32_t key)
+wg_index_drop (vlib_main_t *vm, uint32_t key)
 {
   wg_main_t *wmp = &wg_main;
-  wg_index_table_del (&wmp->index_table, key);
+  wg_index_table_del (vm, &wmp->index_table, key);
 }
 
 static clib_error_t *
@@ -151,7 +154,18 @@ wg_if_admin_up_down (vnet_main_t * vnm, u32 hw_if_index, u32 flags)
 void
 wg_if_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai)
 {
-  /* The peers manage the adjacencies */
+  index_t wgii;
+
+  /* Convert any neighbour adjacency that has a next-hop reachable through
+   * the wg interface into a midchain. This is to avoid sending ARP/ND to
+   * resolve the next-hop address via the wg interface. Then, if one of the
+   * peers has matching prefix among allowed prefixes, the midchain will be
+   * updated to the corresponding one.
+   */
+  adj_nbr_midchain_update_rewrite (ai, NULL, NULL, ADJ_FLAG_NONE, NULL);
+
+  wgii = wg_if_find_by_sw_if_index (sw_if_index);
+  wg_if_peer_walk (wg_if_get (wgii), wg_peer_if_adj_change, &ai);
 }
 
 
@@ -251,13 +265,6 @@ wg_if_create (u32 user_instance,
   *sw_if_indexp = (u32) ~ 0;
 
   /*
-   * Check if the required port is already in use
-   */
-  udp_dst_port_info_t *pi = udp_get_dst_port_info (&udp_main, port, UDP_IP4);
-  if (pi)
-    return VNET_API_ERROR_UDP_PORT_TAKEN;
-
-  /*
    * Allocate a wg_if instance. Either select on dynamically
    * or try to use the desired user_instance number.
    */
@@ -283,7 +290,7 @@ wg_if_create (u32 user_instance,
       return VNET_API_ERROR_INVALID_REGISTRATION;
     }
 
-  pool_get (wg_if_pool, wg_if);
+  pool_get_zero (wg_if_pool, wg_if);
 
   /* tunnel index (or instance) */
   u32 t_idx = wg_if - wg_if_pool;
@@ -292,13 +299,20 @@ wg_if_create (u32 user_instance,
   if (~0 == wg_if->user_instance)
     wg_if->user_instance = t_idx;
 
-  udp_register_dst_port (vlib_get_main (), port, wg_input_node.index, 1);
+  vec_validate_init_empty (wg_if_indexes_by_port, port, NULL);
+  if (vec_len (wg_if_indexes_by_port[port]) == 0)
+    {
+      udp_register_dst_port (vlib_get_main (), port, wg4_input_node.index,
+			     UDP_IP4);
+      udp_register_dst_port (vlib_get_main (), port, wg6_input_node.index,
+			     UDP_IP6);
+    }
 
-  vec_validate_init_empty (wg_if_index_by_port, port, INDEX_INVALID);
-  wg_if_index_by_port[port] = wg_if - wg_if_pool;
+  vec_add1 (wg_if_indexes_by_port[port], t_idx);
 
   wg_if->port = port;
   wg_if->local_idx = local - noise_local_pool;
+  cookie_checker_init (&wg_if->cookie_checker, wg_ratelimit_pool);
   cookie_checker_update (&wg_if->cookie_checker, local->l_public);
 
   hw_if_index = vnet_register_interface (vnm,
@@ -314,6 +328,8 @@ wg_if_create (u32 user_instance,
 
   ip_address_copy (&wg_if->src_ip, src_ip);
   wg_if->sw_if_index = *sw_if_indexp = hi->sw_if_index;
+  vnet_set_interface_l3_output_node (vnm->vlib_main, hi->sw_if_index,
+				     (u8 *) "tunnel-output");
 
   return 0;
 }
@@ -331,15 +347,38 @@ wg_if_delete (u32 sw_if_index)
     return VNET_API_ERROR_INVALID_VALUE;
 
   wg_if_t *wg_if;
-  wg_if = wg_if_get (wg_if_find_by_sw_if_index (sw_if_index));
+  index_t wgii = wg_if_find_by_sw_if_index (sw_if_index);
+  wg_if = wg_if_get (wgii);
   if (NULL == wg_if)
     return VNET_API_ERROR_INVALID_SW_IF_INDEX_2;
 
   if (wg_if_instance_free (wg_if->user_instance) < 0)
     return VNET_API_ERROR_INVALID_VALUE_2;
 
-  udp_unregister_dst_port (vlib_get_main (), wg_if->port, 1);
-  wg_if_index_by_port[wg_if->port] = INDEX_INVALID;
+  // Remove peers before interface deletion
+  wg_if_peer_walk (wg_if, wg_peer_if_delete, NULL);
+
+  hash_free (wg_if->peers);
+
+  index_t *ii;
+  index_t *ifs = wg_if_indexes_get_by_port (wg_if->port);
+  vec_foreach (ii, ifs)
+    {
+      if (*ii == wgii)
+	{
+	  vec_del1 (ifs, ifs - ii);
+	  break;
+	}
+    }
+  if (vec_len (ifs) == 0)
+    {
+      udp_unregister_dst_port (vlib_get_main (), wg_if->port, 1);
+      udp_unregister_dst_port (vlib_get_main (), wg_if->port, 0);
+    }
+
+  cookie_checker_deinit (&wg_if->cookie_checker);
+
+  vnet_reset_interface_l3_output_node (vnm->vlib_main, sw_if_index);
   vnet_delete_hw_interface (vnm, hw->hw_if_index);
   pool_put_index (noise_local_pool, wg_if->local_idx);
   pool_put (wg_if_pool, wg_if);
@@ -353,8 +392,12 @@ wg_if_peer_add (wg_if_t * wgi, index_t peeri)
   hash_set (wgi->peers, peeri, peeri);
 
   if (1 == hash_elts (wgi->peers))
-    vnet_feature_enable_disable ("ip4-output", "wg-output-tun",
-				 wgi->sw_if_index, 1, 0, 0);
+    {
+      vnet_feature_enable_disable ("ip4-output", "wg4-output-tun",
+				   wgi->sw_if_index, 1, 0, 0);
+      vnet_feature_enable_disable ("ip6-output", "wg6-output-tun",
+				   wgi->sw_if_index, 1, 0, 0);
+    }
 }
 
 void
@@ -363,8 +406,12 @@ wg_if_peer_remove (wg_if_t * wgi, index_t peeri)
   hash_unset (wgi->peers, peeri);
 
   if (0 == hash_elts (wgi->peers))
-    vnet_feature_enable_disable ("ip4-output", "wg-output-tun",
-				 wgi->sw_if_index, 0, 0, 0);
+    {
+      vnet_feature_enable_disable ("ip4-output", "wg4-output-tun",
+				   wgi->sw_if_index, 0, 0, 0);
+      vnet_feature_enable_disable ("ip6-output", "wg6-output-tun",
+				   wgi->sw_if_index, 0, 0, 0);
+    }
 }
 
 void
@@ -387,83 +434,14 @@ wg_if_peer_walk (wg_if_t * wgi, wg_if_peer_walk_cb_t fn, void *data)
   index_t peeri, val;
 
   /* *INDENT-OFF* */
-  hash_foreach (peeri, val, wgi->peers,
-  {
-    if (WALK_STOP == fn(wgi, peeri, data))
+  hash_foreach (peeri, val, wgi->peers, {
+    if (WALK_STOP == fn (peeri, data))
       return peeri;
   });
   /* *INDENT-ON* */
 
   return INDEX_INVALID;
 }
-
-
-static void
-wg_if_table_bind_v4 (ip4_main_t * im,
-		     uword opaque,
-		     u32 sw_if_index, u32 new_fib_index, u32 old_fib_index)
-{
-  wg_if_t *wg_if;
-
-  wg_if = wg_if_get (wg_if_find_by_sw_if_index (sw_if_index));
-  if (NULL == wg_if)
-    return;
-
-  wg_peer_table_bind_ctx_t ctx = {
-    .af = AF_IP4,
-    .old_fib_index = old_fib_index,
-    .new_fib_index = new_fib_index,
-  };
-
-  wg_if_peer_walk (wg_if, wg_peer_if_table_change, &ctx);
-}
-
-static void
-wg_if_table_bind_v6 (ip6_main_t * im,
-		     uword opaque,
-		     u32 sw_if_index, u32 new_fib_index, u32 old_fib_index)
-{
-  wg_if_t *wg_if;
-
-  wg_if = wg_if_get (wg_if_find_by_sw_if_index (sw_if_index));
-  if (NULL == wg_if)
-    return;
-
-  wg_peer_table_bind_ctx_t ctx = {
-    .af = AF_IP6,
-    .old_fib_index = old_fib_index,
-    .new_fib_index = new_fib_index,
-  };
-
-  wg_if_peer_walk (wg_if, wg_peer_if_table_change, &ctx);
-}
-
-static clib_error_t *
-wg_if_module_init (vlib_main_t * vm)
-{
-  {
-    ip4_table_bind_callback_t cb = {
-      .function = wg_if_table_bind_v4,
-    };
-    vec_add1 (ip4_main.table_bind_callbacks, cb);
-  }
-  {
-    ip6_table_bind_callback_t cb = {
-      .function = wg_if_table_bind_v6,
-    };
-    vec_add1 (ip6_main.table_bind_callbacks, cb);
-  }
-
-  return (NULL);
-}
-
-/* *INDENT-OFF* */
-VLIB_INIT_FUNCTION (wg_if_module_init) =
-{
-  .runs_after = VLIB_INITS("ip_main_init"),
-};
-/* *INDENT-ON* */
-
 
 /*
  * fd.io coding-style-patch-verification: ON

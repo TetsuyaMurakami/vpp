@@ -16,17 +16,17 @@ Skills to be Learned
 VPP commands learned in this exercise
 --------------------------------------
 
-#. `create host-interface <https://docs.fd.io/vpp/17.04/clicmd_src_vnet_devices_af_packet.html#clicmd_create_host-interface>`_
-#. `set int state <https://docs.fd.io/vpp/17.04/clicmd_src_vnet.html#clicmd_set_interface_state>`_
-#. `set int ip address <https://docs.fd.io/vpp/17.04/clicmd_src_vnet_ip.html#clicmd_set_interface_ip_address>`_
-#. `show hardware <https://docs.fd.io/vpp/17.04/clicmd_src_vnet.html#clicmd_show_hardware-interfaces>`_
-#. `show int <https://docs.fd.io/vpp/17.04/clicmd_src_vnet.html#clicmd_show_interfaces>`_
-#. `show int addr <https://docs.fd.io/vpp/17.04/clicmd_src_vnet.html#clicmd_show_interfaces>`_
-#. `trace add <https://docs.fd.io/vpp/17.04/clicmd_src_vlib.html#clicmd_trace_add>`_
-#. `clear trace <https://docs.fd.io/vpp/17.04/clicmd_src_vlib.html#clicmd_clear_trace>`_
-#. `ping <https://docs.fd.io/vpp/17.04/clicmd_src_vnet_ip.html#clicmd_ping>`_
-#. `show ip neighbors <https://docs.fd.io/vpp/21.06/db/dba/clicmd_src_vnet_ip-neighbor.html#clicmd_show_ip_neighbors>`_
-#. `show ip fib <https://docs.fd.io/vpp/17.04/clicmd_src_vnet_fib.html#clicmd_show_ip_fib>`_
+#. `create host-interface <https://docs.fd.io/vpp/22.06/cli-reference/clis/clicmd_src_vnet_devices_af_packet.html#create-host-interface>`_
+#. `set int state <https://docs.fd.io/vpp/22.06/cli-reference/clis/clicmd_src_vnet.html#set-interface-state>`_
+#. `set int ip address <https://docs.fd.io/vpp/22.06/cli-reference/clis/clicmd_src_vnet_ip.html#set-interface-ip-address>`_
+#. `show hardware <https://docs.fd.io/vpp/22.06/cli-reference/clis/clicmd_src_vnet.html#show-hardware-interfaces>`_
+#. `show int <https://docs.fd.io/vpp/22.06/cli-reference/clis/clicmd_src_vnet.html#show-interface>`_
+#. `show int addr <https://docs.fd.io/vpp/22.06/cli-reference/clis/clicmd_src_vnet.html#show-interface>`_
+#. `trace add <https://docs.fd.io/vpp/22.06/cli-reference/clis/clicmd_src_vlib.html#trace-add>`_
+#. `clear trace <https://docs.fd.io/vpp/22.06/cli-reference/clis/clicmd_src_vlib.html#clear-trace>`_
+#. `ping <https://docs.fd.io/vpp/22.06/cli-reference/clis/clicmd_src_plugins_ping.html>`_
+#. `show ip neighbors <https://docs.fd.io/vpp/22.06/cli-reference/clis/clicmd_src_vnet_ip-neighbor.html#show-ip-neighbors>`_
+#. `show ip fib <https://docs.fd.io/vpp/22.06/cli-reference/clis/clicmd_src_vnet_fib.html#show-ip-fib>`_
 
 Topology
 ---------
@@ -41,7 +41,7 @@ Initial State
 
 The initial state here is presumed to be the final state from the previous sections
 of the tutorial.
- 
+
 Create veth interfaces on host
 -------------------------------
 
@@ -104,7 +104,7 @@ command:
      __/ __/ _ \  (_)__    | | / / _ \/ _ \
      _/ _// // / / / _ \   | |/ / ___/ ___/
      /_/ /____(_)_/\___/   |___/_/  /_/
-    
+
     vpp#
 
 Create a host interface attached to **vpp1out**.

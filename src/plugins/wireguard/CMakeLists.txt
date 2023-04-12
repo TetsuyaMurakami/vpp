@@ -16,6 +16,8 @@ if (OPENSSL_VERSION VERSION_LESS 1.1.0)
   return()
 endif()
 
+include_directories(${OPENSSL_INCLUDE_DIR})
+
 list(APPEND WG_BLAKE_SOURCES
   blake/blake2s.h
   blake/blake2s.c
@@ -31,8 +33,11 @@ add_vpp_plugin(wireguard
   wireguard_input.c
   wireguard_output_tun.c
   wireguard_handoff.c
+  wireguard_hchacha20.h
   wireguard_key.c
   wireguard_key.h
+  wireguard_chachapoly.c
+  wireguard_chachapoly.h
   wireguard_cli.c
   wireguard_messages.h
   wireguard_noise.c
@@ -48,6 +53,8 @@ add_vpp_plugin(wireguard
   wireguard_index_table.c
   wireguard_index_table.h
   wireguard_api.c
+
+  LINK_LIBRARIES ${OPENSSL_CRYPTO_LIBRARIES}
 
   API_FILES
   wireguard.api

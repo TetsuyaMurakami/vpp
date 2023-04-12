@@ -21,6 +21,7 @@
 #include <vnet/ipsec/ipsec.h>
 #include <vnet/adj/adj_midchain.h>
 #include <vnet/ethernet/mac_address.h>
+#include <vnet/mpls/mpls.h>
 
 /* bitmap of Allocated IPSEC_ITF instances */
 static uword *ipsec_itf_instances;
@@ -34,6 +35,12 @@ ipsec_itf_t *
 ipsec_itf_get (index_t ii)
 {
   return (pool_elt_at_index (ipsec_itf_pool, ii));
+}
+
+u32
+ipsec_itf_count (void)
+{
+  return (pool_elts (ipsec_itf_pool));
 }
 
 static ipsec_itf_t *
@@ -268,6 +275,20 @@ ipsec_itf_instance_free (u32 instance)
   return 0;
 }
 
+void
+ipsec_itf_reset_tx_nodes (u32 sw_if_index)
+{
+  vnet_feature_modify_end_node (
+    ip4_main.lookup_main.output_feature_arc_index, sw_if_index,
+    vlib_get_node_by_name (vlib_get_main (), (u8 *) "ip4-drop")->index);
+  vnet_feature_modify_end_node (
+    ip6_main.lookup_main.output_feature_arc_index, sw_if_index,
+    vlib_get_node_by_name (vlib_get_main (), (u8 *) "ip6-drop")->index);
+  vnet_feature_modify_end_node (
+    mpls_main.output_feature_arc_index, sw_if_index,
+    vlib_get_node_by_name (vlib_get_main (), (u8 *) "mpls-drop")->index);
+}
+
 int
 ipsec_itf_create (u32 user_instance, tunnel_mode_t mode, u32 * sw_if_indexp)
 {
@@ -305,12 +326,14 @@ ipsec_itf_create (u32 user_instance, tunnel_mode_t mode, u32 * sw_if_indexp)
 					 t_idx);
 
   hi = vnet_get_hw_interface (vnm, hw_if_index);
+  vnet_sw_interface_set_mtu (vnm, hi->sw_if_index, 9000);
 
   vec_validate_init_empty (ipsec_itf_index_by_sw_if_index, hi->sw_if_index,
 			   INDEX_INVALID);
   ipsec_itf_index_by_sw_if_index[hi->sw_if_index] = t_idx;
 
   ipsec_itf->ii_sw_if_index = *sw_if_indexp = hi->sw_if_index;
+  ipsec_itf_reset_tx_nodes (hi->sw_if_index);
 
   return 0;
 }
@@ -335,10 +358,24 @@ ipsec_itf_delete (u32 sw_if_index)
   if (ipsec_itf_instance_free (hw->dev_instance) < 0)
     return VNET_API_ERROR_INVALID_SW_IF_INDEX;
 
+  vnet_reset_interface_l3_output_node (vnm->vlib_main, sw_if_index);
+
   vnet_delete_hw_interface (vnm, hw->hw_if_index);
   pool_put (ipsec_itf_pool, ipsec_itf);
 
   return 0;
+}
+
+void
+ipsec_itf_walk (ipsec_itf_walk_cb_t cb, void *ctx)
+{
+  ipsec_itf_t *itf;
+
+  pool_foreach (itf, ipsec_itf_pool)
+    {
+      if (WALK_CONTINUE != cb (itf, ctx))
+	break;
+    }
 }
 
 static clib_error_t *

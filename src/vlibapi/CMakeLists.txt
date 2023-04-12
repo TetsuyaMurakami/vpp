@@ -11,16 +11,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-install(
-  FILES
-  api_helper_macros.h
+add_vpp_library (vlibapi
+  SOURCES
+  api_shared.c
+  api_format.c
+  node_serialize.c
+  memory_shared.c
+
+  INSTALL_HEADERS
   api.h
-  vat_helper_macros.h
   api_common.h
+  api_helper_macros.h
   api_types.h
-
-  DESTINATION
-  include/vlibapi
-
-  COMPONENT vpp-dev
+  vat_helper_macros.h
+  memory_shared.h
 )
+

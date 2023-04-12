@@ -28,9 +28,9 @@
 #include <vppinfra/mem.h>
 #include <vppinfra/lock.h>
 #include <vppinfra/time.h>
+#include <vppinfra/bitmap.h>
 #include <vppinfra/format.h>
 #include <vppinfra/clib_error.h>
-#include <vppinfra/linux/syscall.h>
 #include <vppinfra/linux/sysfs.h>
 
 #ifndef F_LINUX_SPECIFIC_BASE
@@ -76,40 +76,6 @@ map_unlock ()
   clib_atomic_release (&clib_mem_main.map_lock);
 }
 
-__clib_export uword
-clib_mem_get_default_hugepage_size (void)
-{
-  unformat_input_t input;
-  static u32 size = 0;
-  int fd;
-
-  if (size)
-    goto done;
-
-  /*
-   * If the kernel doesn't support hugepages, /proc/meminfo won't
-   * say anything about it. Use the regular page size as a default.
-   */
-  size = clib_mem_get_page_size () / 1024;
-
-  if ((fd = open ("/proc/meminfo", 0)) == -1)
-    return 0;
-
-  unformat_init_clib_file (&input, fd);
-
-  while (unformat_check_input (&input) != UNFORMAT_END_OF_INPUT)
-    {
-      if (unformat (&input, "Hugepagesize:%_%u kB", &size))
-	;
-      else
-	unformat_skip_line (&input);
-    }
-  unformat_free (&input);
-  close (fd);
-done:
-  return 1024ULL * size;
-}
-
 static clib_mem_page_sz_t
 legacy_get_log2_default_hugepage_size (void)
 {
@@ -134,9 +100,10 @@ legacy_get_log2_default_hugepage_size (void)
 }
 
 void
-clib_mem_main_init ()
+clib_mem_main_init (void)
 {
   clib_mem_main_t *mm = &clib_mem_main;
+  long sysconf_page_size;
   uword page_size;
   void *va;
   int fd;
@@ -145,17 +112,24 @@ clib_mem_main_init ()
     return;
 
   /* system page size */
-  page_size = sysconf (_SC_PAGESIZE);
+  sysconf_page_size = sysconf (_SC_PAGESIZE);
+  if (sysconf_page_size < 0)
+    {
+      clib_panic ("Could not determine the page size");
+    }
+  page_size = sysconf_page_size;
   mm->log2_page_sz = min_log2 (page_size);
 
   /* default system hugeppage size */
-  if ((fd = memfd_create ("test", MFD_HUGETLB)) != -1)
+  if ((fd = syscall (__NR_memfd_create, "test", MFD_HUGETLB)) != -1)
     {
       mm->log2_default_hugepage_sz = clib_mem_get_fd_log2_page_size (fd);
       close (fd);
     }
   else				/* likely kernel older than 4.14 */
     mm->log2_default_hugepage_sz = legacy_get_log2_default_hugepage_size ();
+
+  mm->log2_sys_default_hugepage_sz = mm->log2_default_hugepage_sz;
 
   /* numa nodes */
   va = mmap (0, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE |
@@ -169,7 +143,7 @@ clib_mem_main_init ()
   for (int i = 0; i < CLIB_MAX_NUMAS; i++)
     {
       int status;
-      if (move_pages (0, 1, &va, &i, &status, 0) == 0)
+      if (syscall (__NR_move_pages, 0, 1, &va, &i, &status, 0) == 0)
 	mm->numa_node_bitmap |= 1ULL << i;
     }
 
@@ -271,7 +245,7 @@ clib_mem_vm_create_fd (clib_mem_page_sz_t log2_page_size, char *fmt, ...)
 
   if (log2_page_size == mm->log2_page_sz)
     log2_page_size = CLIB_MEM_PAGE_SZ_DEFAULT;
-  else if (log2_page_size == mm->log2_default_hugepage_sz)
+  else if (log2_page_size == mm->log2_sys_default_hugepage_sz)
     log2_page_size = CLIB_MEM_PAGE_SZ_DEFAULT_HUGE;
 
   switch (log2_page_size)
@@ -294,11 +268,11 @@ clib_mem_vm_create_fd (clib_mem_page_sz_t log2_page_size, char *fmt, ...)
 
   /* memfd_create maximum string size is 249 chars without trailing zero */
   if (vec_len (s) > 249)
-    _vec_len (s) = 249;
+    vec_set_len (s, 249);
   vec_add1 (s, 0);
 
   /* memfd_create introduced in kernel 3.17, we don't support older kernels */
-  fd = memfd_create ((char *) s, memfd_flags);
+  fd = syscall (__NR_memfd_create, (char *) s, memfd_flags);
 
   /* kernel versions < 4.14 does not support memfd_create for huge pages */
   if (fd == -1 && errno == EINVAL &&
@@ -488,13 +462,11 @@ clib_mem_vm_map_internal (void *base, clib_mem_page_sz_t log2_page_sz,
   else
     mm->first_map = hdr;
 
-  CLIB_MEM_UNPOISON (hdr, sys_page_sz);
+  clib_mem_unpoison (hdr, sys_page_sz);
   hdr->next = 0;
   hdr->prev = mm->last_map;
   snprintf (hdr->name, CLIB_VM_MAP_HDR_NAME_MAX_LEN - 1, "%s", (char *) name);
   mm->last_map = hdr;
-
-  map_unlock ();
 
   hdr->base_addr = (uword) base;
   hdr->log2_page_sz = log2_page_sz;
@@ -503,7 +475,9 @@ clib_mem_vm_map_internal (void *base, clib_mem_page_sz_t log2_page_sz,
   hdr->name[CLIB_VM_MAP_HDR_NAME_MAX_LEN - 1] = 0;
   mprotect (hdr, sys_page_sz, PROT_NONE);
 
-  CLIB_MEM_UNPOISON (base, size);
+  map_unlock ();
+
+  clib_mem_unpoison (base, size);
   return base;
 }
 
@@ -514,14 +488,13 @@ clib_mem_vm_unmap (void *base)
   uword size, sys_page_sz = 1ULL << mm->log2_page_sz;
   clib_mem_vm_map_hdr_t *hdr = base - sys_page_sz;;
 
+  map_lock ();
   if (mprotect (hdr, sys_page_sz, PROT_READ | PROT_WRITE) != 0)
-    return CLIB_MEM_ERROR;
+    goto out;
 
   size = hdr->num_pages << hdr->log2_page_sz;
   if (munmap ((void *) hdr->base_addr, size) != 0)
-    return CLIB_MEM_ERROR;
-
-  map_lock ();
+    goto out;
 
   if (hdr->next)
     {
@@ -547,6 +520,9 @@ clib_mem_vm_unmap (void *base)
     return CLIB_MEM_ERROR;
 
   return 0;
+out:
+  map_unlock ();
+  return CLIB_MEM_ERROR;
 }
 
 __clib_export void
@@ -568,10 +544,10 @@ clib_mem_get_page_stats (void *start, clib_mem_page_sz_t log2_page_size,
   stats->total = n_pages;
   stats->log2_page_sz = log2_page_size;
 
-  if (move_pages (0, n_pages, ptr, 0, status, 0) != 0)
+  if (syscall (__NR_move_pages, 0, n_pages, ptr, 0, status, 0) != 0)
     {
       stats->unknown = n_pages;
-      return;
+      goto done;
     }
 
   for (i = 0; i < n_pages; i++)
@@ -586,6 +562,10 @@ clib_mem_get_page_stats (void *start, clib_mem_page_sz_t log2_page_size,
       else
 	stats->unknown++;
     }
+
+done:
+  vec_free (status);
+  vec_free (ptr);
 }
 
 
@@ -635,8 +615,8 @@ __clib_export int
 clib_mem_set_numa_affinity (u8 numa_node, int force)
 {
   clib_mem_main_t *mm = &clib_mem_main;
-  long unsigned int mask[16] = { 0 };
-  int mask_len = sizeof (mask) * 8 + 1;
+  clib_bitmap_t *bmp = 0;
+  int rv;
 
   /* no numa support */
   if (mm->numa_node_bitmap == 0)
@@ -652,18 +632,21 @@ clib_mem_set_numa_affinity (u8 numa_node, int force)
 	return 0;
     }
 
-  mask[0] = 1 << numa_node;
+  bmp = clib_bitmap_set (bmp, numa_node, 1);
 
-  if (set_mempolicy (force ? MPOL_BIND : MPOL_PREFERRED, mask, mask_len))
-    goto error;
+  rv = syscall (__NR_set_mempolicy, force ? MPOL_BIND : MPOL_PREFERRED, bmp,
+		vec_len (bmp) * sizeof (bmp[0]) * 8 + 1);
 
+  clib_bitmap_free (bmp);
   vec_reset_length (mm->error);
+
+  if (rv)
+    {
+      mm->error = clib_error_return_unix (mm->error, (char *) __func__);
+      return CLIB_MEM_ERROR;
+    }
+
   return 0;
-
-error:
-  vec_reset_length (mm->error);
-  mm->error = clib_error_return_unix (mm->error, (char *) __func__);
-  return CLIB_MEM_ERROR;
 }
 
 __clib_export int
@@ -671,7 +654,7 @@ clib_mem_set_default_numa_affinity ()
 {
   clib_mem_main_t *mm = &clib_mem_main;
 
-  if (set_mempolicy (MPOL_DEFAULT, 0, 0))
+  if (syscall (__NR_set_mempolicy, MPOL_DEFAULT, 0, 0))
     {
       vec_reset_length (mm->error);
       mm->error = clib_error_return_unix (mm->error, (char *) __func__);

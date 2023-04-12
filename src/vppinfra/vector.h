@@ -42,11 +42,6 @@
 
 /* Vector types. */
 
-#if defined (__MMX__) || defined (__IWMMXT__) || defined (__aarch64__) \
-  || defined (__i686__)
-#define CLIB_HAVE_VEC64
-#endif
-
 #if defined (__aarch64__) && defined(__ARM_NEON) || defined (__i686__)
 #define CLIB_HAVE_VEC128
 #endif
@@ -70,13 +65,9 @@
 #define CLIB_HAVE_VEC512
 #endif
 
-/* 128 implies 64 */
-#ifdef CLIB_HAVE_VEC128
-#define CLIB_HAVE_VEC64
-#endif
-
-#define _vector_size(n) __attribute__ ((vector_size (n)))
-#define _vector_size_unaligned(n) __attribute__ ((vector_size (n),  __aligned__ (1)))
+#define _vector_size(n) __attribute__ ((vector_size (n), __may_alias__))
+#define _vector_size_unaligned(n)                                             \
+  __attribute__ ((vector_size (n), __aligned__ (1), __may_alias__))
 
 #define foreach_vec64i  _(i,8,8)  _(i,16,4)  _(i,32,2)
 #define foreach_vec64u  _(u,8,8)  _(u,16,4)  _(u,32,2)
@@ -107,53 +98,53 @@
 
 #define foreach_vec foreach_int_vec foreach_uint_vec foreach_float_vec
 
-/* *INDENT-OFF* */
-
 /* Type Definitions */
-#define _(t,s,c) \
-typedef t##s t##s##x##c _vector_size (s/8*c);	\
-typedef t##s t##s##x##c##u _vector_size_unaligned (s/8*c);	\
-typedef union {	  \
-  t##s##x##c as_##t##s##x##c;	\
-  t##s as_##t##s[c];	  \
-} t##s##x##c##_union_t;
+#define _(t, s, c)                                                            \
+  typedef t##s t##s##x##c _vector_size (s / 8 * c);                           \
+  typedef t##s t##s##x##c##u _vector_size_unaligned (s / 8 * c);              \
+  typedef union                                                               \
+  {                                                                           \
+    t##s##x##c as_##t##s##x##c;                                               \
+    t##s as_##t##s[c];                                                        \
+  } t##s##x##c##_union_t;
 
+/* clang-format off */
   foreach_vec64i foreach_vec64u foreach_vec64f
   foreach_vec128i foreach_vec128u foreach_vec128f
   foreach_vec256i foreach_vec256u foreach_vec256f
   foreach_vec512i foreach_vec512u foreach_vec512f
+/* clang-format on */
 #undef _
 
-/* Vector word sized types. */
-#ifndef CLIB_VECTOR_WORD_BITS
-#ifdef CLIB_HAVE_VEC128
-#define CLIB_VECTOR_WORD_BITS 128
-#else
-#define CLIB_VECTOR_WORD_BITS 64
-#endif
-#endif /* CLIB_VECTOR_WORD_BITS */
+  typedef union
+{
+#define _(t, s, c) t##s##x##c as_##t##s##x##c;
+  foreach_vec128i foreach_vec128u foreach_vec128f
+#undef _
+} vec128_t;
 
-/* Vector word sized types. */
-#if CLIB_VECTOR_WORD_BITS == 128
-typedef i8 i8x _vector_size (16);
-typedef i16 i16x _vector_size (16);
-typedef i32 i32x _vector_size (16);
-typedef i64 i64x _vector_size (16);
-typedef u8 u8x _vector_size (16);
-typedef u16 u16x _vector_size (16);
-typedef u32 u32x _vector_size (16);
-typedef u64 u64x _vector_size (16);
-#endif
-#if CLIB_VECTOR_WORD_BITS == 64
-typedef i8 i8x _vector_size (8);
-typedef i16 i16x _vector_size (8);
-typedef i32 i32x _vector_size (8);
-typedef i64 i64x _vector_size (8);
-typedef u8 u8x _vector_size (8);
-typedef u16 u16x _vector_size (8);
-typedef u32 u32x _vector_size (8);
-typedef u64 u64x _vector_size (8);
-#endif
+typedef union
+{
+#define _(t, s, c) t##s##x##c as_##t##s##x##c;
+  foreach_vec256i foreach_vec256u foreach_vec256f
+#undef _
+#define _(t, s, c) t##s##x##c as_##t##s##x##c[2];
+    foreach_vec128i foreach_vec128u foreach_vec128f
+#undef _
+} vec256_t;
+
+typedef union
+{
+#define _(t, s, c) t##s##x##c as_##t##s##x##c;
+  foreach_vec512i foreach_vec512u foreach_vec512f
+#undef _
+#define _(t, s, c) t##s##x##c as_##t##s##x##c[2];
+    foreach_vec256i foreach_vec256u foreach_vec256f
+#undef _
+#define _(t, s, c) t##s##x##c as_##t##s##x##c[4];
+      foreach_vec128i foreach_vec128u foreach_vec128f
+#undef _
+} vec512_t;
 
 /* universal inlines */
 #define _(t, s, c) \
@@ -166,6 +157,68 @@ foreach_vec
 
 #undef _vector_size
 
+  /* _shuffle and _shuffle2 */
+#if defined(__GNUC__) && !defined(__clang__)
+#define __builtin_shufflevector(v1, v2, ...)                                  \
+  __builtin_shuffle ((v1), (v2), (__typeof__ (v1)){ __VA_ARGS__ })
+#endif
+
+#define u8x16_shuffle(v1, ...)                                                \
+  (u8x16) __builtin_shufflevector ((u8x16) (v1), (u8x16) (v1), __VA_ARGS__)
+#define u8x32_shuffle(v1, ...)                                                \
+  (u8x32) __builtin_shufflevector ((u8x32) (v1), (u8x32) (v1), __VA_ARGS__)
+#define u8x64_shuffle(v1, ...)                                                \
+  (u8x64) __builtin_shufflevector ((u8x64) (v1), (u8x64) (v1), __VA_ARGS__)
+
+#define u16x8_shuffle(v1, ...)                                                \
+  (u16x8) __builtin_shufflevector ((u16x8) (v1), (u16x8) (v1), __VA_ARGS__)
+#define u16x16_shuffle(v1, ...)                                               \
+  (u16x16) __builtin_shufflevector ((u16x16) (v1), (u16x16) (v1), __VA_ARGS__)
+#define u16x32_shuffle(v1, ...)                                               \
+  (u16u32) __builtin_shufflevector ((u16x32) (v1), (u16x32) (v1), __VA_ARGS__);
+
+#define u32x4_shuffle(v1, ...)                                                \
+  (u32x4) __builtin_shufflevector ((u32x4) (v1), (u32x4) (v1), __VA_ARGS__)
+#define u32x8_shuffle(v1, ...)                                                \
+  (u32x8) __builtin_shufflevector ((u32x8) (v1), (u32x8) (v1), __VA_ARGS__)
+#define u32x16_shuffle(v1, ...)                                               \
+  (u32x16) __builtin_shufflevector ((u32x16) (v1), (u32x16) (v1), __VA_ARGS__)
+
+#define u64x2_shuffle(v1, ...)                                                \
+  (u64x2) __builtin_shufflevector ((u64x2) (v1), (u64x2) (v1), __VA_ARGS__)
+#define u64x4_shuffle(v1, ...)                                                \
+  (u64x4) __builtin_shufflevector ((u64x4) (v1), (u64x4) (v1), __VA_ARGS__)
+#define u64x8_shuffle(v1, ...)                                                \
+  (u64x8) __builtin_shufflevector ((u64x8) (v1), (u64x8) (v1), __VA_ARGS__)
+
+#define u8x16_shuffle2(v1, v2, ...)                                           \
+  (u8x16) __builtin_shufflevector ((u8x16) (v1), (u8x16) (v2), __VA_ARGS__)
+#define u8x32_shuffle2(v1, v2, ...)                                           \
+  (u8x32) __builtin_shufflevector ((u8x32) (v1), (u8x32) (v2), __VA_ARGS__)
+#define u8x64_shuffle2(v1, v2, ...)                                           \
+  (u8x64) __builtin_shufflevector ((u8x64) (v1), (u8x64) (v2), __VA_ARGS__)
+
+#define u16x8_shuffle2(v1, v2, ...)                                           \
+  (u16x8) __builtin_shufflevector ((u16x8) (v1), (u16x8) (v2), __VA_ARGS__)
+#define u16x16_shuffle2(v1, v2, ...)                                          \
+  (u16x16) __builtin_shufflevector ((u16x16) (v1), (u16x16) (v2), __VA_ARGS__)
+#define u16x32_shuffle2(v1, v2, ...)                                          \
+  (u16u32) __builtin_shufflevector ((u16x32) (v1), (u16x32) (v2), __VA_ARGS__);
+
+#define u32x4_shuffle2(v1, v2, ...)                                           \
+  (u32x4) __builtin_shufflevector ((u32x4) (v1), (u32x4) (v2), __VA_ARGS__)
+#define u32x8_shuffle2(v1, v2, ...)                                           \
+  (u32x8) __builtin_shufflevector ((u32x8) (v1), (u32x8) (v2), __VA_ARGS__)
+#define u32x16_shuffle2(v1, v2, ...)                                          \
+  (u32x16) __builtin_shufflevector ((u32x16) (v1), (u32x16) (v2), __VA_ARGS__)
+
+#define u64x2_shuffle2(v1, v2, ...)                                           \
+  (u64x2) __builtin_shufflevector ((u64x2) (v1), (u64x2) (v2), __VA_ARGS__)
+#define u64x4_shuffle2(v1, v2, ...)                                           \
+  (u64x4) __builtin_shufflevector ((u64x4) (v1), (u64x4) (v2), __VA_ARGS__)
+#define u64x8_shuffle2(v1, v2, ...)                                           \
+  (u64x8) __builtin_shufflevector ((u64x8) (v1), (u64x8) (v2), __VA_ARGS__)
+
 #define VECTOR_WORD_TYPE(t) t##x
 #define VECTOR_WORD_TYPE_LEN(t) (sizeof (VECTOR_WORD_TYPE(t)) / sizeof (t))
 
@@ -177,10 +230,7 @@ foreach_vec
 #include <vppinfra/vector_avx2.h>
 #endif
 
-#if defined (__AVX512BITALG__)
-/* Due to power level transition issues, we don't preffer AVX-512 on
-   Skylake X and CascadeLake CPUs, AVX512BITALG is introduced on
-   icelake CPUs  */
+#if defined(__AVX512F__)
 #include <vppinfra/vector_avx512.h>
 #endif
 
@@ -190,10 +240,6 @@ foreach_vec
 
 #if defined (__aarch64__)
 #include <vppinfra/vector_neon.h>
-#endif
-
-#if (defined(CLIB_HAVE_VEC128) || defined(CLIB_HAVE_VEC64))
-#include <vppinfra/vector_funcs.h>
 #endif
 
 /* this macro generate _splat inline functions for each scalar vector type */
@@ -214,13 +260,4 @@ t##s##x##c##_splat (t##s x)				\
 #undef _
 #endif
 
-/* *INDENT-ON* */
-
 #endif /* included_clib_vector_h */
-/*
- * fd.io coding-style-patch-verification: ON
- *
- * Local Variables:
- * eval: (c-set-style "gnu")
- * End:
- */

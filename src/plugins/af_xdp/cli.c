@@ -40,6 +40,8 @@ af_xdp_create_command_fn (vlib_main_t * vm, unformat_input_t * input,
 
   vec_free (args.linux_ifname);
   vec_free (args.name);
+  vec_free (args.prog);
+  vec_free (args.netns);
 
   return args.error;
 }
@@ -47,7 +49,10 @@ af_xdp_create_command_fn (vlib_main_t * vm, unformat_input_t * input,
 /* *INDENT-OFF* */
 VLIB_CLI_COMMAND (af_xdp_create_command, static) = {
   .path = "create interface af_xdp",
-  .short_help = "create interface af_xdp <host-if linux-ifname> [name ifname] [rx-queue-size size] [tx-queue-size size] [num-rx-queues <num|all>] [prog pathname] [zero-copy|no-zero-copy]",
+  .short_help =
+    "create interface af_xdp <host-if linux-ifname> [name ifname] "
+    "[rx-queue-size size] [tx-queue-size size] [num-rx-queues <num|all>] "
+    "[prog pathname] [netns ns] [zero-copy|no-zero-copy] [no-syscall-lock]",
   .function = af_xdp_create_command_fn,
 };
 /* *INDENT-ON* */

@@ -22,6 +22,7 @@
 
 #include <vppinfra/error.h>
 #include <vppinfra/hash.h>
+#include <vppinfra/vector/count_equal.h>
 #include <vnet/l2/feat_bitmap.h>
 #include <vnet/l2/l2_output.h>
 
@@ -147,10 +148,10 @@ l2output_process_batch_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
       /* prefetch eth headers only if we need to touch them */
       if (l2_vtr || l2_pbb || shg_set)
 	{
-	  CLIB_PREFETCH (b[4]->data + cdo[4], CLIB_CACHE_LINE_BYTES, LOAD);
-	  CLIB_PREFETCH (b[5]->data + cdo[5], CLIB_CACHE_LINE_BYTES, LOAD);
-	  CLIB_PREFETCH (b[6]->data + cdo[6], CLIB_CACHE_LINE_BYTES, LOAD);
-	  CLIB_PREFETCH (b[7]->data + cdo[7], CLIB_CACHE_LINE_BYTES, LOAD);
+	  clib_prefetch_load (b[4]->data + cdo[4]);
+	  clib_prefetch_load (b[5]->data + cdo[5]);
+	  clib_prefetch_load (b[6]->data + cdo[6]);
+	  clib_prefetch_load (b[7]->data + cdo[7]);
 	}
 
       if (update_feature_bitmap)

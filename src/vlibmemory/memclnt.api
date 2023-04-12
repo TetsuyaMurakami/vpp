@@ -29,7 +29,6 @@ service {
 /*
  * Create a client registration 
  */
-manual_print 
 define memclnt_create {
     u32 context;                /* opaque value to be returned in the reply */
     i32 ctx_quota;              /* requested punt context quota */
@@ -49,7 +48,6 @@ define memclnt_create_reply {
 /*
  * Delete a client registration 
  */
-manual_print
 define memclnt_delete {
     u32 index;                  /* index, used e.g. by API trace replay */
     u64 handle;               /* handle by which vlib knows this client */
@@ -137,7 +135,7 @@ define api_versions_reply {
  * at api trace replay time
  */
 
-manual_print define trace_plugin_msg_ids
+define trace_plugin_msg_ids
 {
     u32 client_index;
     u32 context;
@@ -208,4 +206,45 @@ autoreply define memclnt_keepalive
 {
   u32 client_index;
   u32 context;
+};
+
+/** \brief Control ping from client to api server request
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+*/
+define control_ping
+{
+  u32 client_index;
+  u32 context;
+};
+
+/** \brief Control ping from the client to the server response
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param retval - return code for the request
+    @param vpe_pid - the pid of the vpe, returned by the server
+*/
+define control_ping_reply
+{
+  u32 context;
+  i32 retval;
+  u32 client_index;
+  u32 vpe_pid;
+};
+
+define memclnt_create_v2 {
+    u32 context;                /* opaque value to be returned in the reply */
+    i32 ctx_quota;              /* requested punt context quota */
+    u64 input_queue;            /* client's queue */
+    string name[64];            /* for show, find by name, whatever */
+    u32 api_versions[8];        /* client-server pairs use as desired */
+    bool keepalive[default=true];  /* dead client scan keepalives */
+};
+
+define memclnt_create_v2_reply {
+    u32 context;                /* opaque value from the create request */
+    i32 response;               /* Non-negative = success */
+    u64 handle;                 /* handle by which vlib knows this client */
+    u32 index;                  /* index, used e.g. by API trace replay */
+    u64 message_table;          /* serialized message table in shmem */
 };

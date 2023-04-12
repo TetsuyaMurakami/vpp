@@ -19,7 +19,7 @@ MAKE ?= make
 MAKE_ARGS ?= -j
 BUILD_DIR        ?= $(CURDIR)/_build
 INSTALL_DIR      ?= $(CURDIR)/_install
-PKG_VERSION ?= $(shell git describe --abbrev=0 | cut -d- -f1 | cut -dv -f2 | cut -d. -f1,2)
+PKG_VERSION ?= $(shell git describe --abbrev=0 --match 'v[0-9]*' | cut -d- -f1 | cut -dv -f2 | cut -d. -f1,2)
 PKG_SUFFIX ?= $(shell git log --oneline v$(PKG_VERSION)-rc0.. . | wc -l)
 JOBS := $(if $(shell [ -f /proc/cpuinfo ] && head /proc/cpuinfo),\
 	$(shell grep -c ^processor /proc/cpuinfo), 2)
@@ -36,22 +36,21 @@ endif
 ARCH_X86_64=$(filter x86_64,$(shell uname -m))
 
 include packages.mk
-include packages/nasm.mk
 include packages/ipsec-mb.mk
 include packages/quicly.mk
-include packages/dpdk.mk
 include packages/rdma-core.mk
-include packages/libbpf.mk
+include packages/dpdk.mk
+include packages/xdp-tools.mk
 
 .PHONY: clean
 clean:
 	@rm -rf $(B) $(I)
 
 .PHONY: install
-install: $(if $(ARCH_X86_64), nasm-install ipsec-mb-install) dpdk-install rdma-core-install quicly-install libbpf-install
+install: $(if $(ARCH_X86_64), ipsec-mb-install) dpdk-install rdma-core-install quicly-install xdp-tools-install
 
 .PHONY: config
-config: $(if $(ARCH_X86_64), nasm-config ipsec-mb-config) dpdk-config rdma-core-config
+config: $(if $(ARCH_X86_64), ipsec-mb-config) dpdk-config rdma-core-config quicly-build
 
 ##############################################################################
 # .deb packaging
@@ -106,7 +105,7 @@ endif
 RPM_VER := $(PKG_VERSION)
 RPM_ARCH=$(shell rpm --eval "%{_arch}" 2> /dev/null)
 DEV_RPM=vpp-ext-deps-$(RPM_VER)-$(PKG_SUFFIX).$(RPM_ARCH).rpm
-INSTALLED_RPM_VER=$(shell rpm -q --queryformat '%{VERSION}-%{RELEASE}' vpp-ext-deps 2> /dev/null | grep -v "not inst")
+INSTALLED_RPM_VER=$(shell rpm -q --queryformat '%{VERSION}-%{RELEASE}' vpp-ext-deps 2> /dev/null | grep -v "vpp-ext-deps")
 
 .PHONY: build-rpm install-rpm check-rpm
 

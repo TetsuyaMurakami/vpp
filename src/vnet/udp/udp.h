@@ -25,9 +25,11 @@
 #include <vnet/ip/ip.h>
 #include <vnet/session/transport.h>
 
+#define UDP_NO_NODE_SET ((u16) ~0)
+
 typedef enum
 {
-#define udp_error(n,s) UDP_ERROR_##n,
+#define udp_error(f, n, s, d) UDP_ERROR_##f,
 #include <vnet/udp/udp_error.def>
 #undef udp_error
   UDP_N_ERROR,
@@ -55,6 +57,24 @@ typedef enum udp_conn_flags_
 #undef _
 } udp_conn_flags_t;
 
+#define foreach_udp_cfg_flag _ (NO_CSUM_OFFLOAD, "no-csum-offload")
+
+typedef enum udp_cfg_flag_bits_
+{
+#define _(sym, str) UDP_CFG_F_##sym##_BIT,
+  foreach_udp_cfg_flag
+#undef _
+    UDP_CFG_N_FLAG_BITS
+} udp_cfg_flag_bits_e;
+
+typedef enum udp_cfg_flag_
+{
+#define _(sym, str) UDP_CFG_F_##sym = 1 << UDP_CFG_F_##sym##_BIT,
+  foreach_udp_cfg_flag
+#undef _
+    UDP_CFG_N_FLAGS
+} __clib_packed udp_cfg_flags_t;
+
 typedef struct
 {
   /** Required for pool_get_aligned */
@@ -62,8 +82,14 @@ typedef struct
   transport_connection_t connection;	/**< must be first */
   clib_spinlock_t rx_lock;		/**< rx fifo lock */
   u8 flags;				/**< connection flags */
+  udp_cfg_flags_t cfg_flags;		/**< configuration flags */
   u16 mss;				/**< connection mss */
+  u32 sw_if_index;			/**< connection sw_if_index */
+  u32 next_node_index;	/**< Can be used to control next node in output */
+  u32 next_node_opaque; /**< Opaque to pass to next node */
 } udp_connection_t;
+
+#define udp_csum_offload(uc) (!((uc)->cfg_flags & UDP_CFG_F_NO_CSUM_OFFLOAD))
 
 typedef struct
 {
@@ -79,9 +105,6 @@ typedef struct
   /* Next index for this type. */
   u32 next_index;
 
-  /* UDP sessions refcount (not tunnels) */
-  u32 n_connections;
-
   /* Parser for packet generator edits for this protocol */
   unformat_function_t *unformat_pg_edit;
 } udp_dst_port_info_t;
@@ -92,6 +115,12 @@ typedef enum
   UDP_IP4,			/* the code is full of is_ip4... */
   N_UDP_AF,
 } udp_af_t;
+
+typedef struct udp_worker_
+{
+  udp_connection_t *connections;
+  u32 *pending_cleanups;
+} udp_worker_t;
 
 typedef struct
 {
@@ -112,15 +141,21 @@ typedef struct
   u32 local_to_input_edge[N_UDP_AF];
 
   /*
-   * Per-worker thread udp connection pools used with session layer
+   * UDP transport layer per-thread context
    */
-  udp_connection_t **connections;
-  u32 *connection_peekers;
-  clib_spinlock_t *peekers_readers_locks;
-  clib_spinlock_t *peekers_write_locks;
+
+  udp_worker_t *wrk;
   udp_connection_t *listener_pool;
 
+  /* Refcounts for ports consumed by udp transports to handle
+   * both passive and active opens using the same port */
+  u16 *transport_ports_refcnt[N_UDP_AF];
+
   u16 default_mtu;
+  u16 msg_id_base;
+  u8 csum_offload;
+
+  u8 icmp_send_unreachable_disabled;
 } udp_main_t;
 
 extern udp_main_t udp_main;
@@ -128,16 +163,26 @@ extern vlib_node_registration_t udp4_input_node;
 extern vlib_node_registration_t udp6_input_node;
 extern vlib_node_registration_t udp4_local_node;
 extern vlib_node_registration_t udp6_local_node;
+extern vlib_node_registration_t udp4_output_node;
+extern vlib_node_registration_t udp6_output_node;
 
 void udp_add_dst_port (udp_main_t * um, udp_dst_port_t dst_port,
 		       char *dst_port_name, u8 is_ip4);
 
+always_inline udp_worker_t *
+udp_worker_get (u32 thread_index)
+{
+  return vec_elt_at_index (udp_main.wrk, thread_index);
+}
+
 always_inline udp_connection_t *
 udp_connection_get (u32 conn_index, u32 thread_index)
 {
-  if (pool_is_free_index (udp_main.connections[thread_index], conn_index))
+  udp_worker_t *wrk = udp_worker_get (thread_index);
+
+  if (pool_is_free_index (wrk->connections, conn_index))
     return 0;
-  return pool_elt_at_index (udp_main.connections[thread_index], conn_index);
+  return pool_elt_at_index (wrk->connections, conn_index);
 }
 
 always_inline udp_connection_t *
@@ -158,66 +203,26 @@ udp_connection_from_transport (transport_connection_t * tc)
   return ((udp_connection_t *) tc);
 }
 
-always_inline u32
-udp_connection_index (udp_connection_t * uc)
-{
-  return (uc - udp_main.connections[uc->c_thread_index]);
-}
-
 void udp_connection_free (udp_connection_t * uc);
 udp_connection_t *udp_connection_alloc (u32 thread_index);
-
-/**
- * Acquires a lock that blocks a connection pool from expanding.
- */
-always_inline void
-udp_pool_add_peeker (u32 thread_index)
-{
-  if (thread_index != vlib_get_thread_index ())
-    return;
-  clib_spinlock_lock_if_init (&udp_main.peekers_readers_locks[thread_index]);
-  udp_main.connection_peekers[thread_index] += 1;
-  if (udp_main.connection_peekers[thread_index] == 1)
-    clib_spinlock_lock_if_init (&udp_main.peekers_write_locks[thread_index]);
-  clib_spinlock_unlock_if_init (&udp_main.peekers_readers_locks
-				[thread_index]);
-}
-
-always_inline void
-udp_pool_remove_peeker (u32 thread_index)
-{
-  if (thread_index != vlib_get_thread_index ())
-    return;
-  ASSERT (udp_main.connection_peekers[thread_index] > 0);
-  clib_spinlock_lock_if_init (&udp_main.peekers_readers_locks[thread_index]);
-  udp_main.connection_peekers[thread_index] -= 1;
-  if (udp_main.connection_peekers[thread_index] == 0)
-    clib_spinlock_unlock_if_init (&udp_main.peekers_write_locks
-				  [thread_index]);
-  clib_spinlock_unlock_if_init (&udp_main.peekers_readers_locks
-				[thread_index]);
-}
 
 always_inline udp_connection_t *
 udp_connection_clone_safe (u32 connection_index, u32 thread_index)
 {
+  u32 current_thread_index = vlib_get_thread_index (), new_index;
   udp_connection_t *old_c, *new_c;
-  u32 current_thread_index = vlib_get_thread_index ();
-  new_c = udp_connection_alloc (current_thread_index);
 
-  /* If during the memcpy pool is reallocated AND the memory allocator
-   * decides to give the old chunk of memory to somebody in a hurry to
-   * scribble something on it, we have a problem. So add this thread as
-   * a session pool peeker.
-   */
-  udp_pool_add_peeker (thread_index);
-  old_c = udp_main.connections[thread_index] + connection_index;
+  new_c = udp_connection_alloc (current_thread_index);
+  new_index = new_c->c_c_index;
+  /* Connection pool always realloced with barrier */
+  old_c = udp_main.wrk[thread_index].connections + connection_index;
   clib_memcpy_fast (new_c, old_c, sizeof (*new_c));
   old_c->flags |= UDP_CONN_F_MIGRATED;
-  udp_pool_remove_peeker (thread_index);
   new_c->c_thread_index = current_thread_index;
-  new_c->c_c_index = udp_connection_index (new_c);
+  new_c->c_c_index = new_index;
   new_c->c_fib_index = old_c->c_fib_index;
+  /* Assume cloned sessions don't need lock */
+  new_c->rx_lock = 0;
   return new_c;
 }
 
@@ -233,8 +238,6 @@ format_function_t format_udp_rx_trace;
 format_function_t format_udp_connection;
 unformat_function_t unformat_udp_header;
 unformat_function_t unformat_udp_port;
-
-void udp_connection_share_port (u16 lcl_port, u8 is_ip4);
 
 void udp_punt_unknown (vlib_main_t * vm, u8 is_ip4, u8 is_add);
 

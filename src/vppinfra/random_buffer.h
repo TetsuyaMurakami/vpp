@@ -54,6 +54,9 @@ typedef struct
   /* Random buffer. */
   uword *buffer;
 
+  /* An actual length to be applied before using the buffer. */
+  uword next_read_len;
+
   /* Cache up to 1 word worth of bytes for random data
      less than one word at a time. */
   uword n_cached_bytes;
@@ -84,11 +87,16 @@ clib_random_buffer_get_data (clib_random_buffer_t * b, uword n_bytes)
 {
   uword n_words, i, l;
 
+  if (b->buffer)
+    vec_set_len (b->buffer, b->next_read_len);
+  else
+    ASSERT (b->next_read_len == 0);
+
   l = b->n_cached_bytes;
   if (n_bytes <= l)
     {
       b->n_cached_bytes = l - n_bytes;
-      return &b->cached_bytes[l];
+      return &b->cached_bytes[l - n_bytes];
     }
 
   n_words = n_bytes / sizeof (uword);
@@ -100,13 +108,13 @@ clib_random_buffer_get_data (clib_random_buffer_t * b, uword n_bytes)
     clib_random_buffer_fill (b, n_words);
 
   i = vec_len (b->buffer) - n_words;
-  _vec_len (b->buffer) = i;
+  b->next_read_len = i;
 
   if (n_bytes < sizeof (uword))
     {
       b->cached_word = b->buffer[i];
       b->n_cached_bytes = sizeof (uword) - n_bytes;
-      return b->cached_bytes;
+      return &b->cached_bytes[sizeof (uword) - n_bytes];
     }
   else
     return b->buffer + i;

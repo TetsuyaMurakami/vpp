@@ -23,14 +23,6 @@
 #include <vnet/fib/fib_node.h>
 #include <vnet/adj/adj.h>
 
-typedef enum
-{
-#define mpls_error(n,s) MPLS_ERROR_##n,
-#include <vnet/mpls/error.def>
-#undef mpls_error
-  MPLS_N_ERROR,
-} mpls_error_t;
-
 /**
  * @brief Definition of a callback for receiving MPLS interface state change
  * notifications
@@ -60,6 +52,7 @@ typedef struct
   u8 *mpls_enabled_by_sw_if_index;
 
   u32 mpls_lookup_node_index;
+  u16 msg_id_base;
 } mpls_main_t;
 
 extern mpls_main_t mpls_main;
@@ -84,9 +77,8 @@ unformat_function_t unformat_mpls_unicast_label;
 unformat_function_t unformat_mpls_header;
 unformat_function_t unformat_pg_mpls_header;
 
-int mpls_sw_interface_enable_disable (mpls_main_t * mm,
-				      u32 sw_if_index,
-				      u8 is_enable, u8 is_api);
+int mpls_sw_interface_enable_disable (mpls_main_t *mm, u32 sw_if_index,
+				      u8 is_enable);
 
 u8 mpls_sw_interface_is_enabled (u32 sw_if_index);
 

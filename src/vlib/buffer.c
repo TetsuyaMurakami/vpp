@@ -46,7 +46,7 @@
 #include <vppinfra/linux/sysfs.h>
 #include <vlib/vlib.h>
 #include <vlib/unix/unix.h>
-#include <vpp/stats/stat_segment.h>
+#include <vlib/stats/stats.h>
 
 #define VLIB_BUFFER_DEFAULT_BUFFERS_PER_NUMA 16384
 #define VLIB_BUFFER_DEFAULT_BUFFERS_PER_NUMA_UNPRIV 8192
@@ -62,17 +62,6 @@ STATIC_ASSERT_FITS_IN (vlib_buffer_t, buffer_pool_index, 16);
 STATIC_ASSERT_OFFSET_OF (vlib_buffer_t, template_end, 64);
 
 u16 __vlib_buffer_external_hdr_size = 0;
-
-static void
-buffer_gauges_update_cached_fn (stat_segment_directory_entry_t * e,
-				u32 index);
-
-static void
-buffer_gauges_update_available_fn (stat_segment_directory_entry_t * e,
-				   u32 index);
-
-static void
-buffer_gauges_update_used_fn (stat_segment_directory_entry_t * e, u32 index);
 
 uword
 vlib_buffer_length_in_chain_slow_path (vlib_main_t * vm,
@@ -107,7 +96,7 @@ format_vlib_buffer_no_chain (u8 * s, va_list * args)
 		"ref-count %u", b->current_data, b->current_length,
 		b->buffer_pool_index, b->ref_count);
 
-  if (b->flags & VLIB_BUFFER_TOTAL_LENGTH_VALID)
+  if (b->flags & VLIB_BUFFER_NEXT_PRESENT)
     s = format (s, ", totlen-nifb %d",
 		b->total_length_not_including_first_buffer);
 
@@ -309,29 +298,6 @@ done:
   return result;
 }
 
-/*
- * Hand-craft a static vector w/ length 1, so vec_len(vlib_mains) =1
- * and vlib_mains[0] = &vlib_global_main from the beginning of time.
- *
- * The only place which should ever expand vlib_mains is start_workers()
- * in threads.c. It knows about the bootstrap vector.
- */
-/* *INDENT-OFF* */
-static struct
-{
-  vec_header_t h;
-  vlib_main_t *vm;
-} __attribute__ ((packed)) __bootstrap_vlib_main_vector
-  __attribute__ ((aligned (CLIB_CACHE_LINE_BYTES))) =
-{
-  .h.len = 1,
-  .vm = &vlib_global_main,
-};
-/* *INDENT-ON* */
-
-vlib_main_t **vlib_mains = &__bootstrap_vlib_main_vector.vm;
-
-
 /* When debugging validate that given buffers are either known allocated
    or known free. */
 void
@@ -532,7 +498,7 @@ vlib_buffer_pool_create (vlib_main_t * vm, char *name, u32 data_size,
   if (vec_len (bm->buffer_pools) >= 255)
     return ~0;
 
-  vec_add2_aligned (bm->buffer_pools, bp, 1, CLIB_LOG2_CACHE_LINE_BYTES);
+  vec_add2_aligned (bm->buffer_pools, bp, 1, CLIB_CACHE_LINE_BYTES);
 
   if (bm->buffer_mem_size == 0)
     {
@@ -569,7 +535,7 @@ vlib_buffer_pool_create (vlib_main_t * vm, char *name, u32 data_size,
   bp->data_size = data_size;
   bp->numa_node = m->numa_node;
 
-  vec_validate_aligned (bp->threads, vec_len (vlib_mains) - 1,
+  vec_validate_aligned (bp->threads, vlib_get_n_threads () - 1,
 			CLIB_CACHE_LINE_BYTES);
 
   alloc_size = vlib_buffer_alloc_size (bm->ext_hdr_size, data_size);
@@ -638,20 +604,26 @@ format_vlib_buffer_pool (u8 * s, va_list * va)
   return s;
 }
 
-static clib_error_t *
-show_buffers (vlib_main_t * vm,
-	      unformat_input_t * input, vlib_cli_command_t * cmd)
+u8 *
+format_vlib_buffer_pool_all (u8 *s, va_list *va)
 {
+  vlib_main_t *vm = va_arg (*va, vlib_main_t *);
   vlib_buffer_main_t *bm = vm->buffer_main;
   vlib_buffer_pool_t *bp;
 
-  vlib_cli_output (vm, "%U", format_vlib_buffer_pool, vm, 0);
+  s = format (s, "%U", format_vlib_buffer_pool, vm, 0);
 
-  /* *INDENT-OFF* */
   vec_foreach (bp, bm->buffer_pools)
-    vlib_cli_output (vm, "%U", format_vlib_buffer_pool, vm, bp);
-  /* *INDENT-ON* */
+    s = format (s, "\n%U", format_vlib_buffer_pool, vm, bp);
 
+  return s;
+}
+
+static clib_error_t *
+show_buffers (vlib_main_t *vm, unformat_input_t *input,
+	      vlib_cli_command_t *cmd)
+{
+  vlib_cli_output (vm, "%U", format_vlib_buffer_pool_all, vm);
   return 0;
 }
 
@@ -664,25 +636,19 @@ VLIB_CLI_COMMAND (show_buffers_command, static) = {
 /* *INDENT-ON* */
 
 clib_error_t *
-vlib_buffer_worker_init (vlib_main_t * vm)
+vlib_buffer_num_workers_change (vlib_main_t *vm)
 {
   vlib_buffer_main_t *bm = vm->buffer_main;
   vlib_buffer_pool_t *bp;
 
-  /* *INDENT-OFF* */
   vec_foreach (bp, bm->buffer_pools)
-    {
-      clib_spinlock_lock (&bp->lock);
-      vec_validate_aligned (bp->threads, vec_len (vlib_mains) - 1,
-			    CLIB_CACHE_LINE_BYTES);
-      clib_spinlock_unlock (&bp->lock);
-    }
-  /* *INDENT-ON* */
+    vec_validate_aligned (bp->threads, vlib_get_n_threads () - 1,
+			  CLIB_CACHE_LINE_BYTES);
 
   return 0;
 }
 
-VLIB_WORKER_INIT_FUNCTION (vlib_buffer_worker_init);
+VLIB_NUM_WORKERS_CHANGE_FN (vlib_buffer_num_workers_change);
 
 static clib_error_t *
 vlib_buffer_main_init_numa_alloc (struct vlib_main_t *vm, u32 numa_node,
@@ -815,37 +781,39 @@ buffer_get_by_index (vlib_buffer_main_t * bm, u32 index)
 }
 
 static void
-buffer_gauges_update_used_fn (stat_segment_directory_entry_t * e, u32 index)
+buffer_gauges_collect_used_fn (vlib_stats_collector_data_t *d)
 {
   vlib_main_t *vm = vlib_get_main ();
-  vlib_buffer_pool_t *bp = buffer_get_by_index (vm->buffer_main, index);
+  vlib_buffer_pool_t *bp =
+    buffer_get_by_index (vm->buffer_main, d->private_data);
   if (!bp)
     return;
 
-  e->value = bp->n_buffers - bp->n_avail - buffer_get_cached (bp);
+  d->entry->value = bp->n_buffers - bp->n_avail - buffer_get_cached (bp);
 }
 
 static void
-buffer_gauges_update_available_fn (stat_segment_directory_entry_t * e,
-				   u32 index)
+buffer_gauges_collect_available_fn (vlib_stats_collector_data_t *d)
 {
   vlib_main_t *vm = vlib_get_main ();
-  vlib_buffer_pool_t *bp = buffer_get_by_index (vm->buffer_main, index);
+  vlib_buffer_pool_t *bp =
+    buffer_get_by_index (vm->buffer_main, d->private_data);
   if (!bp)
     return;
 
-  e->value = bp->n_avail;
+  d->entry->value = bp->n_avail;
 }
 
 static void
-buffer_gauges_update_cached_fn (stat_segment_directory_entry_t * e, u32 index)
+buffer_gauges_collect_cached_fn (vlib_stats_collector_data_t *d)
 {
   vlib_main_t *vm = vlib_get_main ();
-  vlib_buffer_pool_t *bp = buffer_get_by_index (vm->buffer_main, index);
+  vlib_buffer_pool_t *bp =
+    buffer_get_by_index (vm->buffer_main, d->private_data);
   if (!bp)
     return;
 
-  e->value = buffer_get_cached (bp);
+  d->entry->value = buffer_get_cached (bp);
 }
 
 clib_error_t *
@@ -919,23 +887,23 @@ vlib_buffer_main_init (struct vlib_main_t * vm)
 
   vec_foreach (bp, bm->buffer_pools)
   {
+    vlib_stats_collector_reg_t reg = { .private_data = bp - bm->buffer_pools };
     if (bp->n_buffers == 0)
       continue;
 
-    vec_reset_length (name);
-    name = format (name, "/buffer-pools/%s/cached%c", bp->name, 0);
-    stat_segment_register_gauge (name, buffer_gauges_update_cached_fn,
-				 bp - bm->buffer_pools);
+    reg.entry_index =
+      vlib_stats_add_gauge ("/buffer-pools/%s/cached", bp->name);
+    reg.collect_fn = buffer_gauges_collect_cached_fn;
+    vlib_stats_register_collector_fn (&reg);
 
-    vec_reset_length (name);
-    name = format (name, "/buffer-pools/%s/used%c", bp->name, 0);
-    stat_segment_register_gauge (name, buffer_gauges_update_used_fn,
-				 bp - bm->buffer_pools);
+    reg.entry_index = vlib_stats_add_gauge ("/buffer-pools/%s/used", bp->name);
+    reg.collect_fn = buffer_gauges_collect_used_fn;
+    vlib_stats_register_collector_fn (&reg);
 
-    vec_reset_length (name);
-    name = format (name, "/buffer-pools/%s/available%c", bp->name, 0);
-    stat_segment_register_gauge (name, buffer_gauges_update_available_fn,
-				 bp - bm->buffer_pools);
+    reg.entry_index =
+      vlib_stats_add_gauge ("/buffer-pools/%s/available", bp->name);
+    reg.collect_fn = buffer_gauges_collect_available_fn;
+    vlib_stats_register_collector_fn (&reg);
   }
 
 done:
@@ -993,6 +961,20 @@ vlib_buffer_alloc_may_fail (vlib_main_t * vm, u32 n_buffers)
   return n_buffers;
 }
 #endif
+
+__clib_export int
+vlib_buffer_set_alloc_free_callback (
+  vlib_main_t *vm, vlib_buffer_alloc_free_callback_t *alloc_callback_fn,
+  vlib_buffer_alloc_free_callback_t *free_callback_fn)
+{
+  vlib_buffer_main_t *bm = vm->buffer_main;
+  if ((alloc_callback_fn && bm->alloc_callback_fn) ||
+      (free_callback_fn && bm->free_callback_fn))
+    return 1;
+  bm->alloc_callback_fn = alloc_callback_fn;
+  bm->free_callback_fn = free_callback_fn;
+  return 0;
+}
 
 /** @endcond */
 /*

@@ -22,7 +22,7 @@
  * packets. Whether the two actions are the same more often than they are
  * different, or vice versa, is a function of the deployment in which the router
  * is used and thus not predictable.
- * The desgin choice to make with an MPLS_FIB table is:
+ * The design choice to make with an MPLS_FIB table is:
  *  1 - 20 bit key: label only.
  *      When the EOS and non-EOS actions differ the result is a 'EOS-choice' object.
  *  2 - 21 bit key: label and EOS-bit.
@@ -33,7 +33,7 @@
  *    - lower memory overhead, since there are few DB entries.
  *   Disadvantages:
  *    - slower DP performance in the case the chains differ, as more objects are
- *      encounterd in the switch path
+ *      encountered in the switch path
  *
  * 21 bit key:
  *   Advantages:
@@ -275,6 +275,7 @@ mpls_fib_table_destroy (u32 fib_index)
     }
     hash_free(mf->mf_entries);
 
+    vec_free (fib_table->ft_locks);
     vec_free(fib_table->ft_src_route_counts);
     pool_put(mpls_main.mpls_fibs, mf);
     pool_put(mpls_main.fibs, fib_table);
@@ -450,7 +451,7 @@ mpls_fib_show (vlib_main_t * vm,
 	    continue;
 
 	s = format (s, "%v, fib_index:%d locks:[",
-                    fib_table->ft_desc, mpls_main.fibs - fib_table);
+                    fib_table->ft_desc, fib_table - mpls_main.fibs);
         vec_foreach_index(source, fib_table->ft_locks)
         {
             if (0 != fib_table->ft_locks[source])

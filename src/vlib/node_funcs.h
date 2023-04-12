@@ -45,6 +45,7 @@
 #ifndef included_vlib_node_funcs_h
 #define included_vlib_node_funcs_h
 
+#include <vppinfra/clib.h>
 #include <vppinfra/fifo.h>
 #include <vppinfra/tw_timer_1t_3w_1024sl_ov.h>
 #include <vppinfra/interrupt.h>
@@ -58,7 +59,8 @@ vlib_process_start_switch_stack (vlib_main_t * vm, vlib_process_t * p)
 {
 #ifdef CLIB_SANITIZE_ADDR
   void *stack = p ? (void *) p->stack : vlib_thread_stacks[vm->thread_index];
-  u32 stack_bytes = p ? p->log2_n_stack_bytes : VLIB_THREAD_STACK_SIZE;
+  u32 stack_bytes =
+    p ? (1ULL < p->log2_n_stack_bytes) : VLIB_THREAD_STACK_SIZE;
   __sanitizer_start_switch_fiber (&vm->asan_stack_save, stack, stack_bytes);
 #endif
 }
@@ -225,6 +227,27 @@ vlib_node_get_state (vlib_main_t * vm, u32 node_index)
 }
 
 always_inline void
+vlib_node_set_flag (vlib_main_t *vm, u32 node_index, u16 flag, u8 enable)
+{
+  vlib_node_runtime_t *r;
+  vlib_node_t *n;
+
+  n = vlib_get_node (vm, node_index);
+  r = vlib_node_get_runtime (vm, node_index);
+
+  if (enable)
+    {
+      n->flags |= flag;
+      r->flags |= flag;
+    }
+  else
+    {
+      n->flags &= ~flag;
+      r->flags &= ~flag;
+    }
+}
+
+always_inline void
 vlib_node_set_interrupt_pending (vlib_main_t *vm, u32 node_index)
 {
   vlib_node_main_t *nm = &vm->node_main;
@@ -262,16 +285,6 @@ vlib_frame_no_append (vlib_frame_t * f)
   f->frame_flags |= VLIB_FRAME_NO_APPEND;
 }
 
-/* Byte alignment for vector arguments. */
-#define VLIB_FRAME_VECTOR_ALIGN (1 << 4)
-
-always_inline u32
-vlib_frame_vector_byte_offset (u32 scalar_size)
-{
-  return round_pow2 (sizeof (vlib_frame_t) + scalar_size,
-		     VLIB_FRAME_VECTOR_ALIGN);
-}
-
 /** \brief Get pointer to frame vector data.
  @param f vlib_frame_t pointer
  @return pointer to first vector element in frame
@@ -279,7 +292,19 @@ vlib_frame_vector_byte_offset (u32 scalar_size)
 always_inline void *
 vlib_frame_vector_args (vlib_frame_t * f)
 {
-  return (void *) f + vlib_frame_vector_byte_offset (f->scalar_size);
+  ASSERT (f->vector_offset);
+  return (void *) f + f->vector_offset;
+}
+
+/** \brief Get pointer to frame vector aux data.
+ @param f vlib_frame_t pointer
+ @return pointer to first vector aux data element in frame
+*/
+always_inline void *
+vlib_frame_aux_args (vlib_frame_t *f)
+{
+  ASSERT (f->aux_offset);
+  return (void *) f + f->aux_offset;
 }
 
 /** \brief Get pointer to frame scalar data.
@@ -293,7 +318,8 @@ vlib_frame_vector_args (vlib_frame_t * f)
 always_inline void *
 vlib_frame_scalar_args (vlib_frame_t * f)
 {
-  return vlib_frame_vector_args (f) - f->scalar_size;
+  ASSERT (f->scalar_offset);
+  return (void *) f + f->scalar_offset;
 }
 
 always_inline vlib_next_frame_t *
@@ -348,16 +374,34 @@ vlib_frame_t *vlib_get_next_frame_internal (vlib_main_t * vm,
 					    u32 next_index,
 					    u32 alloc_new_frame);
 
-#define vlib_get_next_frame_macro(vm,node,next_index,vectors,n_vectors_left,alloc_new_frame) \
-do {									\
-  vlib_frame_t * _f							\
-    = vlib_get_next_frame_internal ((vm), (node), (next_index),		\
-				    (alloc_new_frame));			\
-  u32 _n = _f->n_vectors;						\
-  (vectors) = vlib_frame_vector_args (_f) + _n * sizeof ((vectors)[0]); \
-  (n_vectors_left) = VLIB_FRAME_SIZE - _n;				\
-} while (0)
+#define vlib_get_next_frame_macro(vm, node, next_index, vectors,              \
+				  n_vectors_left, alloc_new_frame)            \
+  do                                                                          \
+    {                                                                         \
+      vlib_frame_t *_f = vlib_get_next_frame_internal (                       \
+	(vm), (node), (next_index), (alloc_new_frame));                       \
+      u32 _n = _f->n_vectors;                                                 \
+      (vectors) = vlib_frame_vector_args (_f) + _n * sizeof ((vectors)[0]);   \
+      (n_vectors_left) = VLIB_FRAME_SIZE - _n;                                \
+    }                                                                         \
+  while (0)
 
+#define vlib_get_next_frame_macro_with_aux(vm, node, next_index, vectors,     \
+					   n_vectors_left, alloc_new_frame,   \
+					   aux_data, maybe_no_aux)            \
+  do                                                                          \
+    {                                                                         \
+      vlib_frame_t *_f = vlib_get_next_frame_internal (                       \
+	(vm), (node), (next_index), (alloc_new_frame));                       \
+      u32 _n = _f->n_vectors;                                                 \
+      (vectors) = vlib_frame_vector_args (_f) + _n * sizeof ((vectors)[0]);   \
+      if ((maybe_no_aux) && (_f)->aux_offset == 0)                            \
+	(aux_data) = NULL;                                                    \
+      else                                                                    \
+	(aux_data) = vlib_frame_aux_args (_f) + _n * sizeof ((aux_data)[0]);  \
+      (n_vectors_left) = VLIB_FRAME_SIZE - _n;                                \
+    }                                                                         \
+  while (0)
 
 /** \brief Get pointer to next frame vector data by
     (@c vlib_node_runtime_t, @c next_index).
@@ -371,15 +415,68 @@ do {									\
  @return @c vectors -- pointer to next available vector slot
  @return @c n_vectors_left -- number of vector slots available
 */
-#define vlib_get_next_frame(vm,node,next_index,vectors,n_vectors_left)	\
-  vlib_get_next_frame_macro (vm, node, next_index,			\
-			     vectors, n_vectors_left,			\
+#define vlib_get_next_frame(vm, node, next_index, vectors, n_vectors_left)    \
+  vlib_get_next_frame_macro (vm, node, next_index, vectors, n_vectors_left,   \
 			     /* alloc new frame */ 0)
 
-#define vlib_get_new_next_frame(vm,node,next_index,vectors,n_vectors_left) \
-  vlib_get_next_frame_macro (vm, node, next_index,			\
-			     vectors, n_vectors_left,			\
+#define vlib_get_new_next_frame(vm, node, next_index, vectors,                \
+				n_vectors_left)                               \
+  vlib_get_next_frame_macro (vm, node, next_index, vectors, n_vectors_left,   \
 			     /* alloc new frame */ 1)
+
+/** \brief Get pointer to next frame vector data and next frame aux data by
+    (@c vlib_node_runtime_t, @c next_index).
+ Standard single/dual loop boilerplate element.
+ @attention This is a MACRO, with SIDE EFFECTS.
+ @attention This MACRO is unsafe in case the next node does not support
+ aux_data
+
+ @param vm vlib_main_t pointer, varies by thread
+ @param node current node vlib_node_runtime_t pointer
+ @param next_index requested graph arc index
+
+ @return @c vectors -- pointer to next available vector slot
+ @return @c aux_data -- pointer to next available aux data slot
+ @return @c n_vectors_left -- number of vector slots available
+*/
+#define vlib_get_next_frame_with_aux(vm, node, next_index, vectors, aux_data, \
+				     n_vectors_left)                          \
+  vlib_get_next_frame_macro_with_aux (                                        \
+    vm, node, next_index, vectors, n_vectors_left, /* alloc new frame */ 0,   \
+    aux_data, /* maybe_no_aux */ 0)
+
+#define vlib_get_new_next_frame_with_aux(vm, node, next_index, vectors,       \
+					 aux_data, n_vectors_left)            \
+  vlib_get_next_frame_macro_with_aux (                                        \
+    vm, node, next_index, vectors, n_vectors_left, /* alloc new frame */ 1,   \
+    aux_data, /* maybe_no_aux */ 0)
+
+/** \brief Get pointer to next frame vector data and next frame aux data by
+    (@c vlib_node_runtime_t, @c next_index).
+ Standard single/dual loop boilerplate element.
+ @attention This is a MACRO, with SIDE EFFECTS.
+ @attention This MACRO is safe in case the next node does not support aux_data.
+ In that case aux_data is set to NULL.
+
+ @param vm vlib_main_t pointer, varies by thread
+ @param node current node vlib_node_runtime_t pointer
+ @param next_index requested graph arc index
+
+ @return @c vectors -- pointer to next available vector slot
+ @return @c aux_data -- pointer to next available aux data slot
+ @return @c n_vectors_left -- number of vector slots available
+*/
+#define vlib_get_next_frame_with_aux_safe(vm, node, next_index, vectors,      \
+					  aux_data, n_vectors_left)           \
+  vlib_get_next_frame_macro_with_aux (                                        \
+    vm, node, next_index, vectors, n_vectors_left, /* alloc new frame */ 0,   \
+    aux_data, /* maybe_no_aux */ 1)
+
+#define vlib_get_new_next_frame_with_aux_safe(vm, node, next_index, vectors,  \
+					      aux_data, n_vectors_left)       \
+  vlib_get_next_frame_macro_with_aux (                                        \
+    vm, node, next_index, vectors, n_vectors_left, /* alloc new frame */ 1,   \
+    aux_data, /* maybe_no_aux */ 1)
 
 /** \brief Release pointer to next frame vector data.
  Standard single/dual loop boilerplate element.
@@ -403,6 +500,16 @@ vlib_put_next_frame (vlib_main_t * vm,
   (v);									\
 })
 
+#define vlib_set_next_frame_with_aux_safe(vm, node, next_index, v, aux)       \
+  ({                                                                          \
+    uword _n_left;                                                            \
+    vlib_get_next_frame_with_aux_safe ((vm), (node), (next_index), (v),       \
+				       (aux), _n_left);                       \
+    ASSERT (_n_left > 0);                                                     \
+    vlib_put_next_frame ((vm), (node), (next_index), _n_left - 1);            \
+    (v);                                                                      \
+  })
+
 always_inline void
 vlib_set_next_frame_buffer (vlib_main_t * vm,
 			    vlib_node_runtime_t * node,
@@ -411,6 +518,20 @@ vlib_set_next_frame_buffer (vlib_main_t * vm,
   u32 *p;
   p = vlib_set_next_frame (vm, node, next_index, p);
   p[0] = buffer_index;
+}
+
+always_inline void
+vlib_set_next_frame_buffer_with_aux_safe (vlib_main_t *vm,
+					  vlib_node_runtime_t *node,
+					  u32 next_index, u32 buffer_index,
+					  u32 aux)
+{
+  u32 *p;
+  u32 *a;
+  p = vlib_set_next_frame_with_aux_safe (vm, node, next_index, p, a);
+  p[0] = buffer_index;
+  if (a)
+    a[0] = aux;
 }
 
 vlib_frame_t *vlib_get_frame_to_node (vlib_main_t * vm, u32 to_node_index);
@@ -580,7 +701,7 @@ vlib_process_get_events (vlib_main_t * vm, uword ** data_vector)
   l = _vec_len (p->pending_event_data_by_type_index[t]);
   if (data_vector)
     vec_add (*data_vector, p->pending_event_data_by_type_index[t], l);
-  _vec_len (p->pending_event_data_by_type_index[t]) = 0;
+  vec_set_len (p->pending_event_data_by_type_index[t], 0);
 
   et = pool_elt_at_index (p->event_type_pool, t);
 
@@ -604,7 +725,7 @@ vlib_process_get_events_helper (vlib_process_t * p, uword t,
   l = _vec_len (p->pending_event_data_by_type_index[t]);
   if (data_vector)
     vec_add (*data_vector, p->pending_event_data_by_type_index[t], l);
-  _vec_len (p->pending_event_data_by_type_index[t]) = 0;
+  vec_set_len (p->pending_event_data_by_type_index[t], 0);
 
   vlib_process_maybe_free_event_type (p, t);
 
@@ -811,7 +932,8 @@ vlib_process_signal_event_helper (vlib_node_main_t * nm,
 				  uword n_data_elts, uword n_data_elt_bytes)
 {
   uword p_flags, add_to_pending, delete_from_wheel;
-  void *data_to_be_written_by_caller;
+  u8 *data_to_be_written_by_caller;
+  vec_attr_t va = { .elt_sz = n_data_elt_bytes };
 
   ASSERT (n->type == VLIB_NODE_TYPE_PROCESS);
 
@@ -821,22 +943,18 @@ vlib_process_signal_event_helper (vlib_node_main_t * nm,
 
   /* Resize data vector and return caller's data to be written. */
   {
-    void *data_vec = p->pending_event_data_by_type_index[t];
+    u8 *data_vec = p->pending_event_data_by_type_index[t];
     uword l;
 
     if (!data_vec && vec_len (nm->recycled_event_data_vectors))
       {
 	data_vec = vec_pop (nm->recycled_event_data_vectors);
-	_vec_len (data_vec) = 0;
+	vec_reset_length (data_vec);
       }
 
     l = vec_len (data_vec);
 
-    data_vec = _vec_resize (data_vec,
-			    /* length_increment */ n_data_elts,
-			    /* total size after increment */
-			    (l + n_data_elts) * n_data_elt_bytes,
-			    /* header_bytes */ 0, /* data_align */ 0);
+    data_vec = _vec_realloc_internal (data_vec, l + n_data_elts, &va);
 
     p->pending_event_data_by_type_index[t] = data_vec;
     data_to_be_written_by_caller = data_vec + l * n_data_elt_bytes;
@@ -881,8 +999,11 @@ vlib_process_signal_event_helper (vlib_node_main_t * nm,
       p->flags = p_flags | VLIB_PROCESS_RESUME_PENDING;
       vec_add1 (nm->data_from_advancing_timing_wheel, x);
       if (delete_from_wheel)
-	TW (tw_timer_stop) ((TWT (tw_timer_wheel) *) nm->timing_wheel,
-			    p->stop_timer_handle);
+	{
+	  TW (tw_timer_stop)
+	  ((TWT (tw_timer_wheel) *) nm->timing_wheel, p->stop_timer_handle);
+	  p->stop_timer_handle = ~0;
+	}
     }
 
   return data_to_be_written_by_caller;
@@ -1140,8 +1261,7 @@ vlib_node_vectors_per_main_loop_as_integer (vlib_main_t * vm, u32 node_index)
   return v >> VLIB_LOG2_MAIN_LOOPS_PER_STATS_UPDATE;
 }
 
-void
-vlib_frame_free (vlib_main_t * vm, vlib_node_runtime_t * r, vlib_frame_t * f);
+void vlib_frame_free (vlib_main_t *vm, vlib_frame_t *f);
 
 /* Return the edge index if present, ~0 otherwise */
 uword vlib_node_get_next (vlib_main_t * vm, uword node, uword next_node);
@@ -1187,7 +1307,11 @@ void vlib_node_rename (vlib_main_t * vm, u32 node_index, char *fmt, ...);
 /* Register new packet processing node.  Nodes can be registered
    dynamically via this call or statically via the VLIB_REGISTER_NODE
    macro. */
-u32 vlib_register_node (vlib_main_t * vm, vlib_node_registration_t * r);
+u32 vlib_register_node (vlib_main_t *vm, vlib_node_registration_t *r,
+			char *fmt, ...);
+
+/* Register all node function variants */
+void vlib_register_all_node_march_variants (vlib_main_t *vm);
 
 /* Register all static nodes registered via VLIB_REGISTER_NODE. */
 void vlib_register_all_static_nodes (vlib_main_t * vm);
@@ -1197,6 +1321,12 @@ void vlib_start_process (vlib_main_t * vm, uword process_index);
 
 /* Sync up runtime and main node stats. */
 void vlib_node_sync_stats (vlib_main_t * vm, vlib_node_t * n);
+void vlib_node_runtime_sync_stats (vlib_main_t *vm, vlib_node_runtime_t *r,
+				   uword n_calls, uword n_vectors,
+				   uword n_clocks);
+void vlib_node_runtime_sync_stats_node (vlib_node_t *n, vlib_node_runtime_t *r,
+					uword n_calls, uword n_vectors,
+					uword n_clocks);
 
 /* Node graph initialization function. */
 clib_error_t *vlib_node_main_init (vlib_main_t * vm);
@@ -1238,6 +1368,128 @@ vlib_node_set_dispatch_wrapper (vlib_main_t *vm, vlib_node_function_t *fn)
   vm->dispatch_wrapper_fn = fn;
   return 0;
 }
+
+int vlib_node_set_march_variant (vlib_main_t *vm, u32 node_index,
+				 clib_march_variant_type_t march_variant);
+
+vlib_node_function_t *
+vlib_node_get_preferred_node_fn_variant (vlib_main_t *vm,
+					 vlib_node_fn_registration_t *regs);
+
+/*
+ * vlib_frame_bitmap functions
+ */
+
+#define VLIB_FRAME_BITMAP_N_UWORDS                                            \
+  (((VLIB_FRAME_SIZE + uword_bits - 1) & ~(uword_bits - 1)) / uword_bits)
+
+typedef uword vlib_frame_bitmap_t[VLIB_FRAME_BITMAP_N_UWORDS];
+
+static_always_inline void
+vlib_frame_bitmap_init (uword *bmp, u32 n_first_bits_set)
+{
+  u32 n_left = VLIB_FRAME_BITMAP_N_UWORDS;
+  while (n_first_bits_set >= (sizeof (uword) * 8) && n_left)
+    {
+      bmp++[0] = ~0;
+      n_first_bits_set -= sizeof (uword) * 8;
+      n_left--;
+    }
+
+  if (n_first_bits_set && n_left)
+    {
+      bmp++[0] = pow2_mask (n_first_bits_set);
+      n_left--;
+    }
+
+  while (n_left--)
+    bmp++[0] = 0;
+}
+
+static_always_inline void
+vlib_frame_bitmap_set_bit_at_index (uword *bmp, uword bit_index)
+{
+  uword_bitmap_set_bits_at_index (bmp, bit_index, 1);
+}
+
+static_always_inline void
+_vlib_frame_bitmap_clear_bit_at_index (uword *bmp, uword bit_index)
+{
+  uword_bitmap_clear_bits_at_index (bmp, bit_index, 1);
+}
+
+static_always_inline void
+vlib_frame_bitmap_set_bits_at_index (uword *bmp, uword bit_index, uword n_bits)
+{
+  uword_bitmap_set_bits_at_index (bmp, bit_index, n_bits);
+}
+
+static_always_inline void
+vlib_frame_bitmap_clear_bits_at_index (uword *bmp, uword bit_index,
+				       uword n_bits)
+{
+  uword_bitmap_clear_bits_at_index (bmp, bit_index, n_bits);
+}
+
+static_always_inline void
+vlib_frame_bitmap_clear (uword *bmp)
+{
+  u32 n_left = VLIB_FRAME_BITMAP_N_UWORDS;
+  while (n_left--)
+    bmp++[0] = 0;
+}
+
+static_always_inline void
+vlib_frame_bitmap_xor (uword *bmp, uword *bmp2)
+{
+  u32 n_left = VLIB_FRAME_BITMAP_N_UWORDS;
+  while (n_left--)
+    bmp++[0] ^= bmp2++[0];
+}
+
+static_always_inline void
+vlib_frame_bitmap_or (uword *bmp, uword *bmp2)
+{
+  u32 n_left = VLIB_FRAME_BITMAP_N_UWORDS;
+  while (n_left--)
+    bmp++[0] |= bmp2++[0];
+}
+
+static_always_inline void
+vlib_frame_bitmap_and (uword *bmp, uword *bmp2)
+{
+  u32 n_left = VLIB_FRAME_BITMAP_N_UWORDS;
+  while (n_left--)
+    bmp++[0] &= bmp2++[0];
+}
+
+static_always_inline uword
+vlib_frame_bitmap_count_set_bits (uword *bmp)
+{
+  return uword_bitmap_count_set_bits (bmp, VLIB_FRAME_BITMAP_N_UWORDS);
+}
+
+static_always_inline uword
+vlib_frame_bitmap_is_bit_set (uword *bmp, uword bit_index)
+{
+  return uword_bitmap_is_bit_set (bmp, bit_index);
+}
+
+static_always_inline uword
+vlib_frame_bitmap_find_first_set (uword *bmp)
+{
+  uword rv = uword_bitmap_find_first_set (bmp);
+  ASSERT (rv < VLIB_FRAME_BITMAP_N_UWORDS * uword_bits);
+  return rv;
+}
+
+#define foreach_vlib_frame_bitmap_set_bit_index(i, v)                         \
+  for (uword _off = 0; _off < ARRAY_LEN (v); _off++)                          \
+    for (uword _tmp =                                                         \
+	   (v[_off]) + 0 * (uword) (i = _off * uword_bits +                   \
+					get_lowest_set_bit_index (v[_off]));  \
+	 _tmp; i = _off * uword_bits + get_lowest_set_bit_index (             \
+					 _tmp = clear_lowest_set_bit (_tmp)))
 
 #endif /* included_vlib_node_funcs_h */
 

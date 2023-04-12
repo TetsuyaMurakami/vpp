@@ -35,14 +35,21 @@ VLIB_REGISTER_LOG_CLASS (if_intel_uncore_log, static) = {
   ((event) | (umask) << 8 | (edge) << 18 | (any) << 21 | (inv) << 23 |        \
    (cmask) << 24)
 
+static intel_uncore_unit_type_names_t uncore_unit_names[] = {
+  { INTEL_UNCORE_UNIT_IIO,
+    PERFMON_STRINGS ("PCIe0", "PCIe1", "MCP", "PCIe2", "PCIe3", "CBDMA/DMI") }
+};
+
 static perfmon_event_t intel_uncore_events[] = {
-#define _(unit, event, umask, n, suffix, desc)                                \
+#define _(unit, event, umask, ch_mask, fc_mask, n, suffix, desc)              \
   [INTEL_UNCORE_E_##unit##_##n##_##suffix] = {                                \
-    .config = (event) | (umask) << 8,                                         \
+    .config =                                                                 \
+      (event) | (umask) << 8 | (u64) (ch_mask) << 36 | (u64) (fc_mask) << 48, \
     .name = #n "." #suffix,                                                   \
     .description = desc,                                                      \
     .type_from_instance = 1,                                                  \
     .instance_type = INTEL_UNCORE_UNIT_##unit,                                \
+    .implemented = 1,                                                         \
   },
 
   foreach_intel_uncore_event
@@ -55,6 +62,32 @@ intel_uncore_instance_name_cmp (void *v1, void *v2)
   perfmon_instance_t *i1 = v1;
   perfmon_instance_t *i2 = v2;
   return strcmp (i1->name, i2->name);
+}
+
+static u8 *
+format_instance_name (intel_uncore_unit_type_t u, char *unit_fmt, u8 socket_id,
+		      u8 ubox)
+{
+  u8 *s = 0;
+
+  /* uncore ubox may have specific names */
+  for (u8 i = 0; i < ARRAY_LEN (uncore_unit_names); i++)
+    {
+      intel_uncore_unit_type_names_t *n = &uncore_unit_names[i];
+
+      if (n->unit_type == u)
+	{
+	  u8 *fmt = 0;
+
+	  fmt = format (0, "%s (%s)%c", unit_fmt, (n->unit_names[ubox]), 0);
+	  s = format (0, (char *) fmt, socket_id, ubox);
+	  vec_free (fmt);
+
+	  return s;
+	}
+    }
+
+  return format (0, unit_fmt, socket_id, ubox);
 }
 
 static void
@@ -94,7 +127,8 @@ intel_uncore_add_unit (perfmon_source_t *src, intel_uncore_unit_type_t u,
 	  in->type = perf_type;
 	  in->cpu = j;
 	  in->pid = -1;
-	  in->name = (char *) format (0, fmt, socket_by_cpu_id[j], i);
+	  in->name =
+	    (char *) format_instance_name (u, fmt, socket_by_cpu_id[j], i);
 	  vec_terminate_c_string (in->name);
 	  log_debug ("found %s %s", type_str, in->name);
 	}
@@ -114,7 +148,7 @@ intel_uncore_init (vlib_main_t *vm, perfmon_source_t *src)
   u32 i, j;
   u8 *s = 0;
 
-  if ((err = clib_sysfs_read ("/sys/devices/system/node/has_cpu", "%U",
+  if ((err = clib_sysfs_read ("/sys/devices/system/node/online", "%U",
 			      unformat_bitmap_list, &node_bitmap)))
     {
       clib_error_free (err);
@@ -129,6 +163,14 @@ intel_uncore_init (vlib_main_t *vm, perfmon_source_t *src)
 	{
 	  clib_error_free (err);
 	  err = clib_error_return (0, "failed to discover numa topology");
+	  goto done;
+	}
+
+      if (!cpumask)
+	{
+	  clib_error_free (err);
+	  err = clib_error_return (
+	    0, "while discovering numa topology: cpumask unexpectedly NULL");
 	  goto done;
 	}
 
@@ -179,4 +221,5 @@ PERFMON_REGISTER_SOURCE (intel_uncore) = {
   .n_events = INTEL_UNCORE_N_EVENTS,
   .init_fn = intel_uncore_init,
   .format_config = format_intel_core_config,
+  .bundle_support = intel_bundle_supported,
 };

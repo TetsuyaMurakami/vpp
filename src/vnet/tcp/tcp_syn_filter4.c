@@ -54,20 +54,20 @@ format_syn_filter4_trace (u8 * s, va_list * args)
 
 extern vlib_node_registration_t syn_filter4_node;
 
-#define foreach_syn_filter_error                \
-_(THROTTLED, "TCP SYN packet throttle drops")   \
-_(OK, "TCP SYN packets passed")
+#define foreach_syn_filter_error                                              \
+  _ (THROTTLED, throttled, ERROR, "TCP SYN packet throttle drops")            \
+  _ (OK, ok, INFO, "TCP SYN packets passed")
 
 typedef enum
 {
-#define _(sym,str) SYN_FILTER_ERROR_##sym,
+#define _(f, n, s, d) SYN_FILTER_ERROR_##f,
   foreach_syn_filter_error
 #undef _
     SYN_FILTER_N_ERROR,
 } syn_filter_error_t;
 
-static char *syn_filter4_error_strings[] = {
-#define _(sym,string) string,
+static vlib_error_desc_t tcp_syn_error_counters[] = {
+#define _(f, n, s, d) { #n, d, VL_COUNTER_SEVERITY_##s },
   foreach_syn_filter_error
 #undef _
 };
@@ -135,10 +135,10 @@ VLIB_NODE_FN (syn_filter4_node) (vlib_main_t * vm,
 	    vlib_prefetch_buffer_header (p6, LOAD);
 	    vlib_prefetch_buffer_header (p7, LOAD);
 
-	    CLIB_PREFETCH (p4->data, CLIB_CACHE_LINE_BYTES, STORE);
-	    CLIB_PREFETCH (p5->data, CLIB_CACHE_LINE_BYTES, STORE);
-	    CLIB_PREFETCH (p6->data, CLIB_CACHE_LINE_BYTES, STORE);
-	    CLIB_PREFETCH (p7->data, CLIB_CACHE_LINE_BYTES, STORE);
+	    clib_prefetch_store (p4->data);
+	    clib_prefetch_store (p5->data);
+	    clib_prefetch_store (p6->data);
+	    clib_prefetch_store (p7->data);
 	  }
 
 	  /* speculatively enqueue b0 and b1 to the current next frame */
@@ -408,8 +408,8 @@ VLIB_REGISTER_NODE (syn_filter4_node) =
   .type = VLIB_NODE_TYPE_INTERNAL,
 
   .runtime_data_bytes = sizeof (syn_filter4_runtime_t),
-  .n_errors = ARRAY_LEN(syn_filter4_error_strings),
-  .error_strings = syn_filter4_error_strings,
+  .n_errors = SYN_FILTER_N_ERROR,
+  .error_counters = tcp_syn_error_counters,
 
   .n_next_nodes = SYN_FILTER_N_NEXT,
 
@@ -450,19 +450,19 @@ syn_filter_enable_disable (u32 sw_if_index, int enable_disable)
     {
       syn_filter4_runtime_t *rt;
 
-      /* *INDENT-OFF* */
-      foreach_vlib_main ({
-	rt = vlib_node_get_runtime_data (this_vlib_main, syn_filter4_node.index);
-	vec_validate (rt->syn_counts, 1023);
-	/*
-	 * Given perfect disperson / optimal hashing results:
-	 * Allow 128k (successful) syns/sec. 1024, buckets each of which
-	 * absorb 128 syns before filtering. Reset table once a second.
-	 * Reality bites, lets try resetting once every 100ms.
-	 */
-	rt->reset_interval = 0.1;	/* reset interval in seconds */
-      });
-      /* *INDENT-ON* */
+      foreach_vlib_main ()
+	{
+	  rt = vlib_node_get_runtime_data (this_vlib_main,
+					   syn_filter4_node.index);
+	  vec_validate (rt->syn_counts, 1023);
+	  /*
+	   * Given perfect disperson / optimal hashing results:
+	   * Allow 128k (successful) syns/sec. 1024, buckets each of which
+	   * absorb 128 syns before filtering. Reset table once a second.
+	   * Reality bites, lets try resetting once every 100ms.
+	   */
+	  rt->reset_interval = 0.1; /* reset interval in seconds */
+	}
     }
 
   rv = vnet_feature_enable_disable ("ip4-local", "syn-filter-4",

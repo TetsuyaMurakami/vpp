@@ -130,7 +130,6 @@ static void send_gre_tunnel_details
   (gre_tunnel_t * t, vl_api_gre_tunnel_dump_t * mp)
 {
   vl_api_gre_tunnel_details_t *rmp;
-  int rv = 0;
 
   /* *INDENT-OFF* */
   REPLY_MACRO_DETAILS2(VL_API_GRE_TUNNEL_DETAILS,
@@ -144,6 +143,7 @@ static void send_gre_tunnel_details
 
     rmp->tunnel.type = gre_tunnel_type_encode (t->type);
     rmp->tunnel.mode = tunnel_mode_encode (t->mode);
+    rmp->tunnel.flags = tunnel_encap_decap_flags_encode (t->flags);
     rmp->tunnel.instance = htonl (t->user_instance);
     rmp->tunnel.sw_if_index = htonl (t->sw_if_index);
     rmp->tunnel.session_id = htons (t->session_id);

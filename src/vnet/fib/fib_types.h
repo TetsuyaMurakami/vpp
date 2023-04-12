@@ -276,14 +276,20 @@ extern void fib_prefix_normalize(const fib_prefix_t *p,
 /**
  * \brief Host prefix from ip
  */
-extern void fib_prefix_from_ip46_addr (const ip46_address_t *addr,
-			   fib_prefix_t *pfx);
+extern void fib_prefix_from_ip46_addr (fib_protocol_t fproto,
+		                       const ip46_address_t *addr,
+		                       fib_prefix_t *pfx);
 
 extern u8 * format_fib_prefix(u8 * s, va_list * args);
 extern u8 * format_fib_forw_chain_type(u8 * s, va_list * args);
 
 extern dpo_proto_t fib_proto_to_dpo(fib_protocol_t fib_proto);
 extern fib_protocol_t dpo_proto_to_fib(dpo_proto_t dpo_proto);
+
+/**
+ * \brief Increase IPv4/IPv6 address according to the prefix length
+ */
+extern void fib_prefix_increment (fib_prefix_t *pfx);
 
 /**
  * Convert from BIER next-hop proto to FIB proto
@@ -618,6 +624,11 @@ extern uword unformat_fib_route_path(unformat_input_t * input, va_list * args);
  * Format route path flags
  */
 extern u8 * format_fib_route_path(u8 *s, va_list *ap);
+
+/*
+ * Return true if the path is attached
+ */
+extern int fib_route_path_is_attached (const fib_route_path_t *rpath);
 
 /**
  * A help string to list the FIB path options

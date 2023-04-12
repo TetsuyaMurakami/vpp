@@ -78,6 +78,7 @@ typedef struct svm_fifo_shr_
   u32 head;			/**< fifo head position/byte */
   volatile u32 want_deq_ntf;	/**< producer wants nudge */
   volatile u32 has_deq_ntf;
+  u32 deq_thresh; /**< fifo threshold used for notifications */
 
   CLIB_CACHE_LINE_ALIGN_MARK (producer);
   u32 tail;			/**< fifo tail position/byte */
@@ -109,7 +110,8 @@ typedef struct _svm_fifo
   struct _svm_fifo *next; /**< prev in active chain */
   struct _svm_fifo *prev; /**< prev in active chain */
 
-  svm_fifo_chunk_t **chunks_at_attach; /**< chunks to be accounted at detach */
+  svm_fifo_chunk_t *chunks_at_attach; /**< chunks to be accounted at detach */
+  svm_fifo_shared_t *hdr_at_attach;   /**< hdr to be freed at detach */
 
 #if SVM_FIFO_TRACE
   svm_fifo_trace_elem_t *trace;
@@ -118,14 +120,12 @@ typedef struct _svm_fifo
 
 typedef struct fifo_segment_slice_
 {
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline);
   fs_sptr_t free_chunks[FS_CHUNK_VEC_LEN]; /**< Free chunks by size */
   fs_sptr_t free_fifos;			/**< Freelists of fifo shared hdrs  */
   uword n_fl_chunk_bytes;		/**< Chunk bytes on freelist */
   uword virtual_mem;			/**< Slice sum of all fifo sizes */
   u32 num_chunks[FS_CHUNK_VEC_LEN];	/**< Allocated chunks by chunk size */
-
-  CLIB_CACHE_LINE_ALIGN_MARK (lock);
-  u32 chunk_lock;
 } fifo_segment_slice_t;
 
 typedef struct fifo_slice_private_
@@ -141,10 +141,7 @@ struct fifo_segment_header_
   u32 n_active_fifos;			/**< Number of active fifos */
   u32 n_reserved_bytes;			/**< Bytes not to be allocated */
   u32 max_log2_fifo_size;		/**< Max log2(chunk size) for fs */
-  u8 flags;				/**< Segment flags */
   u8 n_slices;				/**< Number of slices */
-  u8 high_watermark;			/**< Memory pressure watermark high */
-  u8 low_watermark;			/**< Memory pressure watermark low */
   u8 pct_first_alloc;			/**< Pct of fifo size to alloc */
   u8 n_mqs;				/**< Num mqs for mqs segment */
   CLIB_CACHE_LINE_ALIGN_MARK (allocator);

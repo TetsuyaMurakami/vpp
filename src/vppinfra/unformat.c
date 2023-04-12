@@ -70,22 +70,6 @@ _unformat_fill_input (unformat_input_t * i)
   return i->index;
 }
 
-always_inline uword
-is_white_space (uword c)
-{
-  switch (c)
-    {
-    case ' ':
-    case '\t':
-    case '\n':
-    case '\r':
-      return 1;
-
-    default:
-      return 0;
-    }
-}
-
 /* Format function for dumping input stream. */
 __clib_export u8 *
 format_unformat_error (u8 * s, va_list * va)
@@ -968,7 +952,7 @@ parse_fail:
     if (!input_matches_format)
       input->index = input->buffer_marks[l - 1];
 
-    _vec_len (input->buffer_marks) = l - 1;
+    vec_set_len (input->buffer_marks, l - 1);
   }
 
   return input_matches_format;
@@ -1003,7 +987,7 @@ unformat_user (unformat_input_t * input, unformat_function_t * func, ...)
   if (!result && input->index != UNFORMAT_END_OF_INPUT)
     input->index = input->buffer_marks[l];
 
-  _vec_len (input->buffer_marks) = l;
+  vec_set_len (input->buffer_marks, l);
 
   return result;
 }
@@ -1026,7 +1010,8 @@ unformat_init_command_line (unformat_input_t * input, char *argv[])
 }
 
 __clib_export void
-unformat_init_string (unformat_input_t * input, char *string, int string_len)
+unformat_init_string (unformat_input_t *input, const char *string,
+		      int string_len)
 {
   unformat_init (input, 0, 0);
   if (string_len > 0)
@@ -1052,7 +1037,7 @@ clib_file_fill_buffer (unformat_input_t * input)
   vec_resize (input->buffer, 4096);
   n = read (fd, input->buffer + l, 4096);
   if (n > 0)
-    _vec_len (input->buffer) = l + n;
+    vec_set_len (input->buffer, l + n);
 
   if (n <= 0)
     return UNFORMAT_END_OF_INPUT;

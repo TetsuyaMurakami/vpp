@@ -5,8 +5,8 @@
   comments, complaints, performance data, etc to dl@cs.oswego.edu
 */
 
+#include <vppinfra/clib.h>
 #include <vppinfra/dlmalloc.h>
-#include <vppinfra/sanitizer.h>
 
 /*------------------------------ internal #includes ---------------------- */
 
@@ -460,7 +460,7 @@ static FORCEINLINE void x86_clear_lock(int* sl) {
 
 #if !defined(USE_RECURSIVE_LOCKS) || USE_RECURSIVE_LOCKS == 0
 /* Plain spin locks use single word (embedded in malloc_states) */
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 static int spin_acquire_lock(int *sl) {
   int spins = 0;
   while (*(volatile int *)sl != 0 || CAS_LOCK(sl)) {
@@ -1286,7 +1286,7 @@ static struct malloc_state _gm_;
   ((char*)(A) >= S->base && (char*)(A) < S->base + S->size)
 
 /* Return segment holding given address */
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 static msegmentptr segment_holding(mstate m, char* addr) {
   msegmentptr sp = &m->seg;
   for (;;) {
@@ -1298,7 +1298,7 @@ static msegmentptr segment_holding(mstate m, char* addr) {
 }
 
 /* Return true if segment contains a segment link */
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 static int has_segment_link(mstate m, msegmentptr ss) {
   msegmentptr sp = &m->seg;
   for (;;) {
@@ -1616,7 +1616,7 @@ static size_t traverse_and_check(mstate m);
 
 #if (FOOTERS && !INSECURE)
 /* Check if (alleged) mstate m has expected magic field */
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 static inline int
 ok_magic (const mstate m)
 {
@@ -2083,7 +2083,7 @@ static void do_check_malloc_state(mstate m) {
 /* ----------------------------- statistics ------------------------------ */
 
 #if !NO_MALLINFO
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 static struct dlmallinfo internal_mallinfo(mstate m) {
   struct dlmallinfo nm = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
   ensure_initialization();
@@ -2493,7 +2493,7 @@ static mchunkptr mmap_resize(mstate m, mchunkptr oldp, size_t nb, int flags) {
 /* -------------------------- mspace management -------------------------- */
 
 /* Initialize top chunk and its size */
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 static void init_top(mstate m, mchunkptr p, size_t psize) {
   /* Ensure alignment */
   size_t offset = align_offset(chunk2mem(p));
@@ -2538,7 +2538,7 @@ static void reset_on_error(mstate m) {
 #endif /* PROCEED_ON_ERROR */
 
 /* Allocate chunk and prepend remainder with chunk in successor base. */
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 static void* prepend_alloc(mstate m, char* newbase, char* oldbase,
                            size_t nb) {
   mchunkptr p = align_as_chunk(newbase);
@@ -2581,7 +2581,7 @@ static void* prepend_alloc(mstate m, char* newbase, char* oldbase,
 }
 
 /* Add a segment to hold a new noncontiguous region */
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 static void add_segment(mstate m, char* tbase, size_t tsize, flag_t mmapped) {
   /* Determine locations and sizes of segment, fenceposts, old top */
   char* old_top = (char*)m->top;
@@ -2596,7 +2596,7 @@ static void add_segment(mstate m, char* tbase, size_t tsize, flag_t mmapped) {
   msegmentptr ss = (msegmentptr)(chunk2mem(sp));
   mchunkptr tnext = chunk_plus_offset(sp, ssize);
   mchunkptr p = tnext;
-  int nfences = 0;
+  int __attribute__((unused)) nfences = 0;
 
   /* reset top to new space */
   init_top(m, (mchunkptr)tbase, tsize - TOP_FOOT_SIZE);
@@ -2637,7 +2637,7 @@ static void add_segment(mstate m, char* tbase, size_t tsize, flag_t mmapped) {
 /* -------------------------- System allocation -------------------------- */
 
 /* Get memory from system using MORECORE or MMAP */
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 static void* sys_alloc(mstate m, size_t nb) {
   char* tbase = CMFAIL;
   size_t tsize = 0;
@@ -2852,7 +2852,7 @@ static void* sys_alloc(mstate m, size_t nb) {
 /* -----------------------  system deallocation -------------------------- */
 
 /* Unmap and unlink any mmapped segments that don't contain used chunks */
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 static size_t release_unused_segments(mstate m) {
   size_t released = 0;
   int nsegs = 0;
@@ -2900,7 +2900,7 @@ static size_t release_unused_segments(mstate m) {
   return released;
 }
 
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 static int sys_trim(mstate m, size_t pad) {
   size_t released = 0;
   ensure_initialization();
@@ -2969,7 +2969,7 @@ static int sys_trim(mstate m, size_t pad) {
 /* Consolidate and bin a chunk. Differs from exported versions
    of free mainly in that the chunk need not be marked as inuse.
 */
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 static void dispose_chunk(mstate m, mchunkptr p, size_t psize) {
   mchunkptr next = chunk_plus_offset(p, psize);
   if (!pinuse(p)) {
@@ -3041,7 +3041,7 @@ static void dispose_chunk(mstate m, mchunkptr p, size_t psize) {
 /* ---------------------------- malloc --------------------------- */
 
 /* allocate a large request from the best fitting chunk in a treebin */
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 static void* tmalloc_large(mstate m, size_t nb) {
   tchunkptr v = 0;
   size_t rsize = -nb; /* Unsigned negation */
@@ -3113,7 +3113,7 @@ static void* tmalloc_large(mstate m, size_t nb) {
 }
 
 /* allocate a small request from the best fitting chunk in a treebin */
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 static void* tmalloc_small(mstate m, size_t nb) {
   tchunkptr t, v;
   size_t rsize;
@@ -3420,7 +3420,7 @@ void* dlcalloc(size_t n_elements, size_t elem_size) {
 /* ------------ Internal support for realloc, memalign, etc -------------- */
 
 /* Try to realloc; only in-place unless can_move true */
-static mchunkptr try_realloc_chunk(mstate m, mchunkptr p, size_t nb,
+static __clib_nosanitize_addr mchunkptr try_realloc_chunk(mstate m, mchunkptr p, size_t nb,
                                    int can_move) {
   mchunkptr newp = 0;
   size_t oldsize = chunksize(p);
@@ -3499,7 +3499,7 @@ static mchunkptr try_realloc_chunk(mstate m, mchunkptr p, size_t nb,
   return newp;
 }
 
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 static void* internal_memalign(mstate m, size_t alignment, size_t bytes) {
   void* mem = 0;
   if (alignment <  MIN_CHUNK_SIZE) /* must be at least a minimum chunk size */
@@ -4082,7 +4082,7 @@ int mspace_track_large_chunks(mspace msp, int enable) {
   return ret;
 }
 
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 size_t destroy_mspace(mspace msp) {
   size_t freed = 0;
   mstate ms = (mstate)msp;
@@ -4118,7 +4118,7 @@ void mspace_get_address_and_size (mspace msp, char **addrp, size_t *sizep)
   *sizep = this_seg->size;
 }
 
-CLIB_NOSANITIZE_ADDR __clib_export
+__clib_nosanitize_addr
 int mspace_is_heap_object (mspace msp, void *p)
 {
   msegment *this_seg;
@@ -4144,7 +4144,7 @@ int mspace_is_heap_object (mspace msp, void *p)
   return 0;
 }
 
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 void *mspace_least_addr (mspace msp)
 {
   mstate ms = (mstate) msp;
@@ -4158,7 +4158,7 @@ void mspace_disable_expand (mspace msp)
   disable_expand (ms);
 }
 
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 int mspace_enable_disable_trace (mspace msp, int enable)
 {
   mstate ms = (mstate)msp;
@@ -4175,7 +4175,7 @@ int mspace_enable_disable_trace (mspace msp, int enable)
   return (was_enabled);
 }
 
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 int mspace_is_traced (mspace msp)
 {
   mstate ms = (mstate)msp;
@@ -4185,7 +4185,7 @@ int mspace_is_traced (mspace msp)
   return 0;
 }
 
-CLIB_NOSANITIZE_ADDR __clib_export
+__clib_nosanitize_addr
 void* mspace_get_aligned (mspace msp,
                           unsigned long n_user_data_bytes,
                           unsigned long align,
@@ -4265,7 +4265,7 @@ void* mspace_get_aligned (mspace msp,
   return (void *) searchp;
 }
 
-CLIB_NOSANITIZE_ADDR __clib_export
+__clib_nosanitize_addr
 void mspace_put (mspace msp, void *p_arg)
 {
   char *object_header;
@@ -4315,7 +4315,7 @@ void mspace_put_no_offset (mspace msp, void *p_arg)
   mspace_free (msp, p_arg);
 }
 
-CLIB_NOSANITIZE_ADDR __clib_export
+__clib_nosanitize_addr
 size_t mspace_usable_size_with_delta (const void *p)
 {
   size_t usable_size;
@@ -4341,7 +4341,7 @@ size_t mspace_usable_size_with_delta (const void *p)
   versions. This is not so nice but better than the alternatives.
 */
 
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 void* mspace_malloc(mspace msp, size_t bytes) {
   mstate ms = (mstate)msp;
   if (!ok_magic(ms)) {
@@ -4456,7 +4456,7 @@ void* mspace_malloc(mspace msp, size_t bytes) {
   return 0;
 }
 
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 void mspace_free(mspace msp, void* mem) {
   if (mem != 0) {
     mchunkptr p  = mem2chunk(mem);
@@ -4623,6 +4623,7 @@ void* mspace_realloc(mspace msp, void* oldmem, size_t bytes) {
   return mem;
 }
 
+__clib_nosanitize_addr
 void* mspace_realloc_in_place(mspace msp, void* oldmem, size_t bytes) {
   void* mem = 0;
   if (oldmem != 0) {
@@ -4655,6 +4656,7 @@ void* mspace_realloc_in_place(mspace msp, void* oldmem, size_t bytes) {
   return mem;
 }
 
+__clib_nosanitize_addr
 void* mspace_memalign(mspace msp, size_t alignment, size_t bytes) {
   mstate ms = (mstate)msp;
   if (!ok_magic(ms)) {
@@ -4794,7 +4796,7 @@ size_t mspace_set_footprint_limit(mspace msp, size_t bytes) {
 }
 
 #if !NO_MALLINFO
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 struct dlmallinfo mspace_mallinfo(mspace msp) {
   mstate ms = (mstate)msp;
   if (!ok_magic(ms)) {
@@ -4804,7 +4806,7 @@ struct dlmallinfo mspace_mallinfo(mspace msp) {
 }
 #endif /* NO_MALLINFO */
 
-CLIB_NOSANITIZE_ADDR
+__clib_nosanitize_addr
 size_t mspace_usable_size(const void* mem) {
   if (mem != 0) {
     mchunkptr p = mem2chunk(mem);

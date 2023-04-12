@@ -44,12 +44,12 @@ typedef struct tls_cxt_id_
     u32 parent_app_api_ctx;
   };
   session_handle_t tls_session_handle;
+  void *migrate_ctx;
   u32 parent_app_wrk_index;
   u32 ssl_ctx;
   u32 listener_ctx_index;
   u8 tcp_is_ip4;
   u8 tls_engine_id;
-  void *migrate_ctx;
 } tls_ctx_id_t;
 /* *INDENT-ON* */
 
@@ -92,7 +92,6 @@ typedef struct tls_main_
   u32 app_index;
   tls_ctx_t *listener_ctx_pool;
   tls_ctx_t *half_open_ctx_pool;
-  clib_rwlock_t half_open_rwlock;
   u8 **rx_bufs;
   u8 **tx_bufs;
 
@@ -102,6 +101,7 @@ typedef struct tls_main_
   u8 use_test_cert_in_ca;
   char *ca_cert_path;
   u64 first_seg_size;
+  u64 add_seg_size;
   u32 fifo_size;
 } tls_main_t;
 
@@ -124,6 +124,7 @@ typedef struct tls_engine_vft_
   int (*ctx_stop_listen) (tls_ctx_t * ctx);
   int (*ctx_transport_close) (tls_ctx_t * ctx);
   int (*ctx_app_close) (tls_ctx_t * ctx);
+  int (*ctx_reinit_cachain) (void);
 } tls_engine_vft_t;
 
 tls_main_t *vnet_tls_get_main (void);
@@ -136,7 +137,9 @@ int tls_add_vpp_q_builtin_rx_evt (session_t * s);
 int tls_notify_app_accept (tls_ctx_t * ctx);
 int tls_notify_app_connected (tls_ctx_t * ctx, session_error_t err);
 void tls_notify_app_enqueue (tls_ctx_t * ctx, session_t * app_session);
+void tls_notify_app_io_error (tls_ctx_t *ctx);
 void tls_disconnect_transport (tls_ctx_t * ctx);
+int tls_reinit_ca_chain (crypto_engine_type_t tls_engine_id);
 #endif /* SRC_VNET_TLS_TLS_H_ */
 
 /*

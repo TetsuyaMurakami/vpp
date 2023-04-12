@@ -412,6 +412,8 @@ mfib_entry_src_flush (mfib_entry_src_t *msrc)
     }));
     hash_free(msrc->mfes_itfs);
     msrc->mfes_itfs = NULL;
+    hash_free(msrc->mfes_exts);
+    msrc->mfes_exts = NULL;
     fib_path_list_unlock(msrc->mfes_pl);
 }
 
@@ -497,7 +499,7 @@ mfib_entry_alloc (u32 fib_index,
 }
 
 static inline mfib_path_ext_t *
-mfib_entry_path_ext_find (mfib_path_ext_t *exts,
+mfib_entry_path_ext_find (uword *exts,
                           fib_node_index_t path_index)
 {
     uword *p;
@@ -547,6 +549,7 @@ typedef struct mfib_entry_collect_forwarding_ctx_t_
     load_balance_path_t * next_hops;
     fib_forward_chain_type_t fct;
     mfib_entry_src_t *msrc;
+    dpo_proto_t payload_proto;
 } mfib_entry_collect_forwarding_ctx_t;
 
 static fib_path_list_walk_rc_t
@@ -592,7 +595,8 @@ mfib_entry_src_collect_forwarding (fib_node_index_t pl_index,
 
         nh->path_index = path_index;
         nh->path_weight = fib_path_get_weight(path_index);
-        fib_path_contribute_forwarding(path_index, ctx->fct, &nh->path_dpo);
+        fib_path_contribute_forwarding(path_index, ctx->fct,
+                                       ctx->payload_proto, &nh->path_dpo);
         break;
 
     case FIB_FORW_CHAIN_TYPE_UNICAST_IP4:
@@ -632,6 +636,7 @@ mfib_entry_stack (mfib_entry_t *mfib_entry,
             .next_hops = NULL,
             .fct = mfib_entry_get_default_chain_type(mfib_entry),
             .msrc = msrc,
+            .payload_proto = fib_proto_to_dpo(mfib_entry->mfe_prefix.fp_proto),
         };
 
         /*
@@ -1659,8 +1664,8 @@ show_mfib_entry_command (vlib_main_t * vm,
 }
 
 /*?
- * This commnad displays an entry, or all entries, in the mfib tables indexed by their unique
- * numerical indentifier.
+ * This command displays an entry, or all entries, in the mfib tables indexed
+ * by their unique numerical identifier.
  ?*/
 VLIB_CLI_COMMAND (show_mfib_entry, static) = {
   .path = "show mfib entry",

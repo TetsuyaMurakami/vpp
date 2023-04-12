@@ -16,6 +16,7 @@
  */
 
 #include <vnet/ip6-nd/ip6_nd.h>
+#include <vnet/ip6-nd/ip6_nd_inline.h>
 
 #include <vnet/ip-neighbor/ip_neighbor.h>
 #include <vnet/ip-neighbor/ip_neighbor_dp.h>
@@ -48,21 +49,12 @@ typedef struct ip6_nd_t_
 static ip6_link_delegate_id_t ip6_nd_delegate_id;
 static ip6_nd_t *ip6_nd_pool;
 
-
-typedef enum
-{
-  ICMP6_NEIGHBOR_SOLICITATION_NEXT_DROP,
-  ICMP6_NEIGHBOR_SOLICITATION_NEXT_REPLY,
-  ICMP6_NEIGHBOR_SOLICITATION_N_NEXT,
-} icmp6_neighbor_solicitation_or_advertisement_next_t;
-
 static_always_inline uword
 icmp6_neighbor_solicitation_or_advertisement (vlib_main_t * vm,
 					      vlib_node_runtime_t * node,
 					      vlib_frame_t * frame,
 					      uword is_solicitation)
 {
-  vnet_main_t *vnm = vnet_get_main ();
   ip6_main_t *im = &ip6_main;
   uword n_packets = frame->n_vectors;
   u32 *from, *to_next;
@@ -70,7 +62,6 @@ icmp6_neighbor_solicitation_or_advertisement (vlib_main_t * vm,
   icmp6_neighbor_discovery_option_type_t option_type;
   vlib_node_runtime_t *error_node =
     vlib_node_get_runtime (vm, ip6_icmp_input_node.index);
-  int bogus_length;
 
   from = vlib_frame_vector_args (frame);
   n_left_from = n_packets;
@@ -99,6 +90,7 @@ icmp6_neighbor_solicitation_or_advertisement (vlib_main_t * vm,
 	  icmp6_neighbor_discovery_ethernet_link_layer_address_option_t *o0;
 	  u32 bi0, options_len0, sw_if_index0, next0, error0;
 	  u32 ip6_sadd_link_local, ip6_sadd_unspecified;
+	  ip_neighbor_counter_type_t c_type;
 	  int is_rewrite0;
 	  u32 ni0;
 
@@ -215,10 +207,15 @@ icmp6_neighbor_solicitation_or_advertisement (vlib_main_t * vm,
 			  /* It's an address that belongs to one of our interfaces
 			   * that's good. */
 			}
-		      else
-			if (fib_entry_is_sourced
-			    (fei, FIB_SOURCE_IP6_ND_PROXY) ||
-			    fib_entry_is_sourced (fei, FIB_SOURCE_IP6_ND))
+		      else if (FIB_ENTRY_FLAG_LOCAL &
+			       fib_entry_get_flags_for_source (
+				 fei, FIB_SOURCE_IP6_ND))
+			{
+			  /* It's one of our link local addresses
+			   * that's good. */
+			}
+		      else if (fib_entry_is_sourced (fei,
+						     FIB_SOURCE_IP6_ND_PROXY))
 			{
 			  /* The address was added by IPv6 Proxy ND config.
 			   * We should only respond to these if the NS arrived on
@@ -234,69 +231,28 @@ icmp6_neighbor_solicitation_or_advertisement (vlib_main_t * vm,
 	    }
 
 	  if (is_solicitation)
-	    next0 = (error0 != ICMP6_ERROR_NONE
-		     ? ICMP6_NEIGHBOR_SOLICITATION_NEXT_DROP
-		     : ICMP6_NEIGHBOR_SOLICITATION_NEXT_REPLY);
+	    {
+	      next0 = (error0 != ICMP6_ERROR_NONE ?
+			       ICMP6_NEIGHBOR_SOLICITATION_NEXT_DROP :
+			       ICMP6_NEIGHBOR_SOLICITATION_NEXT_REPLY);
+	      c_type = IP_NEIGHBOR_CTR_REQUEST;
+	    }
 	  else
 	    {
 	      next0 = 0;
 	      error0 = error0 == ICMP6_ERROR_NONE ?
 		ICMP6_ERROR_NEIGHBOR_ADVERTISEMENTS_RX : error0;
+	      c_type = IP_NEIGHBOR_CTR_REPLY;
 	    }
+
+	  vlib_increment_simple_counter (
+	    &ip_neighbor_counters[AF_IP6].ipnc[VLIB_RX][c_type],
+	    vm->thread_index, sw_if_index0, 1);
 
 	  if (is_solicitation && error0 == ICMP6_ERROR_NONE)
 	    {
-	      vnet_sw_interface_t *sw_if0;
-	      ethernet_interface_t *eth_if0;
-	      ethernet_header_t *eth0;
-
-	      /* dst address is either source address or the all-nodes mcast addr */
-	      if (!ip6_sadd_unspecified)
-		ip0->dst_address = ip0->src_address;
-	      else
-		ip6_set_reserved_multicast_address (&ip0->dst_address,
-						    IP6_MULTICAST_SCOPE_link_local,
-						    IP6_MULTICAST_GROUP_ID_all_hosts);
-
-	      ip0->src_address = h0->target_address;
-	      ip0->hop_limit = 255;
-	      h0->icmp.type = ICMP6_neighbor_advertisement;
-
-	      sw_if0 = vnet_get_sup_sw_interface (vnm, sw_if_index0);
-	      ASSERT (sw_if0->type == VNET_SW_INTERFACE_TYPE_HARDWARE);
-	      eth_if0 =
-		ethernet_get_interface (&ethernet_main, sw_if0->hw_if_index);
-	      if (eth_if0 && o0)
-		{
-		  clib_memcpy (o0->ethernet_address, &eth_if0->address, 6);
-		  o0->header.type =
-		    ICMP6_NEIGHBOR_DISCOVERY_OPTION_target_link_layer_address;
-		}
-
-	      h0->advertisement_flags = clib_host_to_net_u32
-		(ICMP6_NEIGHBOR_ADVERTISEMENT_FLAG_SOLICITED
-		 | ICMP6_NEIGHBOR_ADVERTISEMENT_FLAG_OVERRIDE);
-
-	      h0->icmp.checksum = 0;
-	      h0->icmp.checksum =
-		ip6_tcp_udp_icmp_compute_checksum (vm, p0, ip0,
-						   &bogus_length);
-	      ASSERT (bogus_length == 0);
-
-	      /* Reuse current MAC header, copy SMAC to DMAC and
-	       * interface MAC to SMAC */
-	      vlib_buffer_advance (p0, -ethernet_buffer_header_size (p0));
-	      eth0 = vlib_buffer_get_current (p0);
-	      clib_memcpy (eth0->dst_address, eth0->src_address, 6);
-	      if (eth_if0)
-		clib_memcpy (eth0->src_address, &eth_if0->address, 6);
-
-	      /* Setup input and output sw_if_index for packet */
-	      ASSERT (vnet_buffer (p0)->sw_if_index[VLIB_RX] == sw_if_index0);
-	      vnet_buffer (p0)->sw_if_index[VLIB_TX] = sw_if_index0;
-	      vnet_buffer (p0)->sw_if_index[VLIB_RX] =
-		vnet_main.local_interface_sw_if_index;
-
+	      icmp6_send_neighbor_advertisement (vm, p0, ip0, h0, o0,
+						 sw_if_index0);
 	      n_advertisements_sent++;
 	    }
 

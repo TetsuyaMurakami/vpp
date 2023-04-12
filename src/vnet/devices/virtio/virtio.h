@@ -22,6 +22,7 @@
 #include <vnet/devices/virtio/vhost_std.h>
 #include <vnet/devices/virtio/virtio_buffering.h>
 #include <vnet/gso/gro.h>
+#include <vnet/interface.h>
 
 #define foreach_virtio_if_flag		\
   _(0, ADMIN_UP, "admin-up")		\
@@ -68,19 +69,19 @@ typedef struct
   {
     struct
     {
-      vring_desc_t *desc;
-      vring_used_t *used;
-      vring_avail_t *avail;
+      vnet_virtio_vring_desc_t *desc;
+      vnet_virtio_vring_used_t *used;
+      vnet_virtio_vring_avail_t *avail;
     };
     struct
     {
-      vring_packed_desc_t *packed_desc;
-      vring_desc_event_t *driver_event;
-      vring_desc_event_t *device_event;
+      vnet_virtio_vring_packed_desc_t *packed_desc;
+      vnet_virtio_vring_desc_event_t *driver_event;
+      vnet_virtio_vring_desc_event_t *device_event;
     };
   };
   u32 *buffers;
-  u16 size;
+  u16 queue_size;
   u16 queue_id;
   u32 queue_index;
   u16 desc_in_use;
@@ -103,12 +104,14 @@ typedef struct
     };
   };
 #define VRING_TX_OUT_OF_ORDER 1
+#define VRING_TX_SCHEDULED    2
   u16 flags;
   u8 buffer_pool_index;
   vnet_hw_if_rx_mode mode;
   virtio_vring_buffering_t *buffering;
   gro_flow_table_t *flow_table;
-} virtio_vring_t;
+  u64 total_packets;
+} vnet_virtio_vring_t;
 
 typedef union
 {
@@ -133,8 +136,8 @@ typedef struct
   u32 per_interface_next_index;
   u16 num_rxqs;
   u16 num_txqs;
-  virtio_vring_t *rxq_vrings;
-  virtio_vring_t *txq_vrings;
+  vnet_virtio_vring_t *rxq_vrings;
+  vnet_virtio_vring_t *txq_vrings;
   int gso_enabled;
   int csum_offload_enabled;
   union
@@ -192,7 +195,7 @@ typedef struct
     struct			/* native virtio */
     {
       void *bar;
-      virtio_vring_t *cxq_vring;
+      vnet_virtio_vring_t *cxq_vring;
       pci_addr_t pci_addr;
       u32 bar_id;
       u32 notify_off_multiplier;
@@ -213,17 +216,17 @@ typedef struct
 
 typedef struct
 {
-  u32 interrupt_queues_count;
+  u32 gro_or_buffering_if_count;
   /* logging */
   vlib_log_class_t log_default;
 
   virtio_if_t *interfaces;
+  u16 msg_id_base;
 } virtio_main_t;
 
 extern virtio_main_t virtio_main;
 extern vnet_device_class_t virtio_device_class;
 extern vlib_node_registration_t virtio_input_node;
-extern vlib_node_registration_t virtio_send_interrupt_node;
 
 clib_error_t *virtio_vring_init (vlib_main_t * vm, virtio_if_t * vif, u16 idx,
 				 u16 sz);
@@ -232,10 +235,11 @@ clib_error_t *virtio_vring_free_rx (vlib_main_t * vm, virtio_if_t * vif,
 clib_error_t *virtio_vring_free_tx (vlib_main_t * vm, virtio_if_t * vif,
 				    u32 idx);
 void virtio_vring_set_rx_queues (vlib_main_t *vm, virtio_if_t *vif);
-extern void virtio_free_buffers (vlib_main_t * vm, virtio_vring_t * vring);
+void virtio_vring_set_tx_queues (vlib_main_t *vm, virtio_if_t *vif);
+extern void virtio_free_buffers (vlib_main_t *vm, vnet_virtio_vring_t *vring);
 extern void virtio_set_net_hdr_size (virtio_if_t * vif);
-extern void virtio_show (vlib_main_t * vm, u32 * hw_if_indices, u8 show_descr,
-			 u32 type);
+extern void virtio_show (vlib_main_t *vm, u32 *hw_if_indices, u8 show_descr,
+			 virtio_if_type_t type);
 extern void virtio_set_packet_coalesce (virtio_if_t * vif);
 clib_error_t *virtio_set_packet_buffering (virtio_if_t * vif, u16 size);
 extern void virtio_pci_legacy_notify_queue (vlib_main_t * vm,
@@ -244,11 +248,14 @@ extern void virtio_pci_legacy_notify_queue (vlib_main_t * vm,
 extern void virtio_pci_modern_notify_queue (vlib_main_t * vm,
 					    virtio_if_t * vif, u16 queue_id,
 					    u16 queue_notify_offset);
+extern void virtio_pre_input_node_enable (vlib_main_t *vm, virtio_if_t *vif);
+extern void virtio_pre_input_node_disable (vlib_main_t *vm, virtio_if_t *vif);
+
 format_function_t format_virtio_device_name;
 format_function_t format_virtio_log_name;
 
 static_always_inline void
-virtio_kick (vlib_main_t * vm, virtio_vring_t * vring, virtio_if_t * vif)
+virtio_kick (vlib_main_t *vm, vnet_virtio_vring_t *vring, virtio_if_t *vif)
 {
   if (vif->type == VIRTIO_IF_TYPE_PCI)
     {
@@ -267,6 +274,56 @@ virtio_kick (vlib_main_t * vm, virtio_vring_t * vring, virtio_if_t * vif)
       r = write (vring->kick_fd, &x, sizeof (x));
       vring->last_kick_avail_idx = vring->avail->idx;
     }
+}
+
+static_always_inline u8
+virtio_txq_is_scheduled (vnet_virtio_vring_t *vring)
+{
+  if (vring)
+    return (vring->flags & VRING_TX_SCHEDULED);
+  return 1;
+}
+
+static_always_inline void
+virtio_txq_set_scheduled (vnet_virtio_vring_t *vring)
+{
+  if (vring)
+    vring->flags |= VRING_TX_SCHEDULED;
+}
+
+static_always_inline void
+virtio_txq_clear_scheduled (vnet_virtio_vring_t *vring)
+{
+  if (vring)
+    vring->flags &= ~VRING_TX_SCHEDULED;
+}
+
+static_always_inline void
+vnet_virtio_vring_init (vnet_virtio_vring_t *vring, u16 queue_size, void *p,
+			u32 align)
+{
+  vring->queue_size = queue_size;
+  vring->desc = p;
+  vring->avail =
+    (vnet_virtio_vring_avail_t *) ((char *) p +
+				   queue_size *
+				     sizeof (vnet_virtio_vring_desc_t));
+  vring->used =
+    (vnet_virtio_vring_used_t
+       *) ((char *) p + ((sizeof (vnet_virtio_vring_desc_t) * queue_size +
+			  sizeof (u16) * (3 + queue_size) + align - 1) &
+			 ~(align - 1)));
+  vring->avail->flags = VIRTIO_RING_FLAG_MASK_INT;
+}
+
+static_always_inline u16
+vnet_virtio_vring_size (u16 queue_size, u32 align)
+{
+  return ((sizeof (vnet_virtio_vring_desc_t) * queue_size +
+	   sizeof (u16) * (3 + queue_size) + align - 1) &
+	  ~(align - 1)) +
+	 sizeof (u16) * 3 +
+	 sizeof (vnet_virtio_vring_used_elem_t) * queue_size;
 }
 
 #define virtio_log_debug(vif, f, ...)				\

@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-option version = "2.0.2";
+option version = "2.0.3";
 
 import "vnet/ip/ip_types.api";
 
@@ -62,6 +62,80 @@ define ipfix_exporter_dump
     @param udp_checksum - UDP checksum calculation enable flag
 */
 define ipfix_exporter_details
+{
+  u32 context;
+  vl_api_address_t collector_address;
+  u16 collector_port;
+  vl_api_address_t src_address;
+  u32 vrf_id;
+  u32 path_mtu;
+  u32 template_interval;
+  bool udp_checksum;
+};
+
+/** Configure IPFIX exporter within the exporting process.
+    The exporting process can contain multiple independent exporters,
+    each of which have their own state.  The collector_address is the key
+    field that identifies a unique exporter. The already existing API
+    'set_ipfix_exporter' is used to modify a single exporter (which will
+    always have stat index 0).  If more than one exporter is required then
+    they can be created and deleted using this API.
+
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_create - True for create, False for delete
+    @param collector_address - address of IPFIX collector
+    @param collector_port - port of IPFIX collector
+    @param src_address - address of IPFIX exporter
+    @param vrf_id - VRF / fib table ID
+    @param path_mtu - Path MTU between exporter and collector
+    @param template_interval - number of seconds after which to resend template
+    @param udp_checksum - UDP checksum calculation enable flag
+*/
+
+define ipfix_exporter_create_delete {
+  u32 client_index;
+  u32 context;
+  bool is_create;
+  vl_api_address_t collector_address;
+  u16 collector_port;
+  vl_api_address_t src_address;
+  u32 vrf_id;
+  u32 path_mtu;
+  u32 template_interval;
+  bool udp_checksum;
+};
+
+define ipfix_exporter_create_delete_reply {
+  u32 context;
+  i32 retval;
+  u32 stat_index;
+};
+
+service {
+  rpc ipfix_all_exporter_get returns ipfix_all_exporter_get_reply
+    stream ipfix_all_exporter_details;
+};
+
+define ipfix_all_exporter_get
+{
+  u32 client_index;
+  u32 context;
+  u32 cursor;
+};
+
+define ipfix_all_exporter_get_reply
+{
+  u32 context;
+  i32 retval;
+  u32 cursor;
+};
+
+/** \brief Ipfix meter details in response to the get_meters command
+    @param context - sender context, to match reply w/ request
+    @param name The name of the ipfix meter
+*/
+define ipfix_all_exporter_details
 {
   u32 context;
   vl_api_address_t collector_address;

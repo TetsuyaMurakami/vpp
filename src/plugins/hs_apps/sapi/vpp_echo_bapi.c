@@ -18,6 +18,9 @@
 
 #include <hs_apps/sapi/vpp_echo_common.h>
 
+#define REPLY_MSG_ID_BASE msg_id_base
+static u16 msg_id_base;
+
 /*
  *
  *  Binary API Messages
@@ -31,7 +34,7 @@ echo_send_attach (echo_main_t * em)
   bmp = vl_msg_api_alloc (sizeof (*bmp));
   clib_memset (bmp, 0, sizeof (*bmp));
 
-  bmp->_vl_msg_id = ntohs (VL_API_APP_ATTACH);
+  bmp->_vl_msg_id = ntohs (REPLY_MSG_ID_BASE + VL_API_APP_ATTACH);
   bmp->client_index = em->my_client_index;
   bmp->context = ntohl (0xfeedface);
   bmp->options[APP_OPTIONS_FLAGS] = APP_OPTIONS_FLAGS_ACCEPT_REDIRECT;
@@ -58,7 +61,7 @@ echo_send_detach (echo_main_t * em)
   bmp = vl_msg_api_alloc (sizeof (*bmp));
   clib_memset (bmp, 0, sizeof (*bmp));
 
-  bmp->_vl_msg_id = ntohs (VL_API_APPLICATION_DETACH);
+  bmp->_vl_msg_id = ntohs (REPLY_MSG_ID_BASE + VL_API_APPLICATION_DETACH);
   bmp->client_index = em->my_client_index;
   bmp->context = ntohl (0xfeedface);
 
@@ -75,7 +78,7 @@ echo_send_add_cert_key (echo_main_t * em)
   bmp = vl_msg_api_alloc (sizeof (*bmp) + cert_len + key_len);
   clib_memset (bmp, 0, sizeof (*bmp) + cert_len + key_len);
 
-  bmp->_vl_msg_id = ntohs (VL_API_APP_ADD_CERT_KEY_PAIR);
+  bmp->_vl_msg_id = ntohs (REPLY_MSG_ID_BASE + VL_API_APP_ADD_CERT_KEY_PAIR);
   bmp->client_index = em->my_client_index;
   bmp->context = ntohl (0xfeedface);
   bmp->cert_len = clib_host_to_net_u16 (cert_len);
@@ -93,11 +96,49 @@ echo_send_del_cert_key (echo_main_t * em)
   bmp = vl_msg_api_alloc (sizeof (*bmp));
   clib_memset (bmp, 0, sizeof (*bmp));
 
-  bmp->_vl_msg_id = ntohs (VL_API_APP_DEL_CERT_KEY_PAIR);
+  bmp->_vl_msg_id = ntohs (REPLY_MSG_ID_BASE + VL_API_APP_DEL_CERT_KEY_PAIR);
   bmp->client_index = em->my_client_index;
   bmp->context = ntohl (0xfeedface);
   bmp->index = clib_host_to_net_u32 (em->ckpair_index);
   vl_msg_api_send_shmem (em->vl_input_queue, (u8 *) & bmp);
+}
+
+int
+echo_bapi_recv_fd (echo_main_t *em, int *fds, int n_fds)
+{
+  clib_error_t *err;
+  err = vl_socket_client_recv_fd_msg (fds, n_fds, 5);
+  if (err)
+    {
+      clib_error_report (err);
+      return -1;
+    }
+  return 0;
+}
+
+static u8
+echo_transport_needs_crypto (transport_proto_t proto)
+{
+  return proto == TRANSPORT_PROTO_TLS || proto == TRANSPORT_PROTO_DTLS ||
+	 proto == TRANSPORT_PROTO_QUIC;
+}
+
+static void
+echo_msg_add_crypto_ext_config (echo_main_t *em, uword *offset)
+{
+  transport_endpt_ext_cfg_t cfg;
+  svm_fifo_chunk_t *c;
+
+  c = echo_segment_alloc_chunk (ECHO_MQ_SEG_HANDLE, 0, sizeof (cfg), offset);
+  if (!c)
+    return;
+
+  memset (&cfg, 0, sizeof (cfg));
+  cfg.type = TRANSPORT_ENDPT_EXT_CFG_CRYPTO;
+  cfg.len = sizeof (cfg);
+  cfg.crypto.ckpair_index = em->ckpair_index;
+  cfg.crypto.crypto_engine = em->crypto_engine;
+  clib_memcpy_fast (c->data, &cfg, cfg.len);
 }
 
 void
@@ -117,8 +158,8 @@ echo_send_listen (echo_main_t * em, ip46_address_t * ip)
   clib_memcpy_fast (&mp->ip, ip, sizeof (mp->ip));
   mp->port = em->uri_elts.port;
   mp->proto = em->uri_elts.transport_proto;
-  mp->ckpair_index = em->ckpair_index;
-  mp->crypto_engine = em->crypto_engine;
+  if (echo_transport_needs_crypto (mp->proto))
+    echo_msg_add_crypto_ext_config (em, &mp->ext_config);
   app_send_ctrl_evt_to_vpp (mq, app_evt);
 }
 
@@ -163,8 +204,8 @@ echo_send_connect (echo_main_t * em, void *args)
   mp->port = em->uri_elts.port;
   mp->proto = em->uri_elts.transport_proto;
   mp->parent_handle = a->parent_session_handle;
-  mp->ckpair_index = em->ckpair_index;
-  mp->crypto_engine = em->crypto_engine;
+  if (echo_transport_needs_crypto (mp->proto))
+    echo_msg_add_crypto_ext_config (em, &mp->ext_config);
   mp->flags = em->connect_flag;
   app_send_ctrl_evt_to_vpp (mq, app_evt);
 }
@@ -237,11 +278,11 @@ echo_segment_lookup (u64 segment_handle)
   clib_spinlock_lock (&em->segment_handles_lock);
   segment_idxp = hash_get (em->shared_segment_handles, segment_handle);
   clib_spinlock_unlock (&em->segment_handles_lock);
-  if (!segment_idxp)
-    return ~0;
+  if (segment_idxp)
+    return ((u32) *segment_idxp);
 
   ECHO_LOG (2, "Segment not mapped (0x%lx)", segment_handle);
-  return ((u32) *segment_idxp);
+  return ~0;
 }
 
 void
@@ -289,6 +330,8 @@ echo_attach_session (uword segment_handle, uword rxf_offset, uword txf_offset,
   fs = fifo_segment_get_segment (&em->segment_main, fs_index);
   s->rx_fifo = fifo_segment_alloc_fifo_w_offset (fs, rxf_offset);
   s->tx_fifo = fifo_segment_alloc_fifo_w_offset (fs, txf_offset);
+  s->rx_fifo->segment_index = fs_index;
+  s->tx_fifo->segment_index = fs_index;
   s->rx_fifo->shr->client_session_index = s->session_index;
   s->tx_fifo->shr->client_session_index = s->session_index;
 
@@ -328,6 +371,34 @@ echo_segment_attach_mq (uword segment_handle, uword mq_offset, u32 mq_index,
   clib_spinlock_unlock (&em->segment_handles_lock);
 
   return 0;
+}
+
+svm_fifo_chunk_t *
+echo_segment_alloc_chunk (uword segment_handle, u32 slice_index, u32 size,
+			  uword *offset)
+{
+  echo_main_t *em = &echo_main;
+  svm_fifo_chunk_t *c;
+  fifo_segment_t *fs;
+  u32 fs_index;
+
+  fs_index = echo_segment_lookup (segment_handle);
+  if (fs_index == (u32) ~0)
+    {
+      ECHO_LOG (0, "ERROR: mq segment %lx for is not attached!",
+		segment_handle);
+      return 0;
+    }
+
+  clib_spinlock_lock (&em->segment_handles_lock);
+
+  fs = fifo_segment_get_segment (&em->segment_main, fs_index);
+  c = fifo_segment_alloc_chunk_w_slice (fs, slice_index, size);
+  *offset = fifo_segment_chunk_offset (fs, c);
+
+  clib_spinlock_unlock (&em->segment_handles_lock);
+
+  return c;
 }
 
 /*
@@ -485,16 +556,47 @@ _(APPLICATION_DETACH_REPLY, application_detach_reply)            \
 _(APP_ADD_CERT_KEY_PAIR_REPLY, app_add_cert_key_pair_reply)      \
 _(APP_DEL_CERT_KEY_PAIR_REPLY, app_del_cert_key_pair_reply)
 
+#define vl_endianfun
+#include <vnet/session/session.api.h>
+#undef vl_endianfun
+
+#define vl_calcsizefun
+#include <vnet/session/session.api.h>
+#undef vl_calcsizefun
+
+#define vl_printfun
+#include <vnet/session/session.api.h>
+#undef vl_printfun
+
+#define vl_api_version(n, v) static u32 api_version = v;
+#include <vnet/session/session.api.h>
+#undef vl_api_version
+
 void
 echo_api_hookup (echo_main_t * em)
 {
-#define _(N,n)                                                  \
-    vl_msg_api_set_handlers(VL_API_##N, #n,                     \
-                           vl_api_##n##_t_handler,              \
-                           vl_noop_handler,                     \
-                           vl_api_##n##_t_endian,               \
-                           vl_api_##n##_t_print,                \
-                           sizeof(vl_api_##n##_t), 1);
+  u8 *name = format (0, "session_%08x%c", api_version, 0);
+
+  REPLY_MSG_ID_BASE = vl_client_get_first_plugin_msg_id ((char *) name);
+
+  vec_free (name);
+
+  if (REPLY_MSG_ID_BASE == (u16) ~0)
+    return;
+
+#define _(N, n)                                                               \
+  vl_msg_api_config (&(vl_msg_api_msg_config_t){                              \
+    .id = REPLY_MSG_ID_BASE + VL_API_##N,                                     \
+    .name = #n,                                                               \
+    .handler = vl_api_##n##_t_handler,                                        \
+    .endian = vl_api_##n##_t_endian,                                          \
+    .format_fn = vl_api_##n##_t_format,                                       \
+    .size = sizeof (vl_api_##n##_t),                                          \
+    .traced = 1,                                                              \
+    .tojson = vl_api_##n##_t_tojson,                                          \
+    .fromjson = vl_api_##n##_t_fromjson,                                      \
+    .calc_size = vl_api_##n##_t_calc_size,                                    \
+  });
   foreach_quic_echo_msg;
 #undef _
 }

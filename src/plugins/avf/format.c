@@ -57,14 +57,26 @@ u8 *
 format_avf_vf_cap_flags (u8 * s, va_list * args)
 {
   u32 flags = va_arg (*args, u32);
-  u8 *t = 0;
+  int not_first = 0;
 
-#define _(a, b, c) if (flags & (1 << a)) \
-  t = format (t, "%s%s", t ? " ":"", c);
-  foreach_avf_vf_cap_flag;
+  char *strs[32] = {
+#define _(a, b, c) [a] = c,
+    foreach_avf_vf_cap_flag
 #undef _
-  s = format (s, "%v", t);
-  vec_free (t);
+  };
+
+  for (int i = 0; i < 32; i++)
+    {
+      if ((flags & (1 << i)) == 0)
+	continue;
+      if (not_first)
+	s = format (s, " ");
+      if (strs[i])
+	s = format (s, "%s", strs[i]);
+      else
+	s = format (s, "unknown(%u)", i);
+      not_first = 1;
+    }
   return s;
 }
 
@@ -100,8 +112,8 @@ format_avf_device (u8 * s, va_list * args)
 	      AVF_QUEUE_SZ_MIN, AVF_QUEUE_SZ_MAX);
   s = format (s, "\n%Uflags: %U", format_white_space, indent,
 	      format_avf_device_flags, ad);
-  s = format (s, "\n%Uoffload features: %U", format_white_space, indent,
-	      format_avf_vf_cap_flags, ad->feature_bitmap);
+  s = format (s, "\n%Ucapability flags: %U", format_white_space, indent,
+	      format_avf_vf_cap_flags, ad->cap_flags);
 
   s = format (s, "\n%Unum-queue-pairs %d max-vectors %u max-mtu %u "
 	      "rss-key-size %u rss-lut-size %u", format_white_space, indent,
@@ -137,9 +149,9 @@ format_avf_input_trace (u8 * s, va_list * args)
   u32 indent = format_get_indent (s);
   int i = 0;
 
-  s = format (s, "avf: %v (%d) qid %u next-node %U",
-	      hi->name, t->hw_if_index, t->qid, format_vlib_next_node_name,
-	      vm, node->index, t->next_index);
+  s = format (s, "avf: %v (%d) qid %u next-node %U flow-id %u", hi->name,
+	      t->hw_if_index, t->qid, format_vlib_next_node_name, vm,
+	      node->index, t->next_index, t->flow_id);
 
   do
     {
@@ -156,10 +168,93 @@ format_avf_input_trace (u8 * s, va_list * args)
   return s;
 }
 
-/*
- * fd.io coding-style-patch-verification: ON
- *
- * Local Variables:
- * eval: (c-set-style "gnu")
- * End:
- */
+u8 *
+format_avf_vlan_support (u8 *s, va_list *args)
+{
+  virtchnl_vlan_support_t v = va_arg (*args, u32);
+  int not_first = 0;
+
+  char *strs[32] = {
+#define _(a, b, c) [a] = c,
+    foreach_virtchnl_vlan_support_bit
+#undef _
+  };
+
+  if (v == VIRTCHNL_VLAN_UNSUPPORTED)
+    return format (s, "unsupported");
+
+  for (int i = 0; i < 32; i++)
+    {
+      if ((v & (1 << i)) == 0)
+	continue;
+      if (not_first)
+	s = format (s, " ");
+      if (strs[i])
+	s = format (s, "%s", strs[i]);
+      else
+	s = format (s, "unknown(%u)", i);
+      not_first = 1;
+    }
+  return s;
+}
+
+u8 *
+format_avf_vlan_supported_caps (u8 *s, va_list *args)
+{
+  virtchnl_vlan_supported_caps_t *sc =
+    va_arg (*args, virtchnl_vlan_supported_caps_t *);
+  u32 indent = format_get_indent (s);
+
+  s = format (s, "outer: %U", format_avf_vlan_support, sc->outer);
+  s = format (s, "\n%Uinner: %U", format_white_space, indent,
+	      format_avf_vlan_support, sc->inner);
+  return s;
+}
+
+u8 *
+format_avf_vlan_caps (u8 *s, va_list *args)
+{
+  virtchnl_vlan_caps_t *vc = va_arg (*args, virtchnl_vlan_caps_t *);
+  u32 indent = format_get_indent (s);
+
+  s = format (s, "filtering:");
+  s = format (s, "\n%Usupport:", format_white_space, indent + 2);
+  s =
+    format (s, "\n%U%U", format_white_space, indent + 4,
+	    format_avf_vlan_supported_caps, &vc->filtering.filtering_support);
+  s = format (s, "\n%Uethertype-init: 0x%x", format_white_space, indent + 4,
+	      vc->filtering.ethertype_init);
+  s = format (s, "\n%Umax-filters: %u", format_white_space, indent + 4,
+	      vc->filtering.max_filters);
+  s = format (s, "\n%Uoffloads:", format_white_space, indent);
+  s = format (s, "\n%Ustripping support:", format_white_space, indent + 2);
+  s = format (s, "\n%U%U", format_white_space, indent + 4,
+	      format_avf_vlan_supported_caps, &vc->offloads.stripping_support);
+  s = format (s, "\n%Uinserion support:", format_white_space, indent + 2);
+  s = format (s, "\n%U%U", format_white_space, indent + 4,
+	      format_avf_vlan_supported_caps, &vc->offloads.insertion_support);
+  s = format (s, "\n%Uethertype-init: 0x%x", format_white_space, indent + 4,
+	      vc->offloads.ethertype_init);
+  s = format (s, "\n%Uethertype-match: 0x%x", format_white_space, indent + 4,
+	      vc->offloads.ethertype_match);
+  return s;
+}
+
+u8 *
+format_avf_eth_stats (u8 *s, va_list *args)
+{
+  virtchnl_eth_stats_t *es = va_arg (*args, virtchnl_eth_stats_t *);
+  u32 indent = format_get_indent (s);
+  u8 *v = 0;
+
+#define _(st)                                                                 \
+  if (v)                                                                      \
+    v = format (v, "\n%U", format_white_space, indent);                       \
+  v = format (v, "%-20s = %lu", #st, es->st);
+  foreach_virtchnl_eth_stats
+#undef _
+
+    s = format (s, "%v", v);
+  vec_free (v);
+  return s;
+}

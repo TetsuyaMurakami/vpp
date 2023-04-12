@@ -333,6 +333,23 @@ validate_stream (pg_stream_t * s)
   return 0;
 }
 
+const char *
+pg_interface_get_input_node (pg_interface_t *pi)
+{
+  switch (pi->mode)
+    {
+    case PG_MODE_ETHERNET:
+      return ("ethernet-input");
+    case PG_MODE_IP4:
+      return ("ip4-input");
+    case PG_MODE_IP6:
+      return ("ip6-input");
+    }
+
+  ASSERT (0);
+  return ("ethernet-input");
+}
+
 static clib_error_t *
 new_stream (vlib_main_t * vm,
 	    unformat_input_t * input, vlib_cli_command_t * cmd)
@@ -351,7 +368,7 @@ new_stream (vlib_main_t * vm,
   s.node_index = ~0;
   s.max_packet_bytes = s.min_packet_bytes = 64;
   s.buffer_bytes = vlib_buffer_get_default_data_size (vm);
-  s.if_id = 0;
+  s.if_id = ~0;
   s.n_max_frame = VLIB_FRAME_SIZE;
   pcap_file_name = 0;
 
@@ -427,8 +444,13 @@ new_stream (vlib_main_t * vm,
     {
       if (pcap_file_name != 0)
 	{
-	  vlib_node_t *n =
-	    vlib_get_node_by_name (vm, (u8 *) "ethernet-input");
+	  vlib_node_t *n;
+
+	  if (s.if_id != ~0)
+	    n = vlib_get_node_by_name (vm, (u8 *) pg_interface_get_input_node (
+					     &pg->interfaces[s.if_id]));
+	  else
+	    n = vlib_get_node_by_name (vm, (u8 *) "ethernet-input");
 	  s.node_index = n->index;
 	}
       else
@@ -665,6 +687,7 @@ create_pg_if_cmd_fn (vlib_main_t * vm,
   unformat_input_t _line_input, *line_input = &_line_input;
   u32 if_id, gso_enabled = 0, gso_size = 0, coalesce_enabled = 0;
   clib_error_t *error = NULL;
+  pg_interface_mode_t mode = PG_MODE_ETHERNET;
 
   if (!unformat_user (input, unformat_line_input, line_input))
     return 0;
@@ -673,6 +696,8 @@ create_pg_if_cmd_fn (vlib_main_t * vm,
     {
       if (unformat (line_input, "interface pg%u", &if_id))
 	;
+      else if (unformat (line_input, "coalesce-enabled"))
+	coalesce_enabled = 1;
       else if (unformat (line_input, "gso-enabled"))
 	{
 	  gso_enabled = 1;
@@ -683,9 +708,11 @@ create_pg_if_cmd_fn (vlib_main_t * vm,
 	      error = clib_error_create ("gso enabled but gso size missing");
 	      goto done;
 	    }
-	  if (unformat (line_input, "coalesce-enabled"))
-	    coalesce_enabled = 1;
 	}
+      else if (unformat (line_input, "mode ip4"))
+	mode = PG_MODE_IP4;
+      else if (unformat (line_input, "mode ip6"))
+	mode = PG_MODE_IP6;
       else
 	{
 	  error = clib_error_create ("unknown input `%U'",
@@ -694,8 +721,8 @@ create_pg_if_cmd_fn (vlib_main_t * vm,
 	}
     }
 
-  pg_interface_add_or_get (pg, if_id, gso_enabled, gso_size,
-			   coalesce_enabled);
+  pg_interface_add_or_get (pg, if_id, gso_enabled, gso_size, coalesce_enabled,
+			   mode);
 
 done:
   unformat_free (line_input);
@@ -707,7 +734,8 @@ done:
 VLIB_CLI_COMMAND (create_pg_if_cmd, static) = {
   .path = "create packet-generator",
   .short_help = "create packet-generator interface <interface name>"
-                " [gso-enabled gso-size <size> [coalesce-enabled]]",
+		" [gso-enabled gso-size <size> [coalesce-enabled]]"
+		" [mode <ethernet | ip4 | ip6>]",
   .function = create_pg_if_cmd_fn,
 };
 /* *INDENT-ON* */

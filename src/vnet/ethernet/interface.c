@@ -216,6 +216,7 @@ ethernet_update_adjacency (vnet_main_t * vnm, u32 sw_if_index, u32 ai)
 	  adj_glean_update_rewrite (ai);
 	  break;
 	case IP_LOOKUP_NEXT_ARP:
+	case IP_LOOKUP_NEXT_REWRITE:
 	  ip_neighbor_update (vnm, ai);
 	  break;
 	case IP_LOOKUP_NEXT_BCAST:
@@ -257,7 +258,6 @@ ethernet_update_adjacency (vnet_main_t * vnm, u32 sw_if_index, u32 ai)
 	case IP_LOOKUP_NEXT_DROP:
 	case IP_LOOKUP_NEXT_PUNT:
 	case IP_LOOKUP_NEXT_LOCAL:
-	case IP_LOOKUP_NEXT_REWRITE:
 	case IP_LOOKUP_NEXT_MCAST_MIDCHAIN:
 	case IP_LOOKUP_NEXT_MIDCHAIN:
 	case IP_LOOKUP_NEXT_ICMP_ERROR:
@@ -310,9 +310,25 @@ ethernet_mac_change (vnet_hw_interface_t * hi,
   return (NULL);
 }
 
+static clib_error_t *
+ethernet_set_max_frame_size (vnet_main_t *vnm, vnet_hw_interface_t *hi,
+			     u32 frame_size)
+{
+  ethernet_interface_t *ei =
+    pool_elt_at_index (ethernet_main.interfaces, hi->hw_instance);
+
+  if (ei->cb.set_max_frame_size)
+    return ei->cb.set_max_frame_size (vnm, hi, frame_size);
+
+  return vnet_error (
+    VNET_ERR_UNSUPPORTED,
+    "underlying driver doesn't support changing Max Frame Size");
+}
+
 /* *INDENT-OFF* */
 VNET_HW_INTERFACE_CLASS (ethernet_hw_interface_class) = {
   .name = "Ethernet",
+  .tx_hash_fn_type = VNET_HASH_FN_TYPE_ETHERNET,
   .format_address = format_ethernet_address,
   .format_header = format_ethernet_header_with_length,
   .unformat_hw_address = unformat_ethernet_address,
@@ -320,6 +336,7 @@ VNET_HW_INTERFACE_CLASS (ethernet_hw_interface_class) = {
   .build_rewrite = ethernet_build_rewrite,
   .update_adjacency = ethernet_update_adjacency,
   .mac_addr_change_function = ethernet_mac_change,
+  .set_max_frame_size = ethernet_set_max_frame_size,
 };
 /* *INDENT-ON* */
 
@@ -344,49 +361,41 @@ unformat_ethernet_interface (unformat_input_t * input, va_list * args)
   return 0;
 }
 
-clib_error_t *
-ethernet_register_interface (vnet_main_t * vnm,
-			     u32 dev_class_index,
-			     u32 dev_instance,
-			     const u8 * address,
-			     u32 * hw_if_index_return,
-			     ethernet_flag_change_function_t flag_change)
+u32
+vnet_eth_register_interface (vnet_main_t *vnm,
+			     vnet_eth_interface_registration_t *r)
 {
   ethernet_main_t *em = &ethernet_main;
   ethernet_interface_t *ei;
   vnet_hw_interface_t *hi;
-  clib_error_t *error = 0;
   u32 hw_if_index;
 
   pool_get (em->interfaces, ei);
-  ei->flag_change = flag_change;
+  clib_memcpy (&ei->cb, &r->cb, sizeof (vnet_eth_if_callbacks_t));
 
-  hw_if_index = vnet_register_interface
-    (vnm,
-     dev_class_index, dev_instance,
-     ethernet_hw_interface_class.index, ei - em->interfaces);
-  *hw_if_index_return = hw_if_index;
+  hw_if_index = vnet_register_interface (
+    vnm, r->dev_class_index, r->dev_instance,
+    ethernet_hw_interface_class.index, ei - em->interfaces);
 
   hi = vnet_get_hw_interface (vnm, hw_if_index);
 
   ethernet_setup_node (vnm->vlib_main, hi->output_node_index);
 
-  hi->min_packet_bytes = hi->min_supported_packet_bytes =
-    ETHERNET_MIN_PACKET_BYTES;
-  hi->max_packet_bytes = hi->max_supported_packet_bytes =
-    ETHERNET_MAX_PACKET_BYTES;
+  hi->min_frame_size = ETHERNET_MIN_PACKET_BYTES;
+  hi->frame_overhead =
+    r->frame_overhead ?
+	    r->frame_overhead :
+	    sizeof (ethernet_header_t) + 2 * sizeof (ethernet_vlan_header_t);
+  hi->max_frame_size = r->max_frame_size ?
+			 r->max_frame_size :
+			 ethernet_main.default_mtu + hi->frame_overhead;
+  ;
 
   /* Default ethernet MTU, 9000 unless set by ethernet_config see below */
   vnet_sw_interface_set_mtu (vnm, hi->sw_if_index, em->default_mtu);
 
-  ethernet_set_mac (hi, ei, address);
-
-  if (error)
-    {
-      pool_put (em->interfaces, ei);
-      return error;
-    }
-  return error;
+  ethernet_set_mac (hi, ei, r->address);
+  return hw_if_index;
 }
 
 void
@@ -454,14 +463,14 @@ ethernet_set_flags (vnet_main_t * vnm, u32 hw_if_index, u32 flags)
   /* preserve status bits and update last set operation bits */
   ei->flags = (ei->flags & ETHERNET_INTERFACE_FLAGS_STATUS_MASK) | opn_flags;
 
-  if (ei->flag_change)
+  if (ei->cb.flag_change)
     {
       switch (opn_flags)
 	{
 	case ETHERNET_INTERFACE_FLAG_DEFAULT_L3:
-	  if (hi->flags & VNET_HW_INTERFACE_FLAG_SUPPORTS_MAC_FILTER)
+	  if (hi->caps & VNET_HW_IF_CAP_MAC_FILTER)
 	    {
-	      if (ei->flag_change (vnm, hi, opn_flags) != ~0)
+	      if (ei->cb.flag_change (vnm, hi, opn_flags) != ~0)
 		{
 		  ei->flags |= ETHERNET_INTERFACE_FLAG_STATUS_L3;
 		  return 0;
@@ -472,9 +481,7 @@ ethernet_set_flags (vnet_main_t * vnm, u32 hw_if_index, u32 flags)
 	  /* fall through */
 	case ETHERNET_INTERFACE_FLAG_ACCEPT_ALL:
 	  ei->flags &= ~ETHERNET_INTERFACE_FLAG_STATUS_L3;
-	  /* fall through */
-	case ETHERNET_INTERFACE_FLAG_MTU:
-	  return ei->flag_change (vnm, hi, opn_flags);
+	  return ei->cb.flag_change (vnm, hi, opn_flags);
 	default:
 	  return ~0;
 	}
@@ -520,7 +527,7 @@ simulated_ethernet_interface_tx (vlib_main_t * vm,
   while (n_left_from >= 4)
     {
       u32 sw_if_index0, sw_if_index1, sw_if_index2, sw_if_index3;
-      u32 not_all_match_config;
+      u32x4 xor_ifx4;
 
       /* Prefetch next iteration. */
       if (PREDICT_TRUE (n_left_from >= 8))
@@ -537,12 +544,11 @@ simulated_ethernet_interface_tx (vlib_main_t * vm,
       sw_if_index2 = vnet_buffer (b[2])->sw_if_index[VLIB_TX];
       sw_if_index3 = vnet_buffer (b[3])->sw_if_index[VLIB_TX];
 
-      not_all_match_config = (sw_if_index0 ^ sw_if_index1)
-	^ (sw_if_index2 ^ sw_if_index3);
-      not_all_match_config += sw_if_index0 ^ new_rx_sw_if_index;
+      xor_ifx4 = u32x4_gather (&sw_if_index0, &sw_if_index1, &sw_if_index2,
+			       &sw_if_index3);
 
       /* Speed path / expected case: all pkts on the same intfc */
-      if (PREDICT_TRUE (not_all_match_config == 0))
+      if (PREDICT_TRUE (u32x4_is_all_equal (xor_ifx4, new_rx_sw_if_index)))
 	{
 	  next[0] = next_index;
 	  next[1] = next_index;
@@ -833,13 +839,11 @@ vnet_create_loopback_interface (u32 * sw_if_indexp, u8 * mac_address,
 {
   vnet_main_t *vnm = vnet_get_main ();
   vlib_main_t *vm = vlib_get_main ();
-  clib_error_t *error;
   u32 instance;
   u8 address[6];
   u32 hw_if_index;
   vnet_hw_interface_t *hw_if;
   u32 slot;
-  int rv = 0;
 
   ASSERT (sw_if_indexp);
 
@@ -871,18 +875,11 @@ vnet_create_loopback_interface (u32 * sw_if_indexp, u8 * mac_address,
       address[5] = instance;
     }
 
-  error = ethernet_register_interface
-    (vnm,
-     ethernet_simulated_device_class.index, instance, address, &hw_if_index,
-     /* flag change */ 0);
-
-  if (error)
-    {
-      rv = VNET_API_ERROR_INVALID_REGISTRATION;
-      clib_error_report (error);
-      return rv;
-    }
-
+  vnet_eth_interface_registration_t eir = {};
+  eir.dev_class_index = ethernet_simulated_device_class.index;
+  eir.dev_instance = instance;
+  eir.address = address;
+  hw_if_index = vnet_eth_register_interface (vnm, &eir);
   hw_if = vnet_get_hw_interface (vnm, hw_if_index);
   slot = vlib_node_add_named_next_with_slot
     (vm, hw_if->tx_node_index,

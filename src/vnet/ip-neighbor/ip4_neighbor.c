@@ -38,15 +38,26 @@
  */
 
 #include <vnet/ip-neighbor/ip4_neighbor.h>
+#include <vnet/ip-neighbor/ip_neighbor.api_enum.h>
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/util/throttle.h>
 #include <vnet/fib/fib_sas.h>
+#include <vnet/ip/ip_sas.h>
 
 /** ARP throttling */
 static throttle_t arp_throttle;
 
+VLIB_REGISTER_LOG_CLASS (ip4_neighbor_log, static) = {
+  .class_name = "ip4",
+  .subclass_name = "neighbor",
+};
+
+#define log_debug(fmt, ...)                                                   \
+  vlib_log_debug (ip4_neighbor_log.class, fmt, __VA_ARGS__)
+
 void
-ip4_neighbor_probe_dst (u32 sw_if_index, const ip4_address_t * dst)
+ip4_neighbor_probe_dst (u32 sw_if_index, u32 thread_index,
+			const ip4_address_t *dst)
 {
   ip4_address_t src;
   adj_index_t ai;
@@ -54,15 +65,16 @@ ip4_neighbor_probe_dst (u32 sw_if_index, const ip4_address_t * dst)
   /* any glean will do, it's just for the rewrite */
   ai = adj_glean_get (FIB_PROTOCOL_IP4, sw_if_index, NULL);
 
-  if (ADJ_INDEX_INVALID != ai && fib_sas4_get (sw_if_index, dst, &src))
+  if (ADJ_INDEX_INVALID != ai &&
+      (fib_sas4_get (sw_if_index, dst, &src) ||
+       ip4_sas_by_sw_if_index (sw_if_index, dst, &src)))
     ip4_neighbor_probe (vlib_get_main (),
 			vnet_get_main (), adj_get (ai), &src, dst);
 }
 
 void
-ip4_neighbor_advertise (vlib_main_t * vm,
-			vnet_main_t * vnm,
-			u32 sw_if_index, const ip4_address_t * addr)
+ip4_neighbor_advertise (vlib_main_t *vm, vnet_main_t *vnm, u32 sw_if_index,
+			u32 thread_index, const ip4_address_t *addr)
 {
   vnet_hw_interface_t *hi = vnet_get_sup_hw_interface (vnm, sw_if_index);
   ip4_main_t *i4m = &ip4_main;
@@ -71,14 +83,15 @@ ip4_neighbor_advertise (vlib_main_t * vm,
 
   if (NULL == addr)
     {
-      fib_sas4_get (sw_if_index, NULL, &tmp);
-      addr = &tmp;
+      if (fib_sas4_get (sw_if_index, NULL, &tmp) ||
+	  ip4_sas_by_sw_if_index (sw_if_index, NULL, &tmp))
+	addr = &tmp;
     }
 
   if (addr)
     {
-      clib_warning ("Sending GARP for IP4 address %U on sw_if_idex %d",
-		    format_ip4_address, addr, sw_if_index);
+      log_debug ("Sending GARP for IP4 address %U on sw_if_idex %d",
+		 format_ip4_address, addr, sw_if_index);
 
       /* Form GARP packet for output - Gratuitous ARP is an ARP request packet
          where the interface IP/MAC pair is used for both source and request
@@ -114,6 +127,10 @@ ip4_neighbor_advertise (vlib_main_t * vm,
       to_next[0] = bi;
       f->n_vectors = 1;
       vlib_put_frame_to_node (vm, hi->output_node_index, f);
+
+      vlib_increment_simple_counter (
+	&ip_neighbor_counters[AF_IP4].ipnc[VLIB_TX][IP_NEIGHBOR_CTR_GRAT],
+	thread_index, sw_if_index, 1);
     }
 }
 
@@ -177,10 +194,12 @@ ip4_arp_inline (vlib_main_t * vm,
 	      /* resolve the incomplete adj */
 	      resolve0 = adj0->sub_type.nbr.next_hop.ip4;
 	      /* Src IP address in ARP header. */
-	      if (!fib_sas4_get (sw_if_index0, &resolve0, &src0))
+	      if (!fib_sas4_get (sw_if_index0, &resolve0, &src0) &&
+		  !ip4_sas_by_sw_if_index (sw_if_index0, &resolve0, &src0))
 		{
 		  /* No source address available */
-		  p0->error = node->errors[IP4_ARP_ERROR_NO_SOURCE_ADDRESS];
+		  p0->error =
+		    node->errors[IP4_NEIGHBOR_ERROR_NO_SOURCE_ADDRESS];
 		  continue;
 		}
 	    }
@@ -191,7 +210,7 @@ ip4_arp_inline (vlib_main_t * vm,
 
 	  if (throttle_check (&arp_throttle, thread_index, r0, seed))
 	    {
-	      p0->error = node->errors[IP4_ARP_ERROR_THROTTLED];
+	      p0->error = node->errors[IP4_NEIGHBOR_ERROR_THROTTLED];
 	      continue;
 	    }
 
@@ -201,7 +220,7 @@ ip4_arp_inline (vlib_main_t * vm,
 	   */
 	  if (IP_LOOKUP_NEXT_REWRITE == adj0->lookup_next_index)
 	    {
-	      p0->error = node->errors[IP4_ARP_ERROR_RESOLVED];
+	      p0->error = node->errors[IP4_NEIGHBOR_ERROR_RESOLVED];
 	      continue;
 	    }
 
@@ -212,7 +231,7 @@ ip4_arp_inline (vlib_main_t * vm,
 	  if ((is_glean && adj0->lookup_next_index != IP_LOOKUP_NEXT_GLEAN)
 	      || (!is_glean && adj0->lookup_next_index != IP_LOOKUP_NEXT_ARP))
 	    {
-	      p0->error = node->errors[IP4_ARP_ERROR_NON_ARP_ADJ];
+	      p0->error = node->errors[IP4_NEIGHBOR_ERROR_NON_ARP_ADJ];
 	      continue;
 	    }
 
@@ -224,11 +243,11 @@ ip4_arp_inline (vlib_main_t * vm,
 	      /* copy the persistent fields from the original */
 	      clib_memcpy_fast (b0->opaque2, p0->opaque2,
 				sizeof (p0->opaque2));
-	      p0->error = node->errors[IP4_ARP_ERROR_REQUEST_SENT];
+	      p0->error = node->errors[IP4_NEIGHBOR_ERROR_REQUEST_SENT];
 	    }
 	  else
 	    {
-	      p0->error = node->errors[IP4_ARP_ERROR_NO_BUFFERS];
+	      p0->error = node->errors[IP4_NEIGHBOR_ERROR_NO_BUFFERS];
 	      continue;
 	    }
 	}
@@ -251,23 +270,14 @@ VLIB_NODE_FN (ip4_glean_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
   return (ip4_arp_inline (vm, node, frame, 1));
 }
 
-static char *ip4_arp_error_strings[] = {
-  [IP4_ARP_ERROR_THROTTLED] = "ARP requests throttled",
-  [IP4_ARP_ERROR_RESOLVED] = "ARP requests resolved",
-  [IP4_ARP_ERROR_NO_BUFFERS] = "ARP requests out of buffer",
-  [IP4_ARP_ERROR_REQUEST_SENT] = "ARP requests sent",
-  [IP4_ARP_ERROR_NON_ARP_ADJ] = "ARPs to non-ARP adjacencies",
-  [IP4_ARP_ERROR_NO_SOURCE_ADDRESS] = "no source address for ARP request",
-};
-
 /* *INDENT-OFF* */
 VLIB_REGISTER_NODE (ip4_arp_node) =
 {
   .name = "ip4-arp",
   .vector_size = sizeof (u32),
   .format_trace = format_ip4_forward_next_trace,
-  .n_errors = ARRAY_LEN (ip4_arp_error_strings),
-  .error_strings = ip4_arp_error_strings,
+  .n_errors = IP4_NEIGHBOR_N_ERROR,
+  .error_counters = ip4_neighbor_error_counters,
   .n_next_nodes = IP4_ARP_N_NEXT,
   .next_nodes = {
     [IP4_ARP_NEXT_DROP] = "ip4-drop",
@@ -279,8 +289,8 @@ VLIB_REGISTER_NODE (ip4_glean_node) =
   .name = "ip4-glean",
   .vector_size = sizeof (u32),
   .format_trace = format_ip4_forward_next_trace,
-  .n_errors = ARRAY_LEN (ip4_arp_error_strings),
-  .error_strings = ip4_arp_error_strings,
+  .n_errors = IP4_NEIGHBOR_N_ERROR,
+  .error_counters = ip4_neighbor_error_counters,
   .n_next_nodes = IP4_ARP_N_NEXT,
   .next_nodes = {
     [IP4_ARP_NEXT_DROP] = "ip4-drop",
@@ -302,10 +312,9 @@ arp_notrace_init (vlib_main_t * vm)
   vlib_node_runtime_t *rt = vlib_node_get_runtime (vm, ip4_arp_node.index);
 
   /* don't trace ARP request packets */
-#define _(a)                                    \
-    vnet_pcap_drop_trace_filter_add_del         \
-        (rt->errors[IP4_ARP_ERROR_##a],         \
-         1 /* is_add */);
+#define _(a)                                                                  \
+  vnet_pcap_drop_trace_filter_add_del (rt->errors[IP4_NEIGHBOR_ERROR_##a],    \
+				       1 /* is_add */);
   foreach_notrace_ip4_arp_error;
 #undef _
   return 0;
@@ -319,7 +328,7 @@ ip4_neighbor_main_loop_enter (vlib_main_t * vm)
   vlib_thread_main_t *tm = &vlib_thread_main;
   u32 n_vlib_mains = tm->n_vlib_mains;
 
-  throttle_init (&arp_throttle, n_vlib_mains, 1e-3);
+  throttle_init (&arp_throttle, n_vlib_mains, THROTTLE_BITS, 1e-3);
 
   return (NULL);
 }

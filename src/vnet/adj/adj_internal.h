@@ -31,16 +31,20 @@
 /*
  * Debug macro
  */
-#ifdef ADJ_DEBUG
-#define ADJ_DBG(_adj, _fmt, _args...)		\
-{						\
-    clib_warning("adj:[%d:%p]:" _fmt,		\
-		 _adj - adj_pool, _adj,		\
-		 ##_args);			\
+extern vlib_log_class_t adj_logger;
+#define ADJ_DBG(_adj, _fmt, _args...)		        \
+{                                                       \
+    vlib_log_debug(adj_logger, "adj:[%d:%p]:" _fmt,     \
+                   _adj - adj_pool, _adj,		\
+                   ##_args);                            \
 }
-#else
-#define ADJ_DBG(_e, _fmt, _args...)
-#endif
+
+/*
+ * Vlib nodes
+ */
+extern vlib_node_registration_t adj_nsh_midchain_node;
+extern vlib_node_registration_t adj_nsh_rewrite_node;
+extern vlib_node_registration_t adj_midchain_tx;
 
 static inline u32
 adj_get_rewrite_node (vnet_link_t linkt)
@@ -120,6 +124,7 @@ extern void adj_nbr_remove(adj_index_t ai,
 			   vnet_link_t link_type,
 			   const ip46_address_t *nh_addr,
 			   u32 sw_if_index);
+extern u32 adj_nbr_get_n_adjs(vnet_link_t link_type, u32 sw_if_index);
 extern void adj_glean_remove(ip_adjacency_t *adj);
 extern void adj_mcast_remove(fib_protocol_t proto,
 			     u32 sw_if_index);

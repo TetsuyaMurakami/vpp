@@ -144,8 +144,12 @@ format_session (u8 * s, va_list * args)
     }
   else if (ss->session_state == SESSION_STATE_CONNECTING)
     {
-      s = format (s, "%-40U%v", format_transport_half_open_connection,
-		  tp, ss->connection_index, ss->thread_index, str);
+      if (ss->flags & SESSION_F_HALF_OPEN)
+	s = format (s, "%U%v", format_transport_half_open_connection, tp,
+		    ss->connection_index, ss->thread_index, verbose, str);
+      else
+	s = format (s, "%U", format_transport_connection, tp,
+		    ss->connection_index, ss->thread_index, verbose);
     }
   else
     {
@@ -255,7 +259,6 @@ unformat_session (unformat_input_t * input, va_list * args)
   if (s)
     {
       *result = s;
-      session_pool_remove_peeker (s->thread_index);
       return 1;
     }
   return 0;
@@ -451,9 +454,9 @@ session_cli_show_events_thread (vlib_main_t * vm, u32 thread_index)
 
   vlib_cli_output (vm, "Thread %d:\n", thread_index);
   vlib_cli_output (vm, " evt elements alloc: %u",
-		   pool_elts (wrk->event_elts));
+		   clib_llist_elts (wrk->event_elts));
   vlib_cli_output (vm, " ctrl evt elt data alloc: %d",
-		   pool_elts (wrk->ctrl_evts_data));
+		   clib_llist_elts (wrk->ctrl_evts_data));
 }
 
 static void
@@ -484,7 +487,6 @@ show_session_command_fn (vlib_main_t * vm, unformat_input_t * input,
 {
   u8 one_session = 0, do_listeners = 0, sst, do_elog = 0, do_filter = 0;
   u32 track_index, thread_index = 0, start = 0, end = ~0, session_index;
-  unformat_input_t _line_input, *line_input = &_line_input;
   transport_proto_t transport_proto = TRANSPORT_PROTO_INVALID;
   session_state_t state = SESSION_N_STATES, *states = 0;
   session_main_t *smm = &session_main;
@@ -498,26 +500,20 @@ show_session_command_fn (vlib_main_t * vm, unformat_input_t * input,
 
   session_cli_return_if_not_enabled ();
 
-  if (!unformat_user (input, unformat_line_input, line_input))
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
     {
-      session_cli_show_all_sessions (vm, 0);
-      return 0;
-    }
-
-  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
-    {
-      if (unformat (line_input, "verbose %d", &verbose))
+      if (unformat (input, "verbose %d", &verbose))
 	;
-      else if (unformat (line_input, "verbose"))
+      else if (unformat (input, "verbose"))
 	verbose = 1;
-      else if (unformat (line_input, "listeners %U", unformat_transport_proto,
+      else if (unformat (input, "listeners %U", unformat_transport_proto,
 			 &transport_proto))
 	do_listeners = 1;
-      else if (unformat (line_input, "%U", unformat_session, &s))
+      else if (unformat (input, "%U", unformat_session, &s))
 	{
 	  one_session = 1;
 	}
-      else if (unformat (line_input, "thread %u index %u", &thread_index,
+      else if (unformat (input, "thread %u index %u", &thread_index,
 			 &session_index))
 	{
 	  s = session_get_if_valid (session_index, thread_index);
@@ -528,19 +524,17 @@ show_session_command_fn (vlib_main_t * vm, unformat_input_t * input,
 	    }
 	  one_session = 1;
 	}
-      else if (unformat (line_input, "thread %u", &thread_index))
+      else if (unformat (input, "thread %u", &thread_index))
 	{
 	  do_filter = 1;
 	}
-      else
-	if (unformat (line_input, "state %U", unformat_session_state, &state))
+      else if (unformat (input, "state %U", unformat_session_state, &state))
 	{
 	  vec_add1 (states, state);
 	  do_filter = 1;
 	}
-      else if (unformat (line_input, "proto %U index %u",
-			 unformat_transport_proto, &transport_proto,
-			 &transport_index))
+      else if (unformat (input, "proto %U index %u", unformat_transport_proto,
+			 &transport_proto, &transport_index))
 	{
 	  transport_connection_t *tc;
 	  tc = transport_get_connection (transport_proto, transport_index,
@@ -561,34 +555,34 @@ show_session_command_fn (vlib_main_t * vm, unformat_input_t * input,
 	    }
 	  one_session = 1;
 	}
-      else if (unformat (line_input, "proto %U", unformat_transport_proto,
+      else if (unformat (input, "proto %U", unformat_transport_proto,
 			 &transport_proto))
 	do_filter = 1;
-      else if (unformat (line_input, "range %u %u", &start, &end))
+      else if (unformat (input, "range %u %u", &start, &end))
 	do_filter = 1;
-      else if (unformat (line_input, "range %u", &start))
+      else if (unformat (input, "range %u", &start))
 	{
 	  end = start + 50;
 	  do_filter = 1;
 	}
-      else if (unformat (line_input, "elog"))
+      else if (unformat (input, "elog"))
 	do_elog = 1;
-      else if (unformat (line_input, "protos"))
+      else if (unformat (input, "protos"))
 	{
 	  vlib_cli_output (vm, "%U", format_transport_protos);
 	  goto done;
 	}
-      else if (unformat (line_input, "states"))
+      else if (unformat (input, "states"))
 	{
 	  session_cli_print_session_states (vm);
 	  goto done;
 	}
-      else if (unformat (line_input, "events"))
+      else if (unformat (input, "events"))
 	do_events = 1;
       else
 	{
 	  error = clib_error_return (0, "unknown input `%U'",
-				     format_unformat_error, line_input);
+				     format_unformat_error, input);
 	  goto done;
 	}
     }
@@ -598,7 +592,7 @@ show_session_command_fn (vlib_main_t * vm, unformat_input_t * input,
       u8 *str = format (0, "%U", format_session, s, 3);
       if (do_elog && s->session_state != SESSION_STATE_LISTENING)
 	{
-	  elog_main_t *em = &vm->elog_main;
+	  elog_main_t *em = &vlib_global_main.elog_main;
 	  transport_connection_t *tc;
 	  f64 dt;
 
@@ -657,7 +651,6 @@ show_session_command_fn (vlib_main_t * vm, unformat_input_t * input,
   session_cli_show_all_sessions (vm, verbose);
 
 done:
-  unformat_free (line_input);
   vec_free (states);
   return error;
 }
@@ -847,29 +840,22 @@ static clib_error_t *
 session_enable_disable_fn (vlib_main_t * vm, unformat_input_t * input,
 			   vlib_cli_command_t * cmd)
 {
-  unformat_input_t _line_input, *line_input = &_line_input;
-  u8 is_en = 1;
-  clib_error_t *error;
+  u8 is_en = 2;
 
-  if (!unformat_user (input, unformat_line_input, line_input))
-    return clib_error_return (0, "expected enable | disable");
-
-  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
     {
-      if (unformat (line_input, "enable"))
+      if (unformat (input, "enable"))
 	is_en = 1;
-      else if (unformat (line_input, "disable"))
+      else if (unformat (input, "disable"))
 	is_en = 0;
       else
-	{
-	  error = clib_error_return (0, "unknown input `%U'",
-				     format_unformat_error, line_input);
-	  unformat_free (line_input);
-	  return error;
-	}
+	return clib_error_return (0, "unknown input `%U'",
+				  format_unformat_error, input);
     }
 
-  unformat_free (line_input);
+  if (is_en > 1)
+    return clib_error_return (0, "expected enable | disable");
+
   return vnet_session_enable_disable (vm, is_en);
 }
 
@@ -881,6 +867,62 @@ VLIB_CLI_COMMAND (session_enable_disable_command, static) =
   .function = session_enable_disable_fn,
 };
 /* *INDENT-ON* */
+
+static clib_error_t *
+show_session_stats_fn (vlib_main_t *vm, unformat_input_t *input,
+		       vlib_cli_command_t *cmd)
+{
+  session_main_t *smm = &session_main;
+  session_worker_t *wrk;
+  unsigned int *e;
+
+  if (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    return clib_error_return (0, "unknown input `%U'", format_unformat_error,
+			      input);
+
+  vec_foreach (wrk, smm->wrk)
+    {
+      vlib_cli_output (vm, "Thread %u:\n", wrk - smm->wrk);
+      e = wrk->stats.errors;
+#define _(name, str)                                                          \
+  if (e[SESSION_EP_##name])                                                   \
+    vlib_cli_output (vm, " %lu %s", e[SESSION_EP_##name], str);
+      foreach_session_error
+#undef _
+    }
+  return 0;
+}
+
+VLIB_CLI_COMMAND (show_session_stats_command, static) = {
+  .path = "show session stats",
+  .short_help = "show session stats",
+  .function = show_session_stats_fn,
+};
+
+static clib_error_t *
+clear_session_stats_fn (vlib_main_t *vm, unformat_input_t *input,
+			vlib_cli_command_t *cmd)
+{
+  session_main_t *smm = &session_main;
+  session_worker_t *wrk;
+
+  if (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    return clib_error_return (0, "unknown input `%U'", format_unformat_error,
+			      input);
+
+  vec_foreach (wrk, smm->wrk)
+    {
+      clib_memset (&wrk->stats, 0, sizeof (wrk->stats));
+    }
+
+  return 0;
+}
+
+VLIB_CLI_COMMAND (clear_session_stats_command, static) = {
+  .path = "clear session stats",
+  .short_help = "clear session stats",
+  .function = clear_session_stats_fn,
+};
 
 /*
  * fd.io coding-style-patch-verification: ON

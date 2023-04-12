@@ -19,6 +19,7 @@
 #include <rte_config.h>
 #include <rte_mbuf.h>
 #include <rte_ethdev.h>
+#include <rte_cryptodev.h>
 #include <rte_vfio.h>
 #include <rte_version.h>
 
@@ -115,6 +116,9 @@ dpdk_buffer_pool_init (vlib_main_t * vm, vlib_buffer_pool_t * bp)
       mp->populated_size++;
       nmp->populated_size++;
     }
+#if RTE_VERSION >= RTE_VERSION_NUM(22, 3, 0, 0)
+  mp->flags &= ~RTE_MEMPOOL_F_NON_IO;
+#endif
 
   /* call the object initializers */
   rte_mempool_obj_iter (mp, rte_pktmbuf_init, 0);
@@ -135,7 +139,7 @@ dpdk_buffer_pool_init (vlib_main_t * vm, vlib_buffer_pool_t * bp)
     }
 
   /* map DMA pages if at least one physical device exists */
-  if (rte_eth_dev_count_avail ())
+  if (rte_eth_dev_count_avail () || rte_cryptodev_count ())
     {
       uword i;
       size_t page_sz;
@@ -414,7 +418,15 @@ dpdk_ops_vpp_dequeue_no_cache (struct rte_mempool *mp, void **obj_table,
 static unsigned
 dpdk_ops_vpp_get_count (const struct rte_mempool *mp)
 {
-  clib_warning ("");
+  vlib_main_t *vm = vlib_get_main ();
+  if (mp)
+    {
+      vlib_buffer_pool_t *pool = vlib_get_buffer_pool (vm, mp->pool_id);
+      if (pool)
+	{
+	  return pool->n_avail;
+	}
+    }
   return 0;
 }
 

@@ -102,6 +102,7 @@ typedef struct ipsec_itf_t_
 extern int ipsec_itf_create (u32 user_instance,
 			     tunnel_mode_t mode, u32 * sw_if_indexp);
 extern int ipsec_itf_delete (u32 sw_if_index);
+extern void ipsec_itf_reset_tx_nodes (u32 sw_if_index);
 
 extern void ipsec_itf_adj_stack (adj_index_t ai, u32 sai);
 extern void ipsec_itf_adj_unstack (adj_index_t ai);
@@ -109,6 +110,10 @@ extern void ipsec_itf_adj_unstack (adj_index_t ai);
 extern u8 *format_ipsec_itf (u8 * s, va_list * a);
 
 extern ipsec_itf_t *ipsec_itf_get (index_t ii);
+extern u32 ipsec_itf_count (void);
+
+typedef walk_rc_t (*ipsec_itf_walk_cb_t) (ipsec_itf_t *itf, void *ctx);
+extern void ipsec_itf_walk (ipsec_itf_walk_cb_t cd, void *ctx);
 
 /*
  * fd.io coding-style-patch-verification: ON

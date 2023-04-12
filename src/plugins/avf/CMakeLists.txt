@@ -15,15 +15,21 @@ add_vpp_plugin(avf
   SOURCES
   cli.c
   device.c
+  elog.c
   format.c
   input.c
   output.c
   plugin.c
   avf_api.c
+  flow.c
+  avf_fdir_lib.c
+  avf_rss_lib.c
 
   MULTIARCH_SOURCES
   input.c
   output.c
+
+  MULTIARCH_FORCE_ON trm
 
   API_FILES
   avf.api

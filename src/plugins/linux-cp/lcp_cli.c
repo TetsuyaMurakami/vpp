@@ -34,74 +34,60 @@ lcp_itf_pair_create_command_fn (vlib_main_t *vm, unformat_input_t *input,
 {
   unformat_input_t _line_input, *line_input = &_line_input;
   vnet_main_t *vnm = vnet_get_main ();
-  u32 sw_if_index;
-  u8 *host_if_name;
-  lip_host_type_t host_if_type;
-  u8 *ns;
-  int r;
+  u32 sw_if_index = ~0;
+  u8 *host_if_name = NULL;
+  lip_host_type_t host_if_type = LCP_ITF_HOST_TAP;
+  u8 *ns = NULL;
+  clib_error_t *error = NULL;
 
-  if (!unformat_user (input, unformat_line_input, line_input))
-    return 0;
-
-  sw_if_index = ~0;
-  host_if_name = ns = NULL;
-  host_if_type = LCP_ITF_HOST_TAP;
-
-  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+  if (unformat_user (input, unformat_line_input, line_input))
     {
-      if (unformat (line_input, "%d", &sw_if_index))
-	;
-      else if (unformat (line_input, "%U", unformat_vnet_sw_interface, vnm,
-			 &sw_if_index))
-	;
-      else if (unformat (line_input, "host-if %s", &host_if_name))
-	;
-      else if (unformat (line_input, "netns %s", &ns))
-	;
-      else if (unformat (line_input, "tun"))
-	host_if_type = LCP_ITF_HOST_TUN;
-      else
+      while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
 	{
-	  unformat_free (line_input);
-	  vec_free (host_if_name);
-	  vec_free (ns);
-	  return clib_error_return (0, "unknown input `%U'",
-				    format_unformat_error, input);
+	  if (unformat (line_input, "%d", &sw_if_index))
+	    ;
+	  else if (unformat (line_input, "%U", unformat_vnet_sw_interface, vnm,
+			     &sw_if_index))
+	    ;
+	  else if (unformat (line_input, "host-if %s", &host_if_name))
+	    ;
+	  else if (unformat (line_input, "netns %s", &ns))
+	    ;
+	  else if (unformat (line_input, "tun"))
+	    host_if_type = LCP_ITF_HOST_TUN;
+	  else
+	    {
+	      error = clib_error_return (0, "unknown input `%U'",
+					 format_unformat_error, line_input);
+	      break;
+	    }
 	}
+      unformat_free (line_input);
     }
 
-  unformat_free (line_input);
-
-  if (!host_if_name)
+  if (error)
+    ;
+  else if (sw_if_index == ~0)
+    error = clib_error_return (0, "interface name or sw_if_index required");
+  else if (!host_if_name)
+    error = clib_error_return (0, "host interface name required");
+  else if (vec_len (ns) >= LCP_NS_LEN)
+    error = clib_error_return (
+      0, "Namespace name should be fewer than %d characters", LCP_NS_LEN);
+  else
     {
-      vec_free (ns);
-      return clib_error_return (0, "host interface name required");
-    }
+      int r;
 
-  if (sw_if_index == ~0)
-    {
-      vec_free (host_if_name);
-      vec_free (ns);
-      return clib_error_return (0, "interface name or sw_if_index required");
+      r = lcp_itf_pair_create (sw_if_index, host_if_name, host_if_type, ns,
+			       NULL);
+      if (r)
+	error = clib_error_return (0, "linux-cp pair creation failed (%d)", r);
     }
-
-  if (vec_len (ns) >= LCP_NS_LEN)
-    {
-      vec_free (host_if_name);
-      vec_free (ns);
-      return clib_error_return (
-	0, "Namespace name should be fewer than %d characters", LCP_NS_LEN);
-    }
-
-  r = lcp_itf_pair_create (sw_if_index, host_if_name, host_if_type, ns);
 
   vec_free (host_if_name);
   vec_free (ns);
 
-  if (r)
-    return clib_error_return (0, "linux-cp pair creation failed (%d)", r);
-
-  return 0;
+  return error;
 }
 
 VLIB_CLI_COMMAND (lcp_itf_pair_create_command, static) = {
@@ -112,12 +98,124 @@ VLIB_CLI_COMMAND (lcp_itf_pair_create_command, static) = {
 };
 
 static clib_error_t *
+lcp_sync_command_fn (vlib_main_t *vm, unformat_input_t *input,
+		     vlib_cli_command_t *cmd)
+{
+  unformat_input_t _line_input, *line_input = &_line_input;
+
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "on") || unformat (line_input, "enable"))
+	lcp_set_sync (1);
+      else if (unformat (line_input, "off") ||
+	       unformat (line_input, "disable"))
+	lcp_set_sync (0);
+      else
+	return clib_error_return (0, "unknown input `%U'",
+				  format_unformat_error, line_input);
+    }
+
+  unformat_free (line_input);
+  return 0;
+}
+
+VLIB_CLI_COMMAND (lcp_sync_command, static) = {
+  .path = "lcp lcp-sync",
+  .short_help = "lcp lcp-sync [on|enable|off|disable]",
+  .function = lcp_sync_command_fn,
+};
+
+static clib_error_t *
+lcp_auto_subint_command_fn (vlib_main_t *vm, unformat_input_t *input,
+			    vlib_cli_command_t *cmd)
+{
+  unformat_input_t _line_input, *line_input = &_line_input;
+
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "on") || unformat (line_input, "enable"))
+	lcp_set_auto_subint (1);
+      else if (unformat (line_input, "off") ||
+	       unformat (line_input, "disable"))
+	lcp_set_auto_subint (0);
+      else
+	return clib_error_return (0, "unknown input `%U'",
+				  format_unformat_error, line_input);
+    }
+
+  unformat_free (line_input);
+  return 0;
+}
+
+VLIB_CLI_COMMAND (lcp_auto_subint_command, static) = {
+  .path = "lcp lcp-auto-subint",
+  .short_help = "lcp lcp-auto-subint [on|enable|off|disable]",
+  .function = lcp_auto_subint_command_fn,
+};
+
+static clib_error_t *
+lcp_param_command_fn (vlib_main_t *vm, unformat_input_t *input,
+		      vlib_cli_command_t *cmd)
+{
+  unformat_input_t _line_input, *line_input = &_line_input;
+
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "del-static-on-link-down"))
+	{
+	  if (unformat (line_input, "on") || unformat (line_input, "enable"))
+	    lcp_set_del_static_on_link_down (1 /* is_del */);
+	  else if (unformat (line_input, "off") ||
+		   unformat (line_input, "disable"))
+	    lcp_set_del_static_on_link_down (0 /* is_del */);
+	  else
+	    return clib_error_return (0, "unknown input `%U'",
+				      format_unformat_error, line_input);
+	}
+      else if (unformat (line_input, "del-dynamic-on-link-down"))
+	{
+	  if (unformat (line_input, "on") || unformat (line_input, "enable"))
+	    lcp_set_del_dynamic_on_link_down (1 /* is_del */);
+	  else if (unformat (line_input, "off") ||
+		   unformat (line_input, "disable"))
+	    lcp_set_del_dynamic_on_link_down (0 /* is_del */);
+	  else
+	    return clib_error_return (0, "unknown input `%U'",
+				      format_unformat_error, line_input);
+	}
+      else
+	return clib_error_return (0, "unknown input `%U'",
+				  format_unformat_error, line_input);
+    }
+
+  unformat_free (line_input);
+  return 0;
+}
+
+VLIB_CLI_COMMAND (lcp_param_command, static) = {
+  .path = "lcp param",
+  .short_help = "lcp param [del-static-on-link-down (on|enable|off|disable)] "
+		"[del-dynamic-on-link-down (on|enable|off|disable)]",
+  .function = lcp_param_command_fn,
+};
+
+static clib_error_t *
 lcp_default_netns_command_fn (vlib_main_t *vm, unformat_input_t *input,
 			      vlib_cli_command_t *cmd)
 {
   unformat_input_t _line_input, *line_input = &_line_input;
   u8 *ns;
   int r;
+  clib_error_t *error = NULL;
 
   if (!unformat_user (input, unformat_line_input, line_input))
     return 0;
@@ -130,9 +228,14 @@ lcp_default_netns_command_fn (vlib_main_t *vm, unformat_input_t *input,
 	;
       else if (unformat (line_input, "clear netns"))
 	;
+      else
+	{
+	  vec_free (ns);
+	  error = clib_error_return (0, "unknown input `%U'",
+				     format_unformat_error, line_input);
+	  goto done;
+	}
     }
-
-  unformat_free (line_input);
 
   vlib_cli_output (vm, "lcp set default netns '%s'\n", (char *) ns);
 
@@ -141,7 +244,10 @@ lcp_default_netns_command_fn (vlib_main_t *vm, unformat_input_t *input,
   if (r)
     return clib_error_return (0, "linux-cp set default netns failed (%d)", r);
 
-  return 0;
+done:
+  unformat_free (line_input);
+
+  return error;
 }
 
 VLIB_CLI_COMMAND (lcp_default_netns_command, static) = {
@@ -156,36 +262,42 @@ lcp_itf_pair_delete_command_fn (vlib_main_t *vm, unformat_input_t *input,
 {
   vnet_main_t *vnm = vnet_get_main ();
   unformat_input_t _line_input, *line_input = &_line_input;
-  u32 sw_if_index;
-  int r;
+  u32 sw_if_index = ~0;
+  clib_error_t *error = NULL;
 
-  if (!unformat_user (input, unformat_line_input, line_input))
-    return 0;
-
-  sw_if_index = ~0;
-
-  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+  if (unformat_user (input, unformat_line_input, line_input))
     {
-      if (unformat (line_input, "%d", &sw_if_index))
-	;
-      else if (unformat (line_input, "%U", unformat_vnet_sw_interface, vnm,
-			 &sw_if_index))
-	;
-      else
-	return clib_error_return (0, "unknown input `%U'",
-				  format_unformat_error, input);
+      while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+	{
+	  if (unformat (line_input, "%d", &sw_if_index))
+	    ;
+	  else if (unformat (line_input, "%U", unformat_vnet_sw_interface, vnm,
+			     &sw_if_index))
+	    ;
+	  else
+	    {
+	      error = clib_error_return (0, "unknown input `%U'",
+					 format_unformat_error, line_input);
+	      break;
+	    }
+	}
+      unformat_free (line_input);
     }
 
-  unformat_free (line_input);
+  if (error)
+    ;
+  else if (sw_if_index == ~0)
+    error = clib_error_return (0, "interface name or sw_if_index required");
+  else
+    {
+      int r;
 
-  if (sw_if_index == ~0)
-    return clib_error_return (0, "interface name or sw_if_index required");
+      r = lcp_itf_pair_delete (sw_if_index);
+      if (r)
+	error = clib_error_return (0, "linux-cp pair deletion failed (%d)", r);
+    }
 
-  r = lcp_itf_pair_delete (sw_if_index);
-
-  if (r)
-    return clib_error_return (0, "linux-cp pair deletion failed (%d)", r);
-  return 0;
+  return error;
 }
 
 VLIB_CLI_COMMAND (lcp_itf_pair_delete_command, static) = {

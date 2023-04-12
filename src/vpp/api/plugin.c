@@ -161,6 +161,7 @@ vat_load_new_plugins (plugin_main_t * pm)
 	  if (p == 0)
 	    {
 	      vec_add2 (pm->plugin_info, pi, 1);
+	      clib_memset (pi, 0, sizeof (*pi));
 	      pi->name = plugin_name;
 	      pi->filename = file_name;
 	      pi->file_info = statb;
@@ -169,10 +170,9 @@ vat_load_new_plugins (plugin_main_t * pm)
 		{
 		  vec_free (file_name);
 		  vec_free (plugin_name);
-		  _vec_len (pm->plugin_info) = vec_len (pm->plugin_info) - 1;
+		  vec_set_len (pm->plugin_info, vec_len (pm->plugin_info) - 1);
 		  continue;
 		}
-	      clib_memset (pi, 0, sizeof (*pi));
 	      hash_set_mem (pm->plugin_by_name_hash, plugin_name,
 			    pi - pm->plugin_info);
 	    }

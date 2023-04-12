@@ -93,24 +93,14 @@ typedef struct hash_header
 
   /* Bit i is set if pair i is a user object (as opposed to being
      either zero or an indirect array of pairs). */
-  uword is_user[0];
+  uword *is_user;
 } hash_t;
-
-/* Hash header size in bytes */
-always_inline uword
-hash_header_bytes (void *v)
-{
-  hash_t *h;
-  uword is_user_bytes =
-    (sizeof (h->is_user[0]) * vec_len (v)) / BITS (h->is_user[0]);
-  return sizeof (h[0]) + is_user_bytes;
-}
 
 /* Returns a pointer to the hash header given the vector pointer */
 always_inline hash_t *
 hash_header (void *v)
 {
-  return vec_header (v, hash_header_bytes (v));
+  return vec_header (v);
 }
 
 /* Number of elements in the hash table */
@@ -133,8 +123,9 @@ always_inline uword
 hash_is_user (void *v, uword i)
 {
   hash_t *h = hash_header (v);
-  uword i0 = i / BITS (h->is_user[0]);
-  uword i1 = i % BITS (h->is_user[0]);
+  uword bits = BITS (h->is_user[0]);
+  uword i0 = i / bits;
+  uword i1 = i % bits;
   return (h->is_user[i0] & ((uword) 1 << i1)) != 0;
 }
 
@@ -278,9 +269,20 @@ uword hash_bytes (void *v);
 always_inline void
 hash_set_mem_alloc (uword ** h, const void *key, uword v)
 {
+  int objsize = __builtin_object_size (key, 0);
   size_t ksz = hash_header (*h)->user;
-  void *copy = clib_mem_alloc (ksz);
-  clib_memcpy_fast (copy, key, ksz);
+  void *copy;
+  if (objsize > 0)
+    {
+      ASSERT (objsize == ksz);
+      copy = clib_mem_alloc (objsize);
+      clib_memcpy_fast (copy, key, objsize);
+    }
+  else
+    {
+      copy = clib_mem_alloc (ksz);
+      clib_memcpy_fast (copy, key, ksz);
+    }
   hash_set_mem (*h, copy, v);
 }
 
@@ -525,6 +527,12 @@ do {						\
 #define hash_mix64_step_2(a,b,c) hash_mix_step(a,b,c,38,23,5)
 #define hash_mix64_step_3(a,b,c) hash_mix_step(a,b,c,35,49,11)
 #define hash_mix64_step_4(a,b,c) hash_mix_step(a,b,c,12,18,22)
+
+#if uword_bits == 64
+#define hash_mix(a, b, c) hash_mix64 (a, b, c)
+#else
+#define hash_mix(a, b, c) hash_mix32 (a, b, c)
+#endif
 
 /* Hash function based on that of Bob Jenkins (bob_jenkins@compuserve.com).
    Thanks, Bob. */

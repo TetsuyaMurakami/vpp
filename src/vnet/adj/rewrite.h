@@ -67,6 +67,8 @@ typedef enum vnet_rewrite_flags_t_
   VNET_REWRITE_FIXUP_FLOW_HASH = (1 << 2),
 } __attribute__ ((packed)) vnet_rewrite_flags_t;
 
+extern u8 *format_vnet_rewrite_flags (u8 *s, va_list *ap);
+
 typedef struct vnet_rewrite_header_t_
 {
   /* Interface to mark re-written packets with. */
@@ -134,7 +136,7 @@ always_inline void
 vnet_rewrite_clear_data_internal (vnet_rewrite_header_t * rw, int max_size)
 {
   /* Sanity check values carefully for this clib_memset operation */
-  ASSERT ((max_size > 0) && (max_size < VLIB_BUFFER_PRE_DATA_SIZE));
+  ASSERT ((max_size > 0) && (max_size < VNET_REWRITE_TOTAL_BYTES));
 
   rw->data_bytes = 0;
   clib_memset (rw->data, 0xfe, max_size);
@@ -145,7 +147,7 @@ vnet_rewrite_set_data_internal (vnet_rewrite_header_t * rw,
 				int max_size, void *data, int data_bytes)
 {
   /* Sanity check values carefully for this clib_memset operation */
-  ASSERT ((max_size > 0) && (max_size < VLIB_BUFFER_PRE_DATA_SIZE));
+  ASSERT ((max_size > 0) && (max_size < VNET_REWRITE_TOTAL_BYTES));
   ASSERT ((data_bytes >= 0) && (data_bytes < max_size));
 
   rw->data_bytes = data_bytes;

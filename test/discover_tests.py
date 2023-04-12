@@ -7,14 +7,12 @@ import importlib
 import argparse
 
 
-def discover_tests(directory, callback, ignore_path):
+def discover_tests(directory, callback):
     do_insert = True
     for _f in os.listdir(directory):
         f = "%s/%s" % (directory, _f)
         if os.path.isdir(f):
-            if ignore_path is not None and f.startswith(ignore_path):
-                continue
-            discover_tests(f, callback, ignore_path)
+            discover_tests(f, callback)
             continue
         if not os.path.isfile(f):
             continue
@@ -41,18 +39,3 @@ def discover_tests(directory, callback, ignore_path):
 
 def print_callback(file_name, cls, method):
     print("%s.%s.%s" % (file_name, cls.__name__, method))
-
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Discover VPP unit tests")
-    parser.add_argument("-d", "--dir", action='append', type=str,
-                        help="directory containing test files "
-                             "(may be specified multiple times)")
-    args = parser.parse_args()
-    if args.dir is None:
-        args.dir = "."
-
-    ignore_path = os.getenv("VENV_PATH", "")
-    suite = unittest.TestSuite()
-    for d in args.dir:
-        discover_tests(d, print_callback, ignore_path)

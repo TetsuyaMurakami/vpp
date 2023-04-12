@@ -25,6 +25,7 @@
 #include <vlib/unix/unix.h>
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/devices/devices.h>
+#include <vnet/interface/rx_queue_funcs.h>
 
 #include <marvell/pp2/pp2.h>
 
@@ -58,14 +59,16 @@ mrvl_pp2_input_trace (vlib_main_t * vm, vlib_node_runtime_t * node, u32 next0,
 		      vlib_buffer_t * b0, uword * n_trace,
 		      mrvl_pp2_if_t * ppif, struct pp2_ppio_desc *d)
 {
-  mrvl_pp2_input_trace_t *tr;
-  vlib_trace_buffer (vm, node, next0, b0,
-		     /* follow_chain */ 0);
-  vlib_set_trace_count (vm, node, --(*n_trace));
-  tr = vlib_add_trace (vm, node, b0, sizeof (*tr));
-  tr->next_index = next0;
-  tr->hw_if_index = ppif->hw_if_index;
-  clib_memcpy_fast (&tr->desc, d, sizeof (struct pp2_ppio_desc));
+  if (PREDICT_TRUE (
+	vlib_trace_buffer (vm, node, next0, b0, /* follow_chain */ 0)))
+    {
+      mrvl_pp2_input_trace_t *tr;
+      vlib_set_trace_count (vm, node, --(*n_trace));
+      tr = vlib_add_trace (vm, node, b0, sizeof (*tr));
+      tr->next_index = next0;
+      tr->hw_if_index = ppif->hw_if_index;
+      clib_memcpy_fast (&tr->desc, d, sizeof (struct pp2_ppio_desc));
+    }
 }
 
 static_always_inline u16
@@ -230,9 +233,6 @@ mrvl_pp2_device_input_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  clib_memcpy_fast (vnet_buffer (b1)->sw_if_index, sw_if_index,
 			    sizeof (sw_if_index));
 
-	  VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b0);
-	  VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b1);
-
 	  if (PREDICT_FALSE (n_trace > 0))
 	    {
 	      mrvl_pp2_input_trace (vm, node, next0, b0, &n_trace, ppif, d);
@@ -273,8 +273,6 @@ mrvl_pp2_device_input_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 
 	  clib_memcpy_fast (vnet_buffer (b0)->sw_if_index, sw_if_index,
 			    sizeof (sw_if_index));
-
-	  VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b0);
 
 	  if (PREDICT_FALSE (n_trace > 0))
 	    mrvl_pp2_input_trace (vm, node, next0, b0, &n_trace, ppif, d);

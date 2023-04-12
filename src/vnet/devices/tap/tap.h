@@ -44,7 +44,8 @@ typedef struct
   u32 id;
   u8 mac_addr_set;
   mac_address_t mac_addr;
-  u8 num_rx_queues;
+  u16 num_rx_queues;
+  u16 num_tx_queues;
   u16 rx_ring_sz;
   u16 tx_ring_sz;
   u32 tap_flags;
@@ -98,8 +99,10 @@ typedef struct
 
   /* host mtu size, configurable through startup.conf */
   int host_mtu_size;
+  u16 msg_id_base;
 } tap_main_t;
 
+extern tap_main_t tap_main;
 void tap_create_if (vlib_main_t * vm, tap_create_if_args_t * args);
 int tap_delete_if (vlib_main_t * vm, u32 sw_if_index);
 int tap_gso_enable_disable (vlib_main_t * vm, u32 sw_if_index,

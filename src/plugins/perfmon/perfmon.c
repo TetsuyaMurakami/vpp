@@ -48,8 +48,8 @@ perfmon_reset (vlib_main_t *vm)
   uword page_size = clib_mem_get_page_size ();
 
   if (pm->is_running)
-    for (int i = 0; i < vec_len (vlib_mains); i++)
-      vlib_node_set_dispatch_wrapper (vlib_mains[i], 0);
+    for (int i = 0; i < vlib_get_n_threads (); i++)
+      vlib_node_set_dispatch_wrapper (vlib_get_main_by_index (i), 0);
 
   for (int i = 0; i < vec_len (pm->fds_to_close); i++)
     close (pm->fds_to_close[i]);
@@ -70,7 +70,7 @@ perfmon_reset (vlib_main_t *vm)
       vec_free (tr->node_stats);
       for (int j = 0; j < PERF_MAX_EVENTS; j++)
 	if (tr->mmap_pages[j])
-	  munmap (tr->mmap_pages, page_size);
+	  munmap (tr->mmap_pages[j], page_size);
     }
   vec_free (pm->thread_runtimes);
 
@@ -79,7 +79,7 @@ perfmon_reset (vlib_main_t *vm)
   pm->active_bundle = 0;
 }
 
-clib_error_t *
+static clib_error_t *
 perfmon_set (vlib_main_t *vm, perfmon_bundle_t *b)
 {
   clib_error_t *err = 0;
@@ -97,14 +97,14 @@ perfmon_set (vlib_main_t *vm, perfmon_bundle_t *b)
   s = b->src;
   ASSERT (b->n_events);
 
-  if (b->type == PERFMON_BUNDLE_TYPE_NODE)
+  if (b->active_type == PERFMON_BUNDLE_TYPE_NODE)
     is_node = 1;
 
   if (s->instances_by_type == 0)
     {
       vec_add2 (pm->default_instance_type, it, 1);
       it->name = is_node ? "Thread/Node" : "Thread";
-      for (int i = 0; i < vec_len (vlib_mains); i++)
+      for (int i = 0; i < vlib_get_n_threads (); i++)
 	{
 	  vlib_worker_thread_t *w = vlib_worker_threads + i;
 	  perfmon_instance_t *in;
@@ -114,7 +114,7 @@ perfmon_set (vlib_main_t *vm, perfmon_bundle_t *b)
 	  in->name = (char *) format (0, "%s (%u)%c", w->name, i, 0);
 	}
       if (is_node)
-	vec_validate (pm->thread_runtimes, vec_len (vlib_mains) - 1);
+	vec_validate (pm->thread_runtimes, vlib_get_n_threads () - 1);
     }
   else
     {
@@ -141,15 +141,19 @@ perfmon_set (vlib_main_t *vm, perfmon_bundle_t *b)
 
       vec_validate (pm->group_fds, i);
       pm->group_fds[i] = -1;
+      u8 n_events_opened = 0;
 
       for (int j = 0; j < b->n_events; j++)
 	{
 	  int fd;
 	  perfmon_event_t *e = s->events + b->events[j];
+	  if (!e->implemented)
+	    continue;
 	  struct perf_event_attr pe = {
 	    .size = sizeof (struct perf_event_attr),
 	    .type = e->type_from_instance ? in->type : e->type,
 	    .config = e->config,
+	    .config1 = e->config1,
 	    .exclude_kernel = e->exclude_kernel,
 	    .read_format =
 	      (PERF_FORMAT_GROUP | PERF_FORMAT_TOTAL_TIME_ENABLED |
@@ -157,6 +161,7 @@ perfmon_set (vlib_main_t *vm, perfmon_bundle_t *b)
 	    .disabled = 1,
 	  };
 
+	perf_event_open:
 	  log_debug ("perf_event_open pe.type=%u pe.config=0x%x pid=%d "
 		     "cpu=%d group_fd=%d",
 		     pe.type, pe.config, in->pid, in->cpu, pm->group_fds[i]);
@@ -165,8 +170,17 @@ perfmon_set (vlib_main_t *vm, perfmon_bundle_t *b)
 
 	  if (fd == -1)
 	    {
-	      err = clib_error_return_unix (0, "perf_event_open");
-	      goto error;
+	      if (errno ==
+		  EOPNOTSUPP) /* 64b counters not supported on aarch64 */
+		{
+		  pe.config1 = 2; /* retry with 32b counter width */
+		  goto perf_event_open;
+		}
+	      else
+		{
+		  err = clib_error_return_unix (0, "perf_event_open");
+		  goto error;
+		}
 	    }
 
 	  vec_add1 (pm->fds_to_close, fd);
@@ -178,23 +192,26 @@ perfmon_set (vlib_main_t *vm, perfmon_bundle_t *b)
 	    {
 	      perfmon_thread_runtime_t *tr;
 	      tr = vec_elt_at_index (pm->thread_runtimes, i);
-	      tr->mmap_pages[j] =
+	      tr->mmap_pages[n_events_opened] =
 		mmap (0, page_size, PROT_READ, MAP_SHARED, fd, 0);
 
-	      if (tr->mmap_pages[j] == MAP_FAILED)
+	      if (tr->mmap_pages[n_events_opened] == MAP_FAILED)
 		{
 		  err = clib_error_return_unix (0, "mmap");
 		  goto error;
 		}
 	    }
+	  n_events_opened++;
 	}
 
-      if (is_node)
+      if (is_node && n_events_opened)
 	{
 	  perfmon_thread_runtime_t *rt;
 	  rt = vec_elt_at_index (pm->thread_runtimes, i);
-	  rt->n_events = b->n_events;
+	  rt->bundle = b;
+	  rt->n_events = n_events_opened;
 	  rt->n_nodes = n_nodes;
+	  rt->preserve_samples = b->preserve_samples;
 	  vec_validate_aligned (rt->node_stats, n_nodes - 1,
 				CLIB_CACHE_LINE_BYTES);
 	}
@@ -212,16 +229,19 @@ error:
 }
 
 clib_error_t *
-perfmon_start (vlib_main_t *vm)
+perfmon_start (vlib_main_t *vm, perfmon_bundle_t *b)
 {
+  clib_error_t *err = 0;
   perfmon_main_t *pm = &perfmon_main;
-  int n_groups = vec_len (pm->group_fds);
-
-  if (n_groups == 0)
-    return clib_error_return (0, "no bundle configured");
+  int n_groups;
 
   if (pm->is_running == 1)
     return clib_error_return (0, "already running");
+
+  if ((err = perfmon_set (vm, b)) != 0)
+    return err;
+
+  n_groups = vec_len (pm->group_fds);
 
   for (int i = 0; i < n_groups; i++)
     {
@@ -232,13 +252,23 @@ perfmon_start (vlib_main_t *vm)
 	  return clib_error_return_unix (0, "ioctl(PERF_EVENT_IOC_ENABLE)");
 	}
     }
-  if (pm->active_bundle->type == PERFMON_BUNDLE_TYPE_NODE)
+  if (b->active_type == PERFMON_BUNDLE_TYPE_NODE)
     {
-      for (int i = 0; i < vec_len (vlib_mains); i++)
-	vlib_node_set_dispatch_wrapper (vlib_mains[i],
-					perfmon_dispatch_wrapper);
+      vlib_node_function_t *dispatch_wrapper = NULL;
+      err = b->src->config_dispatch_wrapper (b, &dispatch_wrapper);
+      if (err || !dispatch_wrapper)
+	{
+	  perfmon_reset (vm);
+	  return err;
+	}
+
+      for (int i = 0; i < vlib_get_n_threads (); i++)
+	vlib_node_set_dispatch_wrapper (vlib_get_main_by_index (i),
+					dispatch_wrapper);
     }
+  pm->sample_time = vlib_time_now (vm);
   pm->is_running = 1;
+
   return 0;
 }
 
@@ -251,10 +281,10 @@ perfmon_stop (vlib_main_t *vm)
   if (pm->is_running != 1)
     return clib_error_return (0, "not running");
 
-  if (pm->active_bundle->type == PERFMON_BUNDLE_TYPE_NODE)
+  if (pm->active_bundle->active_type == PERFMON_BUNDLE_TYPE_NODE)
     {
-      for (int i = 0; i < vec_len (vlib_mains); i++)
-	vlib_node_set_dispatch_wrapper (vlib_mains[i], 0);
+      for (int i = 0; i < vlib_get_n_threads (); i++)
+	vlib_node_set_dispatch_wrapper (vlib_get_main_by_index (i), 0);
     }
 
   for (int i = 0; i < n_groups; i++)
@@ -268,6 +298,7 @@ perfmon_stop (vlib_main_t *vm)
     }
 
   pm->is_running = 0;
+  pm->sample_time = vlib_time_now (vm) - pm->sample_time;
   return 0;
 }
 
@@ -294,7 +325,7 @@ perfmon_init (vlib_main_t *vm)
 	}
 
       hash_set_mem (pm->source_by_name, s->name, s);
-      log_debug ("source '%s' regisrtered", s->name);
+      log_debug ("source '%s' registered", s->name);
       s = s->next;
     }
 
@@ -303,8 +334,6 @@ perfmon_init (vlib_main_t *vm)
     {
       clib_error_t *err;
       uword *p;
-      if (hash_get_mem (pm->bundle_by_name, b->name) != 0)
-	clib_panic ("duplicate bundle name '%s'", b->name);
 
       if ((p = hash_get_mem (pm->source_by_name, b->source)) == 0)
 	{
@@ -315,6 +344,13 @@ perfmon_init (vlib_main_t *vm)
 	}
 
       b->src = (perfmon_source_t *) p[0];
+      if (b->src->bundle_support && !b->src->bundle_support (b))
+	{
+	  log_debug ("skipping bundle '%s' - not supported", b->name);
+	  b = b->next;
+	  continue;
+	}
+
       if (b->init_fn && ((err = (b->init_fn) (vm, b))))
 	{
 	  log_warn ("skipping bundle '%s' - %U", b->name, format_clib_error,
@@ -324,8 +360,11 @@ perfmon_init (vlib_main_t *vm)
 	  continue;
 	}
 
+      if (hash_get_mem (pm->bundle_by_name, b->name) != 0)
+	clib_panic ("duplicate bundle name '%s'", b->name);
+
       hash_set_mem (pm->bundle_by_name, b->name, b);
-      log_debug ("bundle '%s' regisrtered", b->name);
+      log_debug ("bundle '%s' registered", b->name);
 
       b = b->next;
     }

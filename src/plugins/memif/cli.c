@@ -33,7 +33,7 @@ memif_socket_filename_create_command_fn (vlib_main_t * vm,
 					 vlib_cli_command_t * cmd)
 {
   unformat_input_t _line_input, *line_input = &_line_input;
-  int r;
+  clib_error_t *err;
   u32 socket_id;
   u8 *socket_filename;
 
@@ -53,6 +53,7 @@ memif_socket_filename_create_command_fn (vlib_main_t * vm,
       else
 	{
 	  vec_free (socket_filename);
+	  unformat_free (line_input);
 	  return clib_error_return (0, "unknown input `%U'",
 				    format_unformat_error, input);
 	}
@@ -72,28 +73,11 @@ memif_socket_filename_create_command_fn (vlib_main_t * vm,
       return clib_error_return (0, "Invalid socket filename");
     }
 
-  r = memif_socket_filename_add_del (1, socket_id, socket_filename);
+  err = memif_socket_filename_add_del (1, socket_id, (char *) socket_filename);
 
   vec_free (socket_filename);
 
-  if (r < 0)
-    {
-      switch (r)
-	{
-	case VNET_API_ERROR_INVALID_ARGUMENT:
-	  return clib_error_return (0, "Invalid argument");
-	case VNET_API_ERROR_SYSCALL_ERROR_1:
-	  return clib_error_return (0, "Syscall error 1");
-	case VNET_API_ERROR_ENTRY_ALREADY_EXISTS:
-	  return clib_error_return (0, "Already exists");
-	case VNET_API_ERROR_UNEXPECTED_INTF_STATE:
-	  return clib_error_return (0, "Interface still in use");
-	default:
-	  return clib_error_return (0, "Unknown error");
-	}
-    }
-
-  return 0;
+  return err;
 }
 
 /* *INDENT-OFF* */
@@ -110,7 +94,6 @@ memif_socket_filename_delete_command_fn (vlib_main_t * vm,
 					 vlib_cli_command_t * cmd)
 {
   unformat_input_t _line_input, *line_input = &_line_input;
-  int r;
   u32 socket_id;
 
   /* Get a line of input. */
@@ -125,6 +108,7 @@ memif_socket_filename_delete_command_fn (vlib_main_t * vm,
 	;
       else
 	{
+	  unformat_free (line_input);
 	  return clib_error_return (0, "unknown input `%U'",
 				    format_unformat_error, input);
 	}
@@ -137,26 +121,7 @@ memif_socket_filename_delete_command_fn (vlib_main_t * vm,
       return clib_error_return (0, "Invalid socket id");
     }
 
-  r = memif_socket_filename_add_del (0, socket_id, 0);
-
-  if (r < 0)
-    {
-      switch (r)
-	{
-	case VNET_API_ERROR_INVALID_ARGUMENT:
-	  return clib_error_return (0, "Invalid argument");
-	case VNET_API_ERROR_SYSCALL_ERROR_1:
-	  return clib_error_return (0, "Syscall error 1");
-	case VNET_API_ERROR_ENTRY_ALREADY_EXISTS:
-	  return clib_error_return (0, "Already exists");
-	case VNET_API_ERROR_UNEXPECTED_INTF_STATE:
-	  return clib_error_return (0, "Interface still in use");
-	default:
-	  return clib_error_return (0, "Unknown error");
-	}
-    }
-
-  return 0;
+  return memif_socket_filename_add_del (0, socket_id, 0);
 }
 
 /* *INDENT-OFF* */
@@ -172,7 +137,7 @@ memif_create_command_fn (vlib_main_t * vm, unformat_input_t * input,
 			 vlib_cli_command_t * cmd)
 {
   unformat_input_t _line_input, *line_input = &_line_input;
-  int r;
+  clib_error_t *err;
   u32 ring_size = MEMIF_DEFAULT_RING_SIZE;
   memif_create_if_args_t args = { 0 };
   args.buffer_size = MEMIF_DEFAULT_BUFFER_SIZE;
@@ -213,8 +178,11 @@ memif_create_command_fn (vlib_main_t * vm, unformat_input_t * input,
 			 unformat_ethernet_address, args.hw_addr))
 	args.hw_addr_set = 1;
       else
-	return clib_error_return (0, "unknown input `%U'",
-				  format_unformat_error, input);
+	{
+	  unformat_free (line_input);
+	  return clib_error_return (0, "unknown input `%U'",
+				    format_unformat_error, input);
+	}
     }
   unformat_free (line_input);
 
@@ -234,24 +202,11 @@ memif_create_command_fn (vlib_main_t * vm, unformat_input_t * input,
   args.rx_queues = rx_queues;
   args.tx_queues = tx_queues;
 
-  r = memif_create_if (vm, &args);
+  err = memif_create_if (vm, &args);
 
   vec_free (args.secret);
 
-  if (r <= VNET_API_ERROR_SYSCALL_ERROR_1
-      && r >= VNET_API_ERROR_SYSCALL_ERROR_10)
-    return clib_error_return (0, "%s (errno %d)", strerror (errno), errno);
-
-  if (r == VNET_API_ERROR_INVALID_ARGUMENT)
-    return clib_error_return (0, "Invalid argument");
-
-  if (r == VNET_API_ERROR_INVALID_INTERFACE)
-    return clib_error_return (0, "Invalid interface name");
-
-  if (r == VNET_API_ERROR_SUBIF_ALREADY_EXISTS)
-    return clib_error_return (0, "Interface with same id already exists");
-
-  return 0;
+  return err;
 }
 
 /* *INDENT-OFF* */
@@ -289,8 +244,11 @@ memif_delete_command_fn (vlib_main_t * vm, unformat_input_t * input,
 			 vnm, &sw_if_index))
 	;
       else
-	return clib_error_return (0, "unknown input `%U'",
-				  format_unformat_error, input);
+	{
+	  unformat_free (line_input);
+	  return clib_error_return (0, "unknown input `%U'",
+				    format_unformat_error, input);
+	}
     }
   unformat_free (line_input);
 
@@ -378,23 +336,22 @@ format_memif_descriptor (u8 * s, va_list * args)
   if (ring)
     {
       s = format (s, "%Udescriptor table:\n", format_white_space, indent);
-      s =
-	format (s,
-		"%Uid    flags   len         address       offset    user address\n",
-		format_white_space, indent);
-      s =
-	format (s,
-		"%U===== ===== ======== ================== ====== ==================\n",
-		format_white_space, indent);
+      s = format (s,
+		  "%Uid    flags region len         address         offset    "
+		  "    user address\n",
+		  format_white_space, indent);
+      s = format (s,
+		  "%U===== ===== ====== ======== ================== "
+		  "========== ==================\n",
+		  format_white_space, indent);
       for (slot = 0; slot < ring_size; slot++)
 	{
-	  s = format (s, "%U%-5d %-5d %-7d  0x%016lx %-6d 0x%016lx\n",
-		      format_white_space, indent, slot,
-		      ring->desc[slot].flags,
-		      ring->desc[slot].length,
+	  s = format (s, "%U%-5d %-5d %-6d %-7d  0x%016lx %-10d 0x%016lx\n",
+		      format_white_space, indent, slot, ring->desc[slot].flags,
+		      ring->desc[slot].region, ring->desc[slot].length,
 		      mif->regions[ring->desc[slot].region].shm,
-		      ring->desc[slot].offset, memif_get_buffer (mif, ring,
-								 slot));
+		      ring->desc[slot].offset,
+		      memif_get_buffer (mif, ring, slot));
 	}
       s = format (s, "\n");
     }

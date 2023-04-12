@@ -172,7 +172,7 @@ tuntap_tx (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 
       /* Re-set iovecs if present. */
       if (tm->threads[thread_index].iovecs)
-	_vec_len (tm->threads[thread_index].iovecs) = 0;
+	vec_set_len (tm->threads[thread_index].iovecs, 0);
 
       /** VLIB buffer chain -> Unix iovec(s). */
       vec_add2 (tm->threads[thread_index].iovecs, iov, 1);
@@ -260,7 +260,7 @@ tuntap_rx (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 	  vlib_buffer_alloc (vm,
 			     tm->threads[thread_index].rx_buffers + n_left,
 			     VLIB_FRAME_SIZE - n_left);
-	_vec_len (tm->threads[thread_index].rx_buffers) = n_left + n_alloc;
+	vec_set_len (tm->threads[thread_index].rx_buffers, n_left + n_alloc);
       }
   }
 
@@ -324,7 +324,7 @@ tuntap_rx (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
        + VNET_INTERFACE_COUNTER_RX,
        thread_index, tm->sw_if_index, 1, n_bytes_in_packet);
 
-    _vec_len (tm->threads[thread_index].rx_buffers) = i_rx;
+    vec_set_len (tm->threads[thread_index].rx_buffers, i_rx);
   }
 
   b = vlib_get_buffer (vm, bi);
@@ -335,14 +335,6 @@ tuntap_rx (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 
     vnet_buffer (b)->sw_if_index[VLIB_RX] = tm->sw_if_index;
     vnet_buffer (b)->sw_if_index[VLIB_TX] = (u32) ~ 0;
-
-    /*
-     * Turn this on if you run into
-     * "bad monkey" contexts, and you want to know exactly
-     * which nodes they've visited...
-     */
-    if (VLIB_BUFFER_TRACE_TRAJECTORY)
-      b->pre_data[0] = 0;
 
     b->error = node->errors[0];
 
@@ -632,12 +624,12 @@ tuntap_config (vlib_main_t * vm, unformat_input_t * input)
   if (have_normal_interface)
     {
       vnet_main_t *vnm = vnet_get_main ();
-      error = ethernet_register_interface
-	(vnm, tuntap_dev_class.index, 0 /* device instance */ ,
-	 tm->ether_dst_mac /* ethernet address */ ,
-	 &tm->hw_if_index, 0 /* flag change */ );
-      if (error)
-	clib_error_report (error);
+      vnet_eth_interface_registration_t eir = {};
+
+      eir.dev_class_index = tuntap_dev_class.index;
+      eir.address = tm->ether_dst_mac;
+      tm->hw_if_index = vnet_eth_register_interface (vnm, &eir);
+
       tm->sw_if_index = tm->hw_if_index;
       vm->os_punt_frame = tuntap_nopunt_frame;
     }
@@ -920,7 +912,7 @@ tuntap_punt_frame (vlib_main_t * vm,
 		   vlib_node_runtime_t * node, vlib_frame_t * frame)
 {
   tuntap_tx (vm, node, frame);
-  vlib_frame_free (vm, node, frame);
+  vlib_frame_free (vm, frame);
 }
 
 /**
@@ -938,7 +930,7 @@ tuntap_nopunt_frame (vlib_main_t * vm,
   u32 *buffers = vlib_frame_vector_args (frame);
   uword n_packets = frame->n_vectors;
   vlib_buffer_free (vm, buffers, n_packets);
-  vlib_frame_free (vm, node, frame);
+  vlib_frame_free (vm, frame);
 }
 
 /* *INDENT-OFF* */

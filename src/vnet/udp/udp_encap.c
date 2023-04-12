@@ -47,8 +47,7 @@ static void
 udp_encap_restack (udp_encap_t * ue)
 {
   dpo_stack (udp_encap_dpo_types[ue->ue_ip_proto],
-	     fib_proto_to_dpo (ue->ue_ip_proto),
-	     &ue->ue_dpo,
+	     fib_proto_to_dpo (ue->ue_ip_proto), &ue->ue_dpo,
 	     fib_entry_contribute_ip_forwarding (ue->ue_fib_entry_index));
 }
 
@@ -64,7 +63,7 @@ udp_encap_add_and_lock (fib_protocol_t proto,
   u8 pfx_len = 0;
   index_t uei;
 
-  pool_get_aligned (udp_encap_pool, ue, CLIB_CACHE_LINE_BYTES);
+  pool_get_aligned_zero (udp_encap_pool, ue, CLIB_CACHE_LINE_BYTES);
   uei = ue - udp_encap_pool;
 
   vlib_validate_combined_counter (&(udp_encap_counters), uei);
@@ -196,6 +195,20 @@ udp_encap_dpo_unlock (dpo_id_t * dpo)
   fib_node_unlock (&ue->ue_fib_node);
 }
 
+u8 *
+format_udp_encap_fixup_flags (u8 *s, va_list *args)
+{
+  udp_encap_fixup_flags_t flags = va_arg (*args, udp_encap_fixup_flags_t);
+
+  if (flags == UDP_ENCAP_FIXUP_NONE)
+    return format (s, "none");
+
+  if (flags & UDP_ENCAP_FIXUP_UDP_SRC_PORT_ENTROPY)
+    s = format (s, "%s", "src-port-is-entropy");
+
+  return (s);
+}
+
 static u8 *
 format_udp_encap_i (u8 * s, va_list * args)
 {
@@ -211,23 +224,21 @@ format_udp_encap_i (u8 * s, va_list * args)
   s = format (s, "udp-encap:[%d]: ip-fib-index:%d ", uei, ue->ue_fib_index);
   if (FIB_PROTOCOL_IP4 == ue->ue_ip_proto)
     {
-      s = format (s, "ip:[src:%U, dst:%U] udp:[src:%d, dst:%d]",
-		  format_ip4_address,
-		  &ue->ue_hdrs.ip4.ue_ip4.src_address,
-		  format_ip4_address,
-		  &ue->ue_hdrs.ip4.ue_ip4.dst_address,
+      s = format (s, "ip:[src:%U, dst:%U] udp:[src:%d, dst:%d] flags:%U",
+		  format_ip4_address, &ue->ue_hdrs.ip4.ue_ip4.src_address,
+		  format_ip4_address, &ue->ue_hdrs.ip4.ue_ip4.dst_address,
 		  clib_net_to_host_u16 (ue->ue_hdrs.ip4.ue_udp.src_port),
-		  clib_net_to_host_u16 (ue->ue_hdrs.ip4.ue_udp.dst_port));
+		  clib_net_to_host_u16 (ue->ue_hdrs.ip4.ue_udp.dst_port),
+		  format_udp_encap_fixup_flags, ue->ue_flags);
     }
   else
     {
-      s = format (s, "ip:[src:%U, dst:%U] udp:[src:%d dst:%d]",
-		  format_ip6_address,
-		  &ue->ue_hdrs.ip6.ue_ip6.src_address,
-		  format_ip6_address,
-		  &ue->ue_hdrs.ip6.ue_ip6.dst_address,
+      s = format (s, "ip:[src:%U, dst:%U] udp:[src:%d dst:%d] flags:%U",
+		  format_ip6_address, &ue->ue_hdrs.ip6.ue_ip6.src_address,
+		  format_ip6_address, &ue->ue_hdrs.ip6.ue_ip6.dst_address,
 		  clib_net_to_host_u16 (ue->ue_hdrs.ip6.ue_udp.src_port),
-		  clib_net_to_host_u16 (ue->ue_hdrs.ip6.ue_udp.dst_port));
+		  clib_net_to_host_u16 (ue->ue_hdrs.ip6.ue_udp.dst_port),
+		  format_udp_encap_fixup_flags, ue->ue_flags);
     }
   vlib_get_combined_counter (&(udp_encap_counters), uei, &to);
   s = format (s, " to:[%Ld:%Ld]]", to.packets, to.bytes);
@@ -325,12 +336,12 @@ udp_encap_fib_last_lock_gone (fib_node_t * node)
 }
 
 const static char *const udp4_encap_ip4_nodes[] = {
-  "udp4-encap",
+  "udp4o4-encap",
   NULL,
 };
 
 const static char *const udp4_encap_ip6_nodes[] = {
-  "udp4-encap",
+  "udp6o4-encap",
   NULL,
 };
 
@@ -345,12 +356,12 @@ const static char *const udp4_encap_bier_nodes[] = {
 };
 
 const static char *const udp6_encap_ip4_nodes[] = {
-  "udp6-encap",
+  "udp4o6-encap",
   NULL,
 };
 
 const static char *const udp6_encap_ip6_nodes[] = {
-  "udp6-encap",
+  "udp6o6-encap",
   NULL,
 };
 
@@ -554,10 +565,12 @@ udp_encap_show (vlib_main_t * vm,
 /* *INDENT-OFF* */
 VLIB_CLI_COMMAND (udp_encap_add_command, static) = {
   .path = "udp encap",
-  .short_help = "udp encap [add|del] <id ID> <src-ip> <dst-ip> [<src-port>] <dst-port>  [src-port-is-entropy] [table-id <table>]",
+  .short_help = "udp encap [add|del] <id ID> <src-ip> <dst-ip> [<src-port>] "
+		"<dst-port> [src-port-is-entropy] [table-id <table>]",
   .function = udp_encap_cli,
   .is_mp_safe = 1,
 };
+
 VLIB_CLI_COMMAND (udp_encap_show_command, static) = {
   .path = "show udp encap",
   .short_help = "show udp encap [ID]",

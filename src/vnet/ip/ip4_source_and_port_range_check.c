@@ -99,48 +99,31 @@ static inline u32
 check_adj_port_range_x1 (const protocol_port_range_dpo_t * ppr_dpo,
 			 u16 dst_port, u32 next)
 {
-  u16x8vec_t key;
-  u16x8vec_t diff1;
-  u16x8vec_t diff2;
-  u16x8vec_t sum, sum_equal_diff2;
-  u16 sum_nonzero, sum_equal, winner_mask;
+#ifdef CLIB_HAVE_VEC128
+  u16x8 key = u16x8_splat (dst_port);
+#endif
   int i;
 
   if (NULL == ppr_dpo || dst_port == 0)
     return IP4_SOURCE_AND_PORT_RANGE_CHECK_NEXT_DROP;
 
-  /* Make the obvious screw-case work. A variant also works w/ no MMX */
-  if (PREDICT_FALSE (dst_port == 65535))
-    {
-      int j;
-
-      for (i = 0;
-	   i < VLIB_BUFFER_PRE_DATA_SIZE / sizeof (protocol_port_range_t);
-	   i++)
-	{
-	  for (j = 0; j < 8; j++)
-	    if (ppr_dpo->blocks[i].low.as_u16[j] == 65535)
-	      return next;
-	}
-      return IP4_SOURCE_AND_PORT_RANGE_CHECK_NEXT_DROP;
-    }
-
-  key.as_u16x8 = u16x8_splat (dst_port);
 
   for (i = 0; i < ppr_dpo->n_used_blocks; i++)
+#ifdef CLIB_HAVE_VEC128
+    if (!u16x8_is_all_zero ((ppr_dpo->blocks[i].low.as_u16x8 <= key) &
+			    (ppr_dpo->blocks[i].hi.as_u16x8 >= key)))
+      return next;
+#else
     {
-      diff1.as_u16x8 =
-	u16x8_sub_saturate (ppr_dpo->blocks[i].low.as_u16x8, key.as_u16x8);
-      diff2.as_u16x8 =
-	u16x8_sub_saturate (ppr_dpo->blocks[i].hi.as_u16x8, key.as_u16x8);
-      sum.as_u16x8 = diff1.as_u16x8 + diff2.as_u16x8;
-      sum_equal_diff2.as_u16x8 = (sum.as_u16x8 == diff2.as_u16x8);
-      sum_nonzero = ~u16x8_zero_byte_mask (sum.as_u16x8);
-      sum_equal = ~u16x8_zero_byte_mask (sum_equal_diff2.as_u16x8);
-      winner_mask = sum_nonzero & sum_equal;
-      if (winner_mask)
-	return next;
-    }
+      for (int j = 0; j < 8; j++)
+	{
+	  if ((ppr_dpo->blocks[i].low.as_u16[j] <= dst_port) &&
+	      (ppr_dpo->blocks[i].hi.as_u16[j] >= dst_port))
+	    return next;
+	}
+    };
+#endif
+
   return IP4_SOURCE_AND_PORT_RANGE_CHECK_NEXT_DROP;
 }
 
@@ -779,7 +762,8 @@ set_ip_source_and_port_range_check_fn (vlib_main_t * vm,
  * @cliexend
  *
  * Example of how to enable range checking on TX:
- * @cliexcmd{set interface ip source-and-port-range-check GigabitEthernet2/0/0 udp-in-vrf 7}
+ * @cliexcmd{set interface ip source-and-port-range-check GigabitEthernet2/0/0
+ * udp-in-vrf 7}
  *
  * Example of graph node after range checking is enabled:
  * @cliexstart{show vlib graph ip4-source-and-port-range-check-tx}
@@ -788,7 +772,7 @@ set_ip_source_and_port_range_check_fn (vlib_main_t * vm,
  *                              interface-output [1]
  * @cliexend
  *
- * Example of how to display the features enabed on an interface:
+ * Example of how to display the features enabled on an interface:
  * @cliexstart{show ip interface features GigabitEthernet2/0/0}
  * IP feature paths configured on GigabitEthernet2/0/0...
  *
@@ -1397,7 +1381,7 @@ show_source_and_port_range_check_fn (vlib_main_t * vm,
  * @cliexstart{show ip source-and-port-range-check vrf 7 172.16.2.0}
  * 172.16.2.0: 23 - 101
  * @cliexend
- * Example of how to test to determine of a given Pv4 address and port
+ * Example of how to test to determine of a given iPv4 address and port
  * are being validated:
  * @cliexstart{show ip source-and-port-range-check vrf 7 172.16.2.2 port 23}
  * 172.16.2.2 port 23 PASS

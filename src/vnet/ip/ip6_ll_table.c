@@ -111,12 +111,17 @@ ip6_ll_table_entry_update (const ip6_ll_prefix_t * ilp,
     .frp_flags = flags,
     .frp_sw_if_index = ilp->ilp_sw_if_index,
     .frp_proto = DPO_PROTO_IP6,
+    .frp_fib_index = ~0,
+    .frp_weight = 1,
   };
-  fib_prefix_t fp;
+  fib_prefix_t fp = { 0 };
 
-  vec_validate (ip6_ll_table.ilt_fibs, ilp->ilp_sw_if_index);
+  if (flags & FIB_ROUTE_PATH_LOCAL)
+    rpath.frp_addr.ip6 = ilp->ilp_addr;
 
-  if (0 == ip6_ll_fib_get (ilp->ilp_sw_if_index))
+  vec_validate_init_empty (ip6_ll_table.ilt_fibs, ilp->ilp_sw_if_index, ~0);
+
+  if (~0 == ip6_ll_fib_get (ilp->ilp_sw_if_index))
     {
       ip6_ll_fib_create (ilp->ilp_sw_if_index);
     }
@@ -151,11 +156,12 @@ ip6_ll_table_entry_delete (const ip6_ll_prefix_t * ilp)
    * if there are no ND sourced prefixes left, then we can clean up this FIB
    */
   fib_index = ip6_ll_fib_get (ilp->ilp_sw_if_index);
-  if (0 == fib_table_get_num_entries (fib_index,
-				      FIB_PROTOCOL_IP6, FIB_SOURCE_IP6_ND))
+  if (~0 != fib_index &&
+      0 == fib_table_get_num_entries (fib_index, FIB_PROTOCOL_IP6,
+				      FIB_SOURCE_IP6_ND))
     {
       fib_table_unlock (fib_index, FIB_PROTOCOL_IP6, FIB_SOURCE_IP6_ND);
-      ip6_ll_table.ilt_fibs[ilp->ilp_sw_if_index] = 0;
+      ip6_ll_table.ilt_fibs[ilp->ilp_sw_if_index] = ~0;
     }
 }
 
@@ -273,8 +279,7 @@ ip6_ll_show_fib (vlib_main_t * vm,
     u8 *s = NULL;
 
     fib_index = ip6_ll_table.ilt_fibs[sw_if_index];
-
-    if (0 == fib_index)
+    if (~0 == fib_index)
       continue;
 
     fib_table = fib_table_get (fib_index, FIB_PROTOCOL_IP6);
@@ -352,6 +357,16 @@ VLIB_CLI_COMMAND (ip6_show_fib_command, static) = {
     .function = ip6_ll_show_fib,
 };
 /* *INDENT-ON* */
+
+static clib_error_t *
+ip6_ll_sw_interface_add_del (vnet_main_t *vnm, u32 sw_if_index, u32 is_add)
+{
+  vec_validate_init_empty (ip6_ll_table.ilt_fibs, sw_if_index, ~0);
+
+  return (NULL);
+}
+
+VNET_SW_INTERFACE_ADD_DEL_FUNCTION (ip6_ll_sw_interface_add_del);
 
 static clib_error_t *
 ip6_ll_module_init (vlib_main_t * vm)

@@ -37,134 +37,22 @@ vcl_mq_dequeue_batch (vcl_worker_t * wrk, svm_msg_q_t * mq, u32 n_max_msg)
   return n_msgs;
 }
 
-const char *
-vppcom_session_state_str (vcl_session_state_t state)
-{
-  char *st;
 
-  switch (state)
-    {
-    case VCL_STATE_CLOSED:
-      st = "STATE_CLOSED";
-      break;
-    case VCL_STATE_LISTEN:
-      st = "STATE_LISTEN";
-      break;
-    case VCL_STATE_READY:
-      st = "STATE_READY";
-      break;
-    case VCL_STATE_VPP_CLOSING:
-      st = "STATE_VPP_CLOSING";
-      break;
-    case VCL_STATE_DISCONNECT:
-      st = "STATE_DISCONNECT";
-      break;
-    case VCL_STATE_DETACHED:
-      st = "STATE_DETACHED";
-      break;
-    case VCL_STATE_UPDATED:
-      st = "STATE_UPDATED";
-      break;
-    case VCL_STATE_LISTEN_NO_MQ:
-      st = "STATE_LISTEN_NO_MQ";
-      break;
-    default:
-      st = "UNKNOWN_STATE";
-      break;
-    }
-
-  return st;
-}
-
-u8 *
-format_ip4_address (u8 * s, va_list * args)
-{
-  u8 *a = va_arg (*args, u8 *);
-  return format (s, "%d.%d.%d.%d", a[0], a[1], a[2], a[3]);
-}
-
-u8 *
-format_ip6_address (u8 * s, va_list * args)
-{
-  ip6_address_t *a = va_arg (*args, ip6_address_t *);
-  u32 i, i_max_n_zero, max_n_zeros, i_first_zero, n_zeros, last_double_colon;
-
-  i_max_n_zero = ARRAY_LEN (a->as_u16);
-  max_n_zeros = 0;
-  i_first_zero = i_max_n_zero;
-  n_zeros = 0;
-  for (i = 0; i < ARRAY_LEN (a->as_u16); i++)
-    {
-      u32 is_zero = a->as_u16[i] == 0;
-      if (is_zero && i_first_zero >= ARRAY_LEN (a->as_u16))
-	{
-	  i_first_zero = i;
-	  n_zeros = 0;
-	}
-      n_zeros += is_zero;
-      if ((!is_zero && n_zeros > max_n_zeros)
-	  || (i + 1 >= ARRAY_LEN (a->as_u16) && n_zeros > max_n_zeros))
-	{
-	  i_max_n_zero = i_first_zero;
-	  max_n_zeros = n_zeros;
-	  i_first_zero = ARRAY_LEN (a->as_u16);
-	  n_zeros = 0;
-	}
-    }
-
-  last_double_colon = 0;
-  for (i = 0; i < ARRAY_LEN (a->as_u16); i++)
-    {
-      if (i == i_max_n_zero && max_n_zeros > 1)
-	{
-	  s = format (s, "::");
-	  i += max_n_zeros - 1;
-	  last_double_colon = 1;
-	}
-      else
-	{
-	  s = format (s, "%s%x",
-		      (last_double_colon || i == 0) ? "" : ":",
-		      clib_net_to_host_u16 (a->as_u16[i]));
-	  last_double_colon = 0;
-	}
-    }
-
-  return s;
-}
-
-/* Format an IP46 address. */
-u8 *
-format_ip46_address (u8 * s, va_list * args)
-{
-  ip46_address_t *ip46 = va_arg (*args, ip46_address_t *);
-  ip46_type_t type = va_arg (*args, ip46_type_t);
-  int is_ip4 = 1;
-
-  switch (type)
-    {
-    case IP46_TYPE_ANY:
-      is_ip4 = ip46_address_is_ip4 (ip46);
-      break;
-    case IP46_TYPE_IP4:
-      is_ip4 = 1;
-      break;
-    case IP46_TYPE_IP6:
-      is_ip4 = 0;
-      break;
-    }
-
-  return is_ip4 ?
-    format (s, "%U", format_ip4_address, &ip46->ip4) :
-    format (s, "%U", format_ip6_address, &ip46->ip6);
-}
-
-/*
- * VPPCOM Utility Functions
- */
 
 static void
-vcl_send_session_listen (vcl_worker_t * wrk, vcl_session_t * s)
+vcl_msg_add_ext_config (vcl_session_t *s, uword *offset)
+{
+  svm_fifo_chunk_t *c;
+
+  c = vcl_segment_alloc_chunk (vcl_vpp_worker_segment_handle (0),
+			       0 /* one slice only */, s->ext_config->len,
+			       offset);
+  if (c)
+    clib_memcpy_fast (c->data, s->ext_config, s->ext_config->len);
+}
+
+void
+vcl_send_session_listen (vcl_worker_t *wrk, vcl_session_t *s)
 {
   app_session_evt_t _app_evt, *app_evt = &_app_evt;
   session_listen_msg_t *mp;
@@ -181,11 +69,18 @@ vcl_send_session_listen (vcl_worker_t * wrk, vcl_session_t * s)
   clib_memcpy_fast (&mp->ip, &s->transport.lcl_ip, sizeof (mp->ip));
   mp->port = s->transport.lcl_port;
   mp->proto = s->session_type;
-  mp->ckpair_index = s->ckpair_index;
   mp->vrf = s->vrf;
   if (s->flags & VCL_SESSION_F_CONNECTED)
     mp->flags = TRANSPORT_CFG_F_CONNECTED;
+  if (s->ext_config)
+    vcl_msg_add_ext_config (s, &mp->ext_config);
   app_send_ctrl_evt_to_vpp (mq, app_evt);
+  if (s->ext_config)
+    {
+      clib_mem_free (s->ext_config);
+      s->ext_config = 0;
+    }
+  s->flags |= VCL_SESSION_F_PENDING_LISTEN;
 }
 
 static void
@@ -201,6 +96,7 @@ vcl_send_session_connect (vcl_worker_t * wrk, vcl_session_t * s)
   memset (mp, 0, sizeof (*mp));
   mp->client_index = wrk->api_client_handle;
   mp->context = s->session_index;
+  mp->dscp = s->dscp;
   mp->wrk_index = wrk->vpp_wrk_index;
   mp->is_ip4 = s->transport.is_ip4;
   mp->parent_handle = s->parent_handle;
@@ -209,11 +105,18 @@ vcl_send_session_connect (vcl_worker_t * wrk, vcl_session_t * s)
   mp->port = s->transport.rmt_port;
   mp->lcl_port = s->transport.lcl_port;
   mp->proto = s->session_type;
-  mp->ckpair_index = s->ckpair_index;
   mp->vrf = s->vrf;
   if (s->flags & VCL_SESSION_F_CONNECTED)
     mp->flags |= TRANSPORT_CFG_F_CONNECTED;
+  if (s->ext_config)
+    vcl_msg_add_ext_config (s, &mp->ext_config);
   app_send_ctrl_evt_to_vpp (mq, app_evt);
+
+  if (s->ext_config)
+    {
+      clib_mem_free (s->ext_config);
+      s->ext_config = 0;
+    }
 }
 
 void
@@ -231,6 +134,23 @@ vcl_send_session_unlisten (vcl_worker_t * wrk, vcl_session_t * s)
   mp->wrk_index = wrk->vpp_wrk_index;
   mp->handle = s->vpp_handle;
   mp->context = wrk->wrk_index;
+  app_send_ctrl_evt_to_vpp (mq, app_evt);
+}
+
+static void
+vcl_send_session_shutdown (vcl_worker_t *wrk, vcl_session_t *s)
+{
+  app_session_evt_t _app_evt, *app_evt = &_app_evt;
+  session_shutdown_msg_t *mp;
+  svm_msg_q_t *mq;
+
+  /* Send to thread that owns the session */
+  mq = s->vpp_evt_q;
+  app_alloc_ctrl_evt_to_vpp (mq, app_evt, SESSION_CTRL_EVT_SHUTDOWN);
+  mp = (session_shutdown_msg_t *) app_evt->evt->data;
+  memset (mp, 0, sizeof (*mp));
+  mp->client_index = wrk->api_client_handle;
+  mp->handle = s->vpp_handle;
   app_send_ctrl_evt_to_vpp (mq, app_evt);
 }
 
@@ -360,6 +280,49 @@ done:
   return ret;
 }
 
+int
+vcl_session_transport_attr (vcl_worker_t *wrk, vcl_session_t *s, u8 is_get,
+			    transport_endpt_attr_t *attr)
+{
+  app_session_evt_t _app_evt, *app_evt = &_app_evt;
+  session_transport_attr_msg_t *mp;
+  svm_msg_q_t *mq;
+  f64 timeout;
+
+  ASSERT (!wrk->session_attr_op);
+  mq = s->vpp_evt_q;
+  if (PREDICT_FALSE (!mq))
+    {
+      /* FIXME: attribute should be stored and sent once session is
+       * bound/connected to vpp */
+      return 0;
+    }
+
+  wrk->session_attr_op = 1;
+  wrk->session_attr_op_rv = -1;
+
+  app_alloc_ctrl_evt_to_vpp (mq, app_evt, SESSION_CTRL_EVT_TRANSPORT_ATTR);
+  mp = (session_transport_attr_msg_t *) app_evt->evt->data;
+  memset (mp, 0, sizeof (*mp));
+  mp->client_index = wrk->api_client_handle;
+  mp->handle = s->vpp_handle;
+  mp->is_get = is_get;
+  mp->attr = *attr;
+  app_send_ctrl_evt_to_vpp (mq, app_evt);
+
+  timeout = clib_time_now (&wrk->clib_time) + 1;
+
+  while (wrk->session_attr_op && clib_time_now (&wrk->clib_time) < timeout)
+    vcl_flush_mq_events ();
+
+  if (!wrk->session_attr_op_rv && is_get)
+    *attr = wrk->session_attr_rv;
+
+  wrk->session_attr_op = 0;
+
+  return wrk->session_attr_op_rv;
+}
+
 static u32
 vcl_session_accepted_handler (vcl_worker_t * wrk, session_accepted_msg_t * mp,
 			      u32 ls_index)
@@ -377,11 +340,12 @@ vcl_session_accepted_handler (vcl_worker_t * wrk, session_accepted_msg_t * mp,
       goto error;
     }
 
-  if (vcl_segment_attach_session (mp->segment_handle, mp->server_rx_fifo,
-				  mp->server_tx_fifo,
-				  mp->vpp_event_queue_address, 0, session))
+  if (vcl_segment_attach_session (
+	mp->segment_handle, mp->server_rx_fifo, mp->server_tx_fifo,
+	mp->vpp_event_queue_address, mp->mq_index, 0, session))
     {
-      VDBG (0, "failed to attach fifos for %u", session->session_index);
+      VDBG (0, "session %u [0x%llx]: failed to attach fifos",
+	    session->session_index, mp->handle);
       goto error;
     }
 
@@ -393,18 +357,13 @@ vcl_session_accepted_handler (vcl_worker_t * wrk, session_accepted_msg_t * mp,
 		    sizeof (ip46_address_t));
 
   vcl_session_table_add_vpp_handle (wrk, mp->handle, session->session_index);
-  session->transport.lcl_port = listen_session->transport.lcl_port;
-  session->transport.lcl_ip = listen_session->transport.lcl_ip;
+  session->transport.lcl_port = mp->lcl.port;
+  session->transport.lcl_ip = mp->lcl.ip;
   session->session_type = listen_session->session_type;
   session->is_dgram = vcl_proto_is_dgram (session->session_type);
   session->listener_index = listen_session->session_index;
   listen_session->n_accepted_sessions++;
 
-  VDBG (1, "session %u [0x%llx]: client accept request from %s address %U"
-	" port %d queue %p!", session->session_index, mp->handle,
-	mp->rmt.is_ip4 ? "IPv4" : "IPv6", format_ip46_address, &mp->rmt.ip,
-	mp->rmt.is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6,
-	clib_net_to_host_u16 (mp->rmt.port), session->vpp_evt_q);
   vcl_evt (VCL_EVT_ACCEPT, session, listen_session, session_index);
 
   vcl_send_session_accepted_reply (session->vpp_evt_q, mp->context,
@@ -430,29 +389,47 @@ vcl_session_connected_handler (vcl_worker_t * wrk,
 
   session_index = mp->context;
   session = vcl_session_get (wrk, session_index);
-  if (!session)
+  if (PREDICT_FALSE (!session))
     {
-      VDBG (0, "ERROR: vpp handle 0x%llx has no session index (%u)!",
-	    mp->handle, session_index);
+      VERR ("vpp handle 0x%llx has no session index (%u)!", mp->handle,
+	    session_index);
+      /* Should not happen but if it does, force vpp session cleanup */
+      vcl_session_t tmp_session = {
+	.vpp_handle = mp->handle,
+	.vpp_evt_q = 0,
+      };
+      vcl_segment_attach_session (
+	mp->segment_handle, mp->server_rx_fifo, mp->server_tx_fifo,
+	mp->vpp_event_queue_address, mp->mq_index, 0, session);
+      if (tmp_session.vpp_evt_q)
+	vcl_send_session_disconnect (wrk, &tmp_session);
       return VCL_INVALID_SESSION_INDEX;
     }
+
   if (mp->retval)
     {
-      VDBG (0, "ERROR: session index %u: connect failed! %U",
-	    session_index, format_session_error, mp->retval);
+      VDBG (0, "session %u: connect failed! %U", session_index,
+	    format_session_error, mp->retval);
       session->session_state = VCL_STATE_DETACHED;
-      session->vpp_handle = mp->handle;
+      session->vpp_handle = VCL_INVALID_SESSION_HANDLE;
+      session->vpp_error = mp->retval;
       return session_index;
     }
 
   session->vpp_handle = mp->handle;
 
-  if (vcl_segment_attach_session (mp->segment_handle, mp->server_rx_fifo,
-				  mp->server_tx_fifo,
-				  mp->vpp_event_queue_address, 0, session))
+  /* Add to lookup table. Even if something fails, session cannot be
+   * cleaned up prior to notifying vpp and going through the cleanup
+   * "procedure" see @ref vcl_session_cleanup_handler */
+  vcl_session_table_add_vpp_handle (wrk, mp->handle, session_index);
+
+  if (vcl_segment_attach_session (
+	mp->segment_handle, mp->server_rx_fifo, mp->server_tx_fifo,
+	mp->vpp_event_queue_address, mp->mq_index, 0, session))
     {
-      VDBG (0, "failed to attach fifos for %u", session->session_index);
-      session->session_state = VCL_STATE_DETACHED;
+      VDBG (0, "session %u [0x%llx]: failed to attach fifos",
+	    session->session_index, session->vpp_handle);
+      session->session_state = VCL_STATE_UPDATED;
       vcl_send_session_disconnect (wrk, session);
       return session_index;
     }
@@ -460,10 +437,12 @@ vcl_session_connected_handler (vcl_worker_t * wrk,
   if (mp->ct_rx_fifo)
     {
       if (vcl_segment_attach_session (mp->ct_segment_handle, mp->ct_rx_fifo,
-				      mp->ct_tx_fifo, (uword) ~0, 1, session))
+				      mp->ct_tx_fifo, (uword) ~0, ~0, 1,
+				      session))
 	{
-	  VDBG (0, "failed to attach ct fifos for %u", session->session_index);
-	  session->session_state = VCL_STATE_DETACHED;
+	  VDBG (0, "session %u [0x%llx]: failed to attach ct fifos",
+		session->session_index, session->vpp_handle);
+	  session->session_state = VCL_STATE_UPDATED;
 	  vcl_send_session_disconnect (wrk, session);
 	  return session_index;
 	}
@@ -481,12 +460,14 @@ vcl_session_connected_handler (vcl_worker_t * wrk,
   else
     session->session_state = VCL_STATE_READY;
 
-  /* Add it to lookup table */
-  vcl_session_table_add_vpp_handle (wrk, mp->handle, session_index);
-
-  VDBG (1, "session %u [0x%llx] connected! rx_fifo %p, refcnt %d, tx_fifo %p,"
-	" refcnt %d", session_index, mp->handle, session->rx_fifo,
-	session->rx_fifo->refcnt, session->tx_fifo, session->tx_fifo->refcnt);
+  VDBG (0, "session %u [0x%llx] connected local: %U:%u remote %U:%u",
+	session->session_index, session->vpp_handle, vcl_format_ip46_address,
+	&session->transport.lcl_ip,
+	session->transport.is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6,
+	clib_net_to_host_u16 (session->transport.lcl_port),
+	vcl_format_ip46_address, &session->transport.rmt_ip,
+	session->transport.is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6,
+	clib_net_to_host_u16 (session->transport.rmt_port));
 
   return session_index;
 }
@@ -536,7 +517,9 @@ vcl_session_reset_handler (vcl_worker_t * wrk,
 
   if (session->session_state != VCL_STATE_CLOSED)
     session->session_state = VCL_STATE_DISCONNECT;
-  VDBG (0, "reset session %u [0x%llx]", sid, reset_msg->handle);
+
+  session->flags |= (VCL_SESSION_F_RD_SHUTDOWN | VCL_SESSION_F_WR_SHUTDOWN);
+  VDBG (0, "session %u [0x%llx]: reset", sid, reset_msg->handle);
   return sid;
 }
 
@@ -559,8 +542,8 @@ vcl_session_bound_handler (vcl_worker_t * wrk, session_bound_msg_t * mp)
 	}
       else
 	{
-	  VDBG (0, "ERROR: session %u [0x%llx]: Invalid session index!",
-		sid, mp->handle);
+	  VDBG (0, "session %u [0x%llx]: Invalid session index!", sid,
+		mp->handle);
 	  return VCL_INVALID_SESSION_INDEX;
 	}
     }
@@ -572,13 +555,16 @@ vcl_session_bound_handler (vcl_worker_t * wrk, session_bound_msg_t * mp)
   session->transport.lcl_port = mp->lcl_port;
   vcl_session_table_add_listener (wrk, mp->handle, sid);
   session->session_state = VCL_STATE_LISTEN;
+  session->flags &= ~VCL_SESSION_F_PENDING_LISTEN;
 
   if (vcl_session_is_cl (session))
     {
       if (vcl_segment_attach_session (mp->segment_handle, mp->rx_fifo,
-				      mp->tx_fifo, mp->vpp_evt_q, 0, session))
+				      mp->tx_fifo, mp->vpp_evt_q, mp->mq_index,
+				      0, session))
 	{
-	  VDBG (0, "failed to attach fifos for %u", session->session_index);
+	  VDBG (0, "session %u [0x%llx]: failed to attach fifos",
+		session->session_index, session->vpp_handle);
 	  session->session_state = VCL_STATE_DETACHED;
 	  return VCL_INVALID_SESSION_INDEX;
 	}
@@ -704,7 +690,7 @@ vcl_session_disconnected_handler (vcl_worker_t * wrk,
   session = vcl_session_get_w_vpp_handle (wrk, msg->handle);
   if (!session)
     {
-      VDBG (0, "request to disconnect unknown handle 0x%llx", msg->handle);
+      VWRN ("request to disconnect unknown handle 0x%llx", msg->handle);
       return 0;
     }
 
@@ -728,6 +714,49 @@ vcl_session_disconnected_handler (vcl_worker_t * wrk,
   return session;
 }
 
+int
+vppcom_session_shutdown (uint32_t session_handle, int how)
+{
+  vcl_worker_t *wrk = vcl_worker_get_current ();
+  vcl_session_t *session;
+  vcl_session_state_t state;
+  u64 vpp_handle;
+
+  session = vcl_session_get_w_handle (wrk, session_handle);
+  if (PREDICT_FALSE (!session))
+    return VPPCOM_EBADFD;
+
+  vpp_handle = session->vpp_handle;
+  state = session->session_state;
+
+  VDBG (1, "session %u [0x%llx] state 0x%x (%s)", session->session_index,
+	vpp_handle, state, vcl_session_state_str (state));
+
+  if (PREDICT_FALSE (state == VCL_STATE_LISTEN))
+    {
+      VDBG (0, "ERROR: Cannot shutdown a listen socket!");
+      return VPPCOM_EBADFD;
+    }
+
+  if (how == SHUT_RD || how == SHUT_RDWR)
+    {
+      session->flags |= VCL_SESSION_F_RD_SHUTDOWN;
+      if (how == SHUT_RD)
+	return VPPCOM_OK;
+    }
+  session->flags |= VCL_SESSION_F_WR_SHUTDOWN;
+
+  if (PREDICT_TRUE (state == VCL_STATE_READY))
+    {
+      VDBG (1, "session %u [0x%llx]: sending shutdown...",
+	    session->session_index, vpp_handle);
+
+      vcl_send_session_shutdown (wrk, session);
+    }
+
+  return VPPCOM_OK;
+}
+
 static int
 vppcom_session_disconnect (u32 session_handle)
 {
@@ -743,8 +772,8 @@ vppcom_session_disconnect (u32 session_handle)
   vpp_handle = session->vpp_handle;
   state = session->session_state;
 
-  VDBG (1, "session %u [0x%llx] state 0x%x (%s)", session->session_index,
-	vpp_handle, state, vppcom_session_state_str (state));
+  VDBG (1, "session %u [0x%llx]: disconnecting state (%s)",
+	session->session_index, vpp_handle, vcl_session_state_str (state));
 
   if (PREDICT_FALSE (state == VCL_STATE_LISTEN))
     {
@@ -765,7 +794,7 @@ vppcom_session_disconnect (u32 session_handle)
       if (PREDICT_FALSE (!session->vpp_evt_q))
 	return VPPCOM_OK;
 
-      VDBG (1, "session %u [0x%llx]: sending disconnect...",
+      VDBG (1, "session %u [0x%llx]: sending disconnect",
 	    session->session_index, vpp_handle);
       vcl_send_session_disconnect (wrk, session);
     }
@@ -773,7 +802,8 @@ vppcom_session_disconnect (u32 session_handle)
   if (session->listener_index != VCL_INVALID_SESSION_INDEX)
     {
       listen_session = vcl_session_get (wrk, session->listener_index);
-      listen_session->n_accepted_sessions--;
+      if (listen_session)
+	listen_session->n_accepted_sessions--;
     }
 
   return VPPCOM_OK;
@@ -789,7 +819,7 @@ vcl_session_cleanup_handler (vcl_worker_t * wrk, void *data)
   session = vcl_session_get_w_vpp_handle (wrk, msg->handle);
   if (!session)
     {
-      VDBG (0, "disconnect confirmed for unknown handle 0x%llx", msg->handle);
+      VWRN ("disconnect confirmed for unknown handle 0x%llx", msg->handle);
       return;
     }
 
@@ -820,15 +850,28 @@ vcl_session_cleanup_handler (vcl_worker_t * wrk, void *data)
       return;
     }
 
+  /* VPP will reuse the handle so clean it up now */
   vcl_session_table_del_vpp_handle (wrk, msg->handle);
-  /* Should not happen. App did not close the connection so don't free it. */
+
+  /* App did not close the connection yet so don't free it. */
   if (session->session_state != VCL_STATE_CLOSED)
     {
-      VDBG (0, "app did not close session %d", session->session_index);
+      VDBG (0, "session %u: app did not close", session->session_index);
       session->session_state = VCL_STATE_DETACHED;
       session->vpp_handle = VCL_INVALID_SESSION_HANDLE;
       return;
     }
+
+  /* Session probably tracked with epoll, disconnect not yet handled and
+   * 1) both transport and session cleanup completed 2) app closed. Wait
+   * until message is drained to free the session.
+   * See @ref vcl_handle_mq_event */
+  if (session->flags & VCL_SESSION_F_PENDING_DISCONNECT)
+    {
+      session->flags |= VCL_SESSION_F_PENDING_FREE;
+      return;
+    }
+
   vcl_session_free (wrk, session);
 }
 
@@ -863,7 +906,7 @@ vcl_session_worker_update_reply_handler (vcl_worker_t * wrk, void *data)
   if (s->rx_fifo)
     {
       if (vcl_segment_attach_session (msg->segment_handle, msg->rx_fifo,
-				      msg->tx_fifo, (uword) ~0, 0, s))
+				      msg->tx_fifo, (uword) ~0, ~0, 0, s))
 	{
 	  VDBG (0, "failed to attach fifos for %u", s->session_index);
 	  return;
@@ -936,6 +979,21 @@ vcl_worker_rpc_handler (vcl_worker_t * wrk, void *data)
   (vcm->wrk_rpc_fn) (((session_app_wrk_rpc_msg_t *) data)->data);
 }
 
+static void
+vcl_session_transport_attr_reply_handler (vcl_worker_t *wrk, void *data)
+{
+  session_transport_attr_reply_msg_t *mp;
+
+  if (!wrk->session_attr_op)
+    return;
+
+  mp = (session_transport_attr_reply_msg_t *) data;
+
+  wrk->session_attr_op_rv = mp->retval;
+  wrk->session_attr_op = 0;
+  wrk->session_attr_rv = mp->attr;
+}
+
 static int
 vcl_handle_mq_event (vcl_worker_t * wrk, session_event_t * e)
 {
@@ -986,9 +1044,16 @@ vcl_handle_mq_event (vcl_worker_t * wrk, session_event_t * e)
       disconnected_msg = (session_disconnected_msg_t *) e->data;
       if (!(s = vcl_session_get_w_vpp_handle (wrk, disconnected_msg->handle)))
 	break;
+      if (s->session_state == VCL_STATE_CLOSED)
+	break;
       if (vcl_session_has_attr (s, VCL_SESS_ATTR_NONBLOCK))
 	{
-	  vec_add1 (wrk->unhandled_evts_vector, *e);
+	  s->session_state = VCL_STATE_VPP_CLOSING;
+	  s->flags |= VCL_SESSION_F_PENDING_DISCONNECT;
+	  vec_add2 (wrk->unhandled_evts_vector, ecpy, 1);
+	  *ecpy = *e;
+	  ecpy->postponed = 1;
+	  ecpy->session_index = s->session_index;
 	  break;
 	}
       if (!(s = vcl_session_disconnected_handler (wrk, disconnected_msg)))
@@ -1000,9 +1065,17 @@ vcl_handle_mq_event (vcl_worker_t * wrk, session_event_t * e)
       reset_msg = (session_reset_msg_t *) e->data;
       if (!(s = vcl_session_get_w_vpp_handle (wrk, reset_msg->handle)))
 	break;
+      if (s->session_state == VCL_STATE_CLOSED)
+	break;
       if (vcl_session_has_attr (s, VCL_SESS_ATTR_NONBLOCK))
 	{
-	  vec_add1 (wrk->unhandled_evts_vector, *e);
+	  s->flags |= VCL_SESSION_F_PENDING_DISCONNECT;
+	  s->session_state = VCL_STATE_DISCONNECT;
+	  s->flags |= (VCL_SESSION_F_RD_SHUTDOWN | VCL_SESSION_F_WR_SHUTDOWN);
+	  vec_add2 (wrk->unhandled_evts_vector, ecpy, 1);
+	  *ecpy = *e;
+	  ecpy->postponed = 1;
+	  ecpy->session_index = s->session_index;
 	  break;
 	}
       vcl_session_reset_handler (wrk, (session_reset_msg_t *) e->data);
@@ -1030,6 +1103,9 @@ vcl_handle_mq_event (vcl_worker_t * wrk, session_event_t * e)
       break;
     case SESSION_CTRL_EVT_APP_WRK_RPC:
       vcl_worker_rpc_handler (wrk, e->data);
+      break;
+    case SESSION_CTRL_EVT_TRANSPORT_ATTR_REPLY:
+      vcl_session_transport_attr_reply_handler (wrk, e->data);
       break;
     default:
       clib_warning ("unhandled %u", e->event_type);
@@ -1076,7 +1152,7 @@ vppcom_wait_for_session_state_change (u32 session_index,
   while (clib_time_now (&wrk->clib_time) < timeout);
 
   VDBG (0, "timeout waiting for state 0x%x (%s)", state,
-	vppcom_session_state_str (state));
+	vcl_session_state_str (state));
   vcl_evt (VCL_EVT_SESSION_TIMEOUT, session, session_state);
 
   return VPPCOM_ETIMEDOUT;
@@ -1158,7 +1234,7 @@ vppcom_session_unbind (u32 session_handle)
 
   vcl_send_session_unlisten (wrk, session);
 
-  VDBG (1, "session %u [0x%llx]: sending unbind!", session->session_index,
+  VDBG (0, "session %u [0x%llx]: sending unbind!", session->session_index,
 	session->vpp_handle);
   vcl_evt (VCL_EVT_UNBIND, session);
 
@@ -1194,9 +1270,82 @@ vcl_api_attach (void)
   return vcl_bapi_attach ();
 }
 
+int
+vcl_is_first_reattach_to_execute ()
+{
+  if (vcm->reattach_count == 0)
+    return 1;
+
+  return 0;
+}
+
+void
+vcl_set_reattach_counter ()
+{
+  ++vcm->reattach_count;
+
+  if (vcm->reattach_count == vec_len (vcm->workers))
+    vcm->reattach_count = 0;
+}
+
+/**
+ * Reattach vcl to vpp after it has previously been disconnected.
+ *
+ * The logic should be:
+ * - first worker to hit `vcl_api_retry_attach` should attach to vpp,
+ *   to reproduce the `vcl_api_attach` in `vppcom_app_create`.
+ * - the rest of the workers should `reproduce vcl_worker_register_with_vpp`
+ *   from `vppcom_worker_register` since they were already allocated.
+ */
+
+static void
+vcl_api_retry_attach (vcl_worker_t *wrk)
+{
+  vcl_session_t *s;
+
+  clib_spinlock_lock (&vcm->workers_lock);
+  if (vcl_is_first_reattach_to_execute ())
+    {
+      if (vcl_api_attach ())
+	{
+	  clib_spinlock_unlock (&vcm->workers_lock);
+	  return;
+	}
+      vcl_set_reattach_counter ();
+      clib_spinlock_unlock (&vcm->workers_lock);
+    }
+  else
+    {
+      vcl_set_reattach_counter ();
+      clib_spinlock_unlock (&vcm->workers_lock);
+      vcl_worker_register_with_vpp ();
+    }
+
+  /* Treat listeners as configuration that needs to be re-added to vpp */
+  pool_foreach (s, wrk->sessions)
+    {
+      if (s->flags & VCL_SESSION_F_IS_VEP)
+	continue;
+      if (s->session_state == VCL_STATE_LISTEN_NO_MQ)
+	vppcom_session_listen (vcl_session_handle (s), 10);
+      else
+	VDBG (0, "internal error: unexpected state %d", s->session_state);
+    }
+}
+
+static void
+vcl_api_handle_disconnect (vcl_worker_t *wrk)
+{
+  wrk->api_client_handle = ~0;
+  vcl_worker_detach_sessions (wrk);
+}
+
 static void
 vcl_api_detach (vcl_worker_t * wrk)
 {
+  if (wrk->api_client_handle == ~0)
+    return;
+
   vcl_send_app_detach (wrk);
 
   if (vcm->cfg.vpp_app_socket_api)
@@ -1227,8 +1376,8 @@ vppcom_app_create (const char *app_name)
   vcm->main_cpu = pthread_self ();
   vcm->main_pid = getpid ();
   vcm->app_name = format (0, "%s", app_name);
-  fifo_segment_main_init (&vcm->segment_main, vcl_cfg->segment_baseva,
-			  20 /* timeout in secs */ );
+  fifo_segment_main_init (&vcm->segment_main, (uword) ~0,
+			  20 /* timeout in secs */);
   pool_alloc (vcm->workers, vcl_cfg->max_workers);
   clib_spinlock_init (&vcm->workers_lock);
   clib_rwlock_init (&vcm->segment_table_lock);
@@ -1239,7 +1388,10 @@ vppcom_app_create (const char *app_name)
   vcl_worker_alloc_and_init ();
 
   if ((rv = vcl_api_attach ()))
-    return rv;
+    {
+      vppcom_app_destroy ();
+      return rv;
+    }
 
   VDBG (0, "app_name '%s', my_client_index %d (0x%x)", app_name,
 	vcm->workers[0].api_client_handle, vcm->workers[0].api_client_handle);
@@ -1269,6 +1421,7 @@ vppcom_app_destroy (void)
 
   vcl_api_detach (current_wrk);
   vcl_worker_cleanup (current_wrk, 0 /* notify vpp */ );
+  vcl_set_worker_index (~0);
 
   vcl_elog_stop (vcm);
 
@@ -1293,8 +1446,8 @@ vppcom_session_create (u8 proto, u8 is_nonblocking)
   session->session_type = proto;
   session->session_state = VCL_STATE_CLOSED;
   session->vpp_handle = ~0;
-  session->ckpair_index = ~0;
   session->is_dgram = vcl_proto_is_dgram (proto);
+  session->vpp_error = SESSION_E_NONE;
 
   if (is_nonblocking)
     vcl_session_set_attr (session, VCL_SESS_ATTR_NONBLOCK);
@@ -1305,6 +1458,59 @@ vppcom_session_create (u8 proto, u8 is_nonblocking)
   VDBG (0, "created session %u", session->session_index);
 
   return vcl_session_handle (session);
+}
+
+static void
+vcl_epoll_lt_add (vcl_worker_t *wrk, vcl_session_t *s)
+{
+  vcl_session_t *cur, *prev;
+
+  ASSERT (s->vep.lt_next == VCL_INVALID_SESSION_INDEX);
+
+  if (wrk->ep_lt_current == VCL_INVALID_SESSION_INDEX)
+    {
+      wrk->ep_lt_current = s->session_index;
+      s->vep.lt_next = s->session_index;
+      s->vep.lt_prev = s->session_index;
+      return;
+    }
+
+  cur = vcl_session_get (wrk, wrk->ep_lt_current);
+  prev = vcl_session_get (wrk, cur->vep.lt_prev);
+
+  prev->vep.lt_next = s->session_index;
+  s->vep.lt_prev = prev->session_index;
+
+  s->vep.lt_next = cur->session_index;
+  cur->vep.lt_prev = s->session_index;
+}
+
+static void
+vcl_epoll_lt_del (vcl_worker_t *wrk, vcl_session_t *s)
+{
+  vcl_session_t *prev, *next;
+
+  ASSERT (s->vep.lt_next != VCL_INVALID_SESSION_INDEX);
+
+  if (s->vep.lt_next == s->session_index)
+    {
+      wrk->ep_lt_current = VCL_INVALID_SESSION_INDEX;
+      s->vep.lt_next = VCL_INVALID_SESSION_INDEX;
+      s->vep.lt_prev = VCL_INVALID_SESSION_INDEX;
+      return;
+    }
+
+  prev = vcl_session_get (wrk, s->vep.lt_prev);
+  next = vcl_session_get (wrk, s->vep.lt_next);
+
+  prev->vep.lt_next = next->session_index;
+  next->vep.lt_prev = prev->session_index;
+
+  if (s->session_index == wrk->ep_lt_current)
+    wrk->ep_lt_current = s->vep.lt_next;
+
+  s->vep.lt_next = VCL_INVALID_SESSION_INDEX;
+  s->vep.lt_prev = VCL_INVALID_SESSION_INDEX;
 }
 
 int
@@ -1370,9 +1576,14 @@ vcl_session_cleanup (vcl_worker_t * wrk, vcl_session_t * s,
     }
   else if (s->session_state == VCL_STATE_DETACHED)
     {
-      /* Should not happen. VPP cleaned up before app confirmed close */
       VDBG (0, "vpp freed session %d before close", s->session_index);
-      goto free_session;
+
+      if (!(s->flags & VCL_SESSION_F_PENDING_DISCONNECT))
+	goto free_session;
+
+      /* Disconnect/reset messages pending but vpp transport and session
+       * cleanups already done. Free only after messages drained. */
+      s->flags |= VCL_SESSION_F_PENDING_FREE;
     }
 
   s->session_state = VCL_STATE_CLOSED;
@@ -1431,10 +1642,12 @@ vppcom_session_bind (uint32_t session_handle, vppcom_endpt_t * ep)
 		      sizeof (ip6_address_t));
   session->transport.lcl_port = ep->port;
 
-  VDBG (0, "session %u handle %u: binding to local %s address %U port %u, "
-	"proto %s", session->session_index, session_handle,
-	session->transport.is_ip4 ? "IPv4" : "IPv6",
-	format_ip46_address, &session->transport.lcl_ip,
+  VDBG (0,
+	"session %u handle %u: binding to local %s address %U port %u, "
+	"proto %s",
+	session->session_index, session_handle,
+	session->transport.is_ip4 ? "IPv4" : "IPv6", vcl_format_ip46_address,
+	&session->transport.lcl_ip,
 	session->transport.is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6,
 	clib_net_to_host_u16 (session->transport.lcl_port),
 	vppcom_proto_str (session->session_type));
@@ -1457,9 +1670,6 @@ vppcom_session_listen (uint32_t listen_sh, uint32_t q_len)
   listen_session = vcl_session_get_w_handle (wrk, listen_sh);
   if (!listen_session || (listen_session->flags & VCL_SESSION_F_IS_VEP))
     return VPPCOM_EBADFD;
-
-  if (q_len == 0 || q_len == ~0)
-    q_len = vcm->cfg.listen_queue_size;
 
   listen_vpp_handle = listen_session->vpp_handle;
   if (listen_session->session_state == VCL_STATE_LISTEN)
@@ -1491,27 +1701,6 @@ vppcom_session_listen (uint32_t listen_sh, uint32_t q_len)
   return VPPCOM_OK;
 }
 
-static int
-validate_args_session_accept_ (vcl_worker_t * wrk, vcl_session_t * ls)
-{
-  if (ls->flags & VCL_SESSION_F_IS_VEP)
-    {
-      VDBG (0, "ERROR: cannot accept on epoll session %u!",
-	    ls->session_index);
-      return VPPCOM_EBADFD;
-    }
-
-  if ((ls->session_state != VCL_STATE_LISTEN)
-      && (!vcl_session_is_connectable_listener (wrk, ls)))
-    {
-      VDBG (0, "ERROR: session [0x%llx]: not in listen state! state 0x%x"
-	    " (%s)", ls->vpp_handle, ls->session_state,
-	    vppcom_session_state_str (ls->session_state));
-      return VPPCOM_EBADFD;
-    }
-  return VPPCOM_OK;
-}
-
 int
 vppcom_unformat_proto (uint8_t * proto, char *proto_str)
 {
@@ -1535,44 +1724,51 @@ vppcom_unformat_proto (uint8_t * proto, char *proto_str)
     *proto = VPPCOM_PROTO_DTLS;
   else if (!strcmp (proto_str, "dtls"))
     *proto = VPPCOM_PROTO_DTLS;
+  else if (!strcmp (proto_str, "SRTP"))
+    *proto = VPPCOM_PROTO_SRTP;
+  else if (!strcmp (proto_str, "srtp"))
+    *proto = VPPCOM_PROTO_SRTP;
   else
     return 1;
   return 0;
 }
 
 int
-vppcom_session_accept (uint32_t listen_session_handle, vppcom_endpt_t * ep,
-		       uint32_t flags)
+vppcom_session_accept (uint32_t ls_handle, vppcom_endpt_t *ep, uint32_t flags)
 {
-  u32 client_session_index = ~0, listen_session_index, accept_flags = 0;
+  u32 client_session_index = ~0, ls_index, accept_flags = 0;
   vcl_worker_t *wrk = vcl_worker_get_current ();
   session_accepted_msg_t accepted_msg;
-  vcl_session_t *listen_session = 0;
-  vcl_session_t *client_session = 0;
+  vcl_session_t *ls, *client_session = 0;
   vcl_session_msg_t *evt;
   u8 is_nonblocking;
-  int rv;
 
 again:
 
-  listen_session = vcl_session_get_w_handle (wrk, listen_session_handle);
-  if (!listen_session)
+  ls = vcl_session_get_w_handle (wrk, ls_handle);
+  if (!ls)
     return VPPCOM_EBADFD;
 
-  listen_session_index = listen_session->session_index;
-  if ((rv = validate_args_session_accept_ (wrk, listen_session)))
-    return rv;
-
-  if (clib_fifo_elts (listen_session->accept_evts_fifo))
+  if ((ls->session_state != VCL_STATE_LISTEN) &&
+      (ls->session_state != VCL_STATE_LISTEN_NO_MQ) &&
+      (!vcl_session_is_connectable_listener (wrk, ls)))
     {
-      clib_fifo_sub2 (listen_session->accept_evts_fifo, evt);
+      VDBG (0, "ERROR: session [0x%llx]: not in listen state! state (%s)",
+	    ls->vpp_handle, vcl_session_state_str (ls->session_state));
+      return VPPCOM_EBADFD;
+    }
+
+  ls_index = ls->session_index;
+
+  if (clib_fifo_elts (ls->accept_evts_fifo))
+    {
+      clib_fifo_sub2 (ls->accept_evts_fifo, evt);
       accept_flags = evt->flags;
       accepted_msg = evt->accepted_msg;
       goto handle;
     }
 
-  is_nonblocking = vcl_session_has_attr (listen_session,
-					 VCL_SESS_ATTR_NONBLOCK);
+  is_nonblocking = vcl_session_has_attr (ls, VCL_SESS_ATTR_NONBLOCK);
   while (1)
     {
       if (svm_msg_q_is_empty (wrk->app_event_queue) && is_nonblocking)
@@ -1585,20 +1781,21 @@ again:
 
 handle:
 
-  client_session_index = vcl_session_accepted_handler (wrk, &accepted_msg,
-						       listen_session_index);
+  client_session_index =
+    vcl_session_accepted_handler (wrk, &accepted_msg, ls_index);
   if (client_session_index == VCL_INVALID_SESSION_INDEX)
     return VPPCOM_ECONNABORTED;
 
-  listen_session = vcl_session_get (wrk, listen_session_index);
+  ls = vcl_session_get (wrk, ls_index);
   client_session = vcl_session_get (wrk, client_session_index);
 
   if (flags & O_NONBLOCK)
     vcl_session_set_attr (client_session, VCL_SESS_ATTR_NONBLOCK);
 
-  VDBG (1, "listener %u [0x%llx]: Got a connect request! session %u [0x%llx],"
-	" flags %d, is_nonblocking %u", listen_session->session_index,
-	listen_session->vpp_handle, client_session_index,
+  VDBG (1,
+	"listener %u [0x%llx]: Got a connect request! session %u [0x%llx],"
+	" flags %d, is_nonblocking %u",
+	ls->session_index, ls->vpp_handle, client_session_index,
 	client_session->vpp_handle, flags,
 	vcl_session_has_attr (client_session, VCL_SESS_ATTR_NONBLOCK));
 
@@ -1614,17 +1811,18 @@ handle:
 			  sizeof (ip6_address_t));
     }
 
-  VDBG (0, "listener %u [0x%llx] accepted %u [0x%llx] peer: %U:%u "
-	"local: %U:%u", listen_session_handle, listen_session->vpp_handle,
-	client_session_index, client_session->vpp_handle,
-	format_ip46_address, &client_session->transport.rmt_ip,
+  VDBG (0,
+	"listener %u [0x%llx] accepted %u [0x%llx] peer: %U:%u "
+	"local: %U:%u",
+	ls_handle, ls->vpp_handle, client_session_index,
+	client_session->vpp_handle, vcl_format_ip46_address,
+	&client_session->transport.rmt_ip,
 	client_session->transport.is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6,
 	clib_net_to_host_u16 (client_session->transport.rmt_port),
-	format_ip46_address, &client_session->transport.lcl_ip,
+	vcl_format_ip46_address, &client_session->transport.lcl_ip,
 	client_session->transport.is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6,
 	clib_net_to_host_u16 (client_session->transport.lcl_port));
-  vcl_evt (VCL_EVT_ACCEPT, client_session, listen_session,
-	   client_session_index);
+  vcl_evt (VCL_EVT_ACCEPT, client_session, ls, client_session_index);
 
   /*
    * Session might have been closed already
@@ -1654,22 +1852,21 @@ vppcom_session_connect (uint32_t session_handle, vppcom_endpt_t * server_ep)
 
   if (PREDICT_FALSE (session->flags & VCL_SESSION_F_IS_VEP))
     {
-      VDBG (0, "ERROR: cannot connect epoll session %u!",
-	    session->session_index);
+      VWRN ("cannot connect epoll session %u!", session->session_index);
       return VPPCOM_EBADFD;
     }
 
   if (PREDICT_FALSE (vcl_session_is_ready (session)))
     {
-      VDBG (0, "session handle %u [0x%llx]: session already "
-	    "connected to %s %U port %d proto %s, state 0x%x (%s)",
-	    session_handle, session->vpp_handle,
-	    session->transport.is_ip4 ? "IPv4" : "IPv6", format_ip46_address,
-	    &session->transport.rmt_ip, session->transport.is_ip4 ?
-	    IP46_TYPE_IP4 : IP46_TYPE_IP6,
+      VDBG (0,
+	    "session %u [0x%llx]: already connected to %U:%d proto %s,"
+	    " state (%s)",
+	    session->session_index, session->vpp_handle,
+	    vcl_format_ip46_address, &session->transport.rmt_ip,
+	    session->transport.is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6,
 	    clib_net_to_host_u16 (session->transport.rmt_port),
-	    vppcom_proto_str (session->session_type), session->session_state,
-	    vppcom_session_state_str (session->session_state));
+	    vppcom_proto_str (session->session_type),
+	    vcl_session_state_str (session->session_state));
       return VPPCOM_OK;
     }
 
@@ -1688,13 +1885,10 @@ vppcom_session_connect (uint32_t session_handle, vppcom_endpt_t * server_ep)
   session->parent_handle = VCL_INVALID_SESSION_HANDLE;
   session->flags |= VCL_SESSION_F_CONNECTED;
 
-  VDBG (0, "session handle %u (%s): connecting to peer %s %U "
-	"port %d proto %s", session_handle,
-	vppcom_session_state_str (session->session_state),
-	session->transport.is_ip4 ? "IPv4" : "IPv6",
-	format_ip46_address,
-	&session->transport.rmt_ip, session->transport.is_ip4 ?
-	IP46_TYPE_IP4 : IP46_TYPE_IP6,
+  VDBG (0, "session %u: connecting to peer %U:%d proto %s",
+	session->session_index, vcl_format_ip46_address,
+	&session->transport.rmt_ip,
+	session->transport.is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6,
 	clib_net_to_host_u16 (session->transport.rmt_port),
 	vppcom_proto_str (session->session_type));
 
@@ -1749,12 +1943,13 @@ vppcom_session_stream_connect (uint32_t session_handle,
 
   if (PREDICT_FALSE (vcl_session_is_ready (session)))
     {
-      VDBG (0, "session handle %u [0x%llx]: session already "
+      VDBG (0,
+	    "session handle %u [0x%llx]: session already "
 	    "connected to session %u [0x%llx] proto %s, state 0x%x (%s)",
-	    session_handle, session->vpp_handle,
-	    parent_session_handle, parent_session->vpp_handle,
+	    session_handle, session->vpp_handle, parent_session_handle,
+	    parent_session->vpp_handle,
 	    vppcom_proto_str (session->session_type), session->session_state,
-	    vppcom_session_state_str (session->session_state));
+	    vcl_session_state_str (session->session_state));
       return VPPCOM_OK;
     }
 
@@ -1799,7 +1994,7 @@ vppcom_session_read_internal (uint32_t session_handle, void *buf, int n,
   u8 is_ct;
 
   if (PREDICT_FALSE (!buf))
-    return VPPCOM_EINVAL;
+    return VPPCOM_EFAULT;
 
   s = vcl_session_get_w_handle (wrk, session_handle);
   if (PREDICT_FALSE (!s || (s->flags & VCL_SESSION_F_IS_VEP)))
@@ -1809,8 +2004,20 @@ vppcom_session_read_internal (uint32_t session_handle, void *buf, int n,
     {
       VDBG (0, "session %u[0x%llx] is not open! state 0x%x (%s)",
 	    s->session_index, s->vpp_handle, s->session_state,
-	    vppcom_session_state_str (s->session_state));
+	    vcl_session_state_str (s->session_state));
       return vcl_session_closed_error (s);
+    }
+
+  if (PREDICT_FALSE (s->flags & VCL_SESSION_F_RD_SHUTDOWN))
+    {
+      /* Vpp would ack the incoming data and enqueue it for reading.
+       * So even if SHUT_RD is set, we can still read() the data if
+       * the session is ready.
+       */
+      if (!vcl_session_read_ready (s))
+	{
+	  return 0;
+	}
     }
 
   is_nonblocking = vcl_session_has_attr (s, VCL_SESS_ATTR_NONBLOCK);
@@ -1852,6 +2059,10 @@ read_again:
     rv = app_recv_stream_raw (rx_fifo, buf, n, 0, peek);
 
   ASSERT (rv >= 0);
+
+  if (peek)
+    return rv;
+
   n_read += rv;
 
   if (svm_fifo_is_empty_cons (rx_fifo))
@@ -1951,7 +2162,7 @@ vppcom_session_read_segments (uint32_t session_handle,
     }
 
   n_read = svm_fifo_segments (rx_fifo, s->rx_bytes_pending,
-			      (svm_fifo_seg_t *) ds, n_segments, max_bytes);
+			      (svm_fifo_seg_t *) ds, &n_segments, max_bytes);
   if (n_read < 0)
     return VPPCOM_EAGAIN;
 
@@ -1989,7 +2200,7 @@ vppcom_session_free_segments (uint32_t session_handle, uint32_t n_bytes)
   is_ct = vcl_session_is_ct (s);
   svm_fifo_dequeue_drop (is_ct ? s->ct_rx_fifo : s->rx_fifo, n_bytes);
 
-  ASSERT (s->rx_bytes_pending < n_bytes);
+  ASSERT (s->rx_bytes_pending >= n_bytes);
   s->rx_bytes_pending -= n_bytes;
 }
 
@@ -2004,7 +2215,7 @@ vcl_fifo_is_writeable (svm_fifo_t * f, u32 len, u8 is_dgram)
 }
 
 always_inline int
-vppcom_session_write_inline (vcl_worker_t * wrk, vcl_session_t * s, void *buf,
+vppcom_session_write_inline (vcl_worker_t *wrk, vcl_session_t *s, void *buf,
 			     size_t n, u8 is_flush, u8 is_dgram)
 {
   int n_write, is_nonblocking;
@@ -2013,8 +2224,12 @@ vppcom_session_write_inline (vcl_worker_t * wrk, vcl_session_t * s, void *buf,
   svm_msg_q_t *mq;
   u8 is_ct;
 
-  if (PREDICT_FALSE (!buf || n == 0))
-    return VPPCOM_EINVAL;
+  /* Accept zero length writes but just return */
+  if (PREDICT_FALSE (!n))
+    return VPPCOM_OK;
+
+  if (PREDICT_FALSE (!buf))
+    return VPPCOM_EFAULT;
 
   if (PREDICT_FALSE (s->flags & VCL_SESSION_F_IS_VEP))
     {
@@ -2027,8 +2242,16 @@ vppcom_session_write_inline (vcl_worker_t * wrk, vcl_session_t * s, void *buf,
     {
       VDBG (1, "session %u [0x%llx]: is not open! state 0x%x (%s)",
 	    s->session_index, s->vpp_handle, s->session_state,
-	    vppcom_session_state_str (s->session_state));
+	    vcl_session_state_str (s->session_state));
       return vcl_session_closed_error (s);;
+    }
+
+  if (PREDICT_FALSE (s->flags & VCL_SESSION_F_WR_SHUTDOWN))
+    {
+      VDBG (1, "session %u [0x%llx]: is shutdown! state 0x%x (%s)",
+	    s->session_index, s->vpp_handle, s->session_state,
+	    vcl_session_state_str (s->session_state));
+      return VPPCOM_EPIPE;
     }
 
   is_ct = vcl_session_is_ct (s);
@@ -2058,12 +2281,17 @@ vppcom_session_write_inline (vcl_worker_t * wrk, vcl_session_t * s, void *buf,
     et = SESSION_IO_EVT_TX_FLUSH;
 
   if (is_dgram)
-    n_write = app_send_dgram_raw (tx_fifo, &s->transport,
-				  s->vpp_evt_q, buf, n, et,
-				  0 /* do_evt */ , SVM_Q_WAIT);
+    {
+      et = vcl_session_dgram_tx_evt (s, et);
+      n_write =
+	app_send_dgram_raw_gso (tx_fifo, &s->transport, s->vpp_evt_q, buf, n,
+				s->gso_size, et, 0 /* do_evt */, SVM_Q_WAIT);
+    }
   else
-    n_write = app_send_stream_raw (tx_fifo, s->vpp_evt_q, buf, n, et,
-				   0 /* do_evt */ , SVM_Q_WAIT);
+    {
+      n_write = app_send_stream_raw (tx_fifo, s->vpp_evt_q, buf, n, et,
+				     0 /* do_evt */, SVM_Q_WAIT);
+    }
 
   if (svm_fifo_set_event (s->tx_fifo))
     app_send_io_evt_to_vpp (
@@ -2089,8 +2317,8 @@ vppcom_session_write (uint32_t session_handle, void *buf, size_t n)
   if (PREDICT_FALSE (!s))
     return VPPCOM_EBADFD;
 
-  return vppcom_session_write_inline (wrk, s, buf, n,
-				      0 /* is_flush */ , s->is_dgram ? 1 : 0);
+  return vppcom_session_write_inline (wrk, s, buf, n, 0 /* is_flush */,
+				      s->is_dgram ? 1 : 0);
 }
 
 int
@@ -2103,8 +2331,8 @@ vppcom_session_write_msg (uint32_t session_handle, void *buf, size_t n)
   if (PREDICT_FALSE (!s))
     return VPPCOM_EBADFD;
 
-  return vppcom_session_write_inline (wrk, s, buf, n,
-				      1 /* is_flush */ , s->is_dgram ? 1 : 0);
+  return vppcom_session_write_inline (wrk, s, buf, n, 1 /* is_flush */,
+				      s->is_dgram ? 1 : 0);
 }
 
 #define vcl_fifo_rx_evt_valid_or_break(_s)				\
@@ -2186,11 +2414,17 @@ vcl_select_handle_mq_event (vcl_worker_t * wrk, session_event_t * e,
 	sid = e->session_index;
       if (sid == VCL_INVALID_SESSION_INDEX)
 	break;
-      if (sid < n_bits && write_map)
-	{
-	  clib_bitmap_set_no_check ((uword *) write_map, sid, 1);
-	  *bits_set += 1;
-	}
+      if (!(sid < n_bits && write_map))
+	break;
+      clib_bitmap_set_no_check ((uword *) write_map, sid, 1);
+      *bits_set += 1;
+      s = vcl_session_get (wrk, sid);
+      if (!s->tx_fifo)
+	break;
+      /* We didn't have a fifo when the event was added */
+      svm_fifo_add_want_deq_ntf (
+	(vcl_session_is_ct (s) ? s->ct_tx_fifo : s->tx_fifo),
+	SVM_FIFO_WANT_DEQ_NOTIF_IF_FULL);
       break;
     case SESSION_CTRL_EVT_DISCONNECTED:
       disconnected_msg = (session_disconnected_msg_t *) e->data;
@@ -2323,11 +2557,23 @@ vppcom_select_eventfd (vcl_worker_t * wrk, int n_bits,
   int n_mq_evts, i;
   u64 buf;
 
+  if (PREDICT_FALSE (wrk->api_client_handle == ~0))
+    {
+      vcl_api_retry_attach (wrk);
+      return 0;
+    }
+
   vec_validate (wrk->mq_events, pool_elts (wrk->mq_evt_conns));
   n_mq_evts = epoll_wait (wrk->mqs_epfd, wrk->mq_events,
 			  vec_len (wrk->mq_events), time_to_wait);
   for (i = 0; i < n_mq_evts; i++)
     {
+      if (PREDICT_FALSE (wrk->mq_events[i].data.u32 == ~0))
+	{
+	  vcl_api_handle_disconnect (wrk);
+	  continue;
+	}
+
       mqc = vcl_mq_evt_conn_get (wrk, wrk->mq_events[i].data.u32);
       n_read = read (mqc->mq_fd, &buf, sizeof (buf));
       vcl_select_handle_mq (wrk, mqc->mq, n_bits, read_map, write_map,
@@ -2388,7 +2634,7 @@ vppcom_select (int n_bits, vcl_si_set * read_map, vcl_si_set * write_map,
 	  clib_bitmap_set_no_check ((uword *) write_map, sid, 1);
 	  bits_set++;
 	}
-      else
+      else if (s->tx_fifo)
 	{
 	  svm_fifo_t *txf = vcl_session_is_ct (s) ? s->ct_tx_fifo : s->tx_fifo;
 	  svm_fifo_add_want_deq_ntf (txf, SVM_FIFO_WANT_DEQ_NOTIF);
@@ -2441,7 +2687,7 @@ vep_verify_epoll_chain (vcl_worker_t * wrk, u32 vep_handle)
   u32 sh = vep_handle;
   vcl_session_t *s;
 
-  if (VPPCOM_DEBUG <= 2)
+  if (VPPCOM_DEBUG <= 3)
     return;
 
   s = vcl_session_get_w_handle (wrk, vep_handle);
@@ -2526,13 +2772,32 @@ vppcom_epoll_create (void)
   return vcl_session_handle (vep_session);
 }
 
+static void
+vcl_epoll_ctl_add_unhandled_event (vcl_worker_t *wrk, vcl_session_t *s,
+				   u8 is_epollet, session_evt_type_t evt)
+{
+  if (!is_epollet)
+    {
+      if (s->vep.lt_next == VCL_INVALID_SESSION_INDEX)
+	vcl_epoll_lt_add (wrk, s);
+      return;
+    }
+
+  session_event_t e = { 0 };
+  e.session_index = s->session_index;
+  e.event_type = evt;
+  if (evt == SESSION_IO_EVT_RX)
+    s->flags &= ~VCL_SESSION_F_HAS_RX_EVT;
+  vec_add1 (wrk->unhandled_evts_vector, e);
+}
+
 int
 vppcom_epoll_ctl (uint32_t vep_handle, int op, uint32_t session_handle,
 		  struct epoll_event *event)
 {
   vcl_worker_t *wrk = vcl_worker_get_current ();
+  int rv = VPPCOM_OK, add_evt = 0;
   vcl_session_t *vep_session;
-  int rv = VPPCOM_OK;
   vcl_session_t *s;
   svm_fifo_t *txf;
 
@@ -2577,6 +2842,12 @@ vppcom_epoll_ctl (uint32_t vep_handle, int op, uint32_t session_handle,
 	  VDBG (0, "EPOLL_CTL_ADD: NULL pointer to epoll_event structure!");
 	  return VPPCOM_EINVAL;
 	}
+      if (s->flags & VCL_SESSION_F_IS_VEP_SESSION)
+	{
+	  VDBG (0, "EPOLL_CTL_ADD: %u already epolled!", s->session_index);
+	  rv = VPPCOM_EEXIST;
+	  goto done;
+	}
       if (vep_session->vep.next_sh != ~0)
 	{
 	  vcl_session_t *next_session;
@@ -2595,6 +2866,7 @@ vppcom_epoll_ctl (uint32_t vep_handle, int op, uint32_t session_handle,
       s->vep.prev_sh = vep_handle;
       s->vep.vep_sh = vep_handle;
       s->vep.et_mask = VEP_DEFAULT_ET_MASK;
+      s->vep.lt_next = VCL_INVALID_SESSION_INDEX;
       s->vep.ev = *event;
       s->flags &= ~VCL_SESSION_F_IS_VEP;
       s->flags |= VCL_SESSION_F_IS_VEP_SESSION;
@@ -2607,17 +2879,26 @@ vppcom_epoll_ctl (uint32_t vep_handle, int op, uint32_t session_handle,
       /* Generate EPOLLOUT if tx fifo not full */
       if ((event->events & EPOLLOUT) && (vcl_session_write_ready (s) > 0))
 	{
-	  session_event_t e = { 0 };
-	  e.event_type = SESSION_IO_EVT_TX;
-	  e.session_index = s->session_index;
-	  vec_add1 (wrk->unhandled_evts_vector, e);
+	  vcl_epoll_ctl_add_unhandled_event (wrk, s, event->events & EPOLLET,
+					     SESSION_IO_EVT_TX);
+	  add_evt = 1;
 	}
       /* Generate EPOLLIN if rx fifo has data */
       if ((event->events & EPOLLIN) && (vcl_session_read_ready (s) > 0))
 	{
+	  vcl_epoll_ctl_add_unhandled_event (wrk, s, event->events & EPOLLET,
+					     SESSION_IO_EVT_RX);
+	  add_evt = 1;
+	}
+      if (!add_evt && vcl_session_is_closing (s))
+	{
 	  session_event_t e = { 0 };
-	  e.event_type = SESSION_IO_EVT_RX;
+	  if (s->session_state == VCL_STATE_VPP_CLOSING)
+	    e.event_type = SESSION_CTRL_EVT_DISCONNECTED;
+	  else
+	    e.event_type = SESSION_CTRL_EVT_RESET;
 	  e.session_index = s->session_index;
+	  e.postponed = 1;
 	  vec_add1 (wrk->unhandled_evts_vector, e);
 	}
       VDBG (1, "EPOLL_CTL_ADD: vep_sh %u, sh %u, events 0x%x, data 0x%llx!",
@@ -2635,7 +2916,7 @@ vppcom_epoll_ctl (uint32_t vep_handle, int op, uint32_t session_handle,
       else if (PREDICT_FALSE (!(s->flags & VCL_SESSION_F_IS_VEP_SESSION)))
 	{
 	  VDBG (0, "sh %u EPOLL_CTL_MOD: not a vep session!", session_handle);
-	  rv = VPPCOM_EINVAL;
+	  rv = VPPCOM_ENOENT;
 	  goto done;
 	}
       else if (PREDICT_FALSE (s->vep.vep_sh != vep_handle))
@@ -2646,22 +2927,30 @@ vppcom_epoll_ctl (uint32_t vep_handle, int op, uint32_t session_handle,
 	  goto done;
 	}
 
-      /* Generate EPOLLOUT when tx_fifo/ct_tx_fifo not full */
-      if ((event->events & EPOLLOUT) &&
-	  !(s->vep.ev.events & EPOLLOUT) && (vcl_session_write_ready (s) > 0))
+      /* Generate EPOLLOUT if session write ready nd event was not on */
+      if ((event->events & EPOLLOUT) && !(s->vep.ev.events & EPOLLOUT) &&
+	  (vcl_session_write_ready (s) > 0))
 	{
-	  session_event_t e = { 0 };
-	  e.event_type = SESSION_IO_EVT_TX;
-	  e.session_index = s->session_index;
-	  vec_add1 (wrk->unhandled_evts_vector, e);
+	  vcl_epoll_ctl_add_unhandled_event (wrk, s, event->events & EPOLLET,
+					     SESSION_IO_EVT_TX);
+	}
+      /* Generate EPOLLIN if session read ready and event was not on */
+      if ((event->events & EPOLLIN) && !(s->vep.ev.events & EPOLLIN) &&
+	  (vcl_session_read_ready (s) > 0))
+	{
+	  vcl_epoll_ctl_add_unhandled_event (wrk, s, event->events & EPOLLET,
+					     SESSION_IO_EVT_RX);
 	}
       s->vep.et_mask = VEP_DEFAULT_ET_MASK;
       s->vep.ev = *event;
       txf = vcl_session_is_ct (s) ? s->ct_tx_fifo : s->tx_fifo;
-      if (event->events & EPOLLOUT)
-	svm_fifo_add_want_deq_ntf (txf, SVM_FIFO_WANT_DEQ_NOTIF_IF_FULL);
-      else
-	svm_fifo_del_want_deq_ntf (txf, SVM_FIFO_WANT_DEQ_NOTIF_IF_FULL);
+      if (txf)
+	{
+	  if (event->events & EPOLLOUT)
+	    svm_fifo_add_want_deq_ntf (txf, SVM_FIFO_WANT_DEQ_NOTIF_IF_FULL);
+	  else
+	    svm_fifo_del_want_deq_ntf (txf, SVM_FIFO_WANT_DEQ_NOTIF_IF_FULL);
+	}
       VDBG (1, "EPOLL_CTL_MOD: vep_sh %u, sh %u, events 0x%x, data 0x%llx!",
 	    vep_handle, session_handle, event->events, event->data.u64);
       break;
@@ -2670,7 +2959,7 @@ vppcom_epoll_ctl (uint32_t vep_handle, int op, uint32_t session_handle,
       if (PREDICT_FALSE (!(s->flags & VCL_SESSION_F_IS_VEP_SESSION)))
 	{
 	  VDBG (0, "EPOLL_CTL_DEL: %u not a vep session!", session_handle);
-	  rv = VPPCOM_EINVAL;
+	  rv = VPPCOM_ENOENT;
 	  goto done;
 	}
       else if (PREDICT_FALSE (s->vep.vep_sh != vep_handle))
@@ -2710,15 +2999,22 @@ vppcom_epoll_ctl (uint32_t vep_handle, int op, uint32_t session_handle,
 	  next_session->vep.prev_sh = s->vep.prev_sh;
 	}
 
+      if (s->vep.lt_next != VCL_INVALID_SESSION_INDEX)
+	vcl_epoll_lt_del (wrk, s);
+
       memset (&s->vep, 0, sizeof (s->vep));
       s->vep.next_sh = ~0;
       s->vep.prev_sh = ~0;
       s->vep.vep_sh = ~0;
+      s->vep.lt_next = VCL_INVALID_SESSION_INDEX;
       s->flags &= ~VCL_SESSION_F_IS_VEP_SESSION;
 
-      txf = vcl_session_is_ct (s) ? s->ct_tx_fifo : s->tx_fifo;
-      if (txf)
-	svm_fifo_del_want_deq_ntf (txf, SVM_FIFO_WANT_DEQ_NOTIF_IF_FULL);
+      if (vcl_session_is_open (s))
+	{
+	  txf = vcl_session_is_ct (s) ? s->ct_tx_fifo : s->tx_fifo;
+	  if (txf)
+	    svm_fifo_del_want_deq_ntf (txf, SVM_FIFO_WANT_DEQ_NOTIF_IF_FULL);
+	}
 
       VDBG (1, "EPOLL_CTL_DEL: vep_idx %u, sh %u!", vep_handle,
 	    session_handle);
@@ -2756,24 +3052,25 @@ vcl_epoll_wait_handle_mq_event (vcl_worker_t * wrk, session_event_t * e,
 	break;
       vcl_fifo_rx_evt_valid_or_break (s);
       session_events = s->vep.ev.events;
-      if (!(EPOLLIN & s->vep.ev.events)
-	  || (s->flags & VCL_SESSION_F_HAS_RX_EVT))
+      if (!(EPOLLIN & s->vep.ev.events) ||
+	  (s->flags & VCL_SESSION_F_HAS_RX_EVT) ||
+	  (s->vep.lt_next != VCL_INVALID_SESSION_INDEX))
 	break;
       add_event = 1;
-      events[*num_ev].events |= EPOLLIN;
+      events[*num_ev].events = EPOLLIN;
       session_evt_data = s->vep.ev.data.u64;
       s->flags |= VCL_SESSION_F_HAS_RX_EVT;
       break;
     case SESSION_IO_EVT_TX:
       sid = e->session_index;
       s = vcl_session_get (wrk, sid);
-      if (vcl_session_is_closed (s))
+      if (!s || !vcl_session_is_open (s))
 	break;
       session_events = s->vep.ev.events;
       if (!(EPOLLOUT & session_events))
 	break;
       add_event = 1;
-      events[*num_ev].events |= EPOLLOUT;
+      events[*num_ev].events = EPOLLOUT;
       session_evt_data = s->vep.ev.data.u64;
       svm_fifo_reset_has_deq_ntf (vcl_session_is_ct (s) ?
 				  s->ct_tx_fifo : s->tx_fifo);
@@ -2787,10 +3084,11 @@ vcl_epoll_wait_handle_mq_event (vcl_worker_t * wrk, session_event_t * e,
 	break;
       session_events = s->vep.ev.events;
       sid = s->session_index;
-      if (!(EPOLLIN & session_events))
+      if (!(EPOLLIN & session_events) ||
+	  (s->vep.lt_next != VCL_INVALID_SESSION_INDEX))
 	break;
       add_event = 1;
-      events[*num_ev].events |= EPOLLIN;
+      events[*num_ev].events = EPOLLIN;
       session_evt_data = s->vep.ev.data.u64;
       break;
     case SESSION_CTRL_EVT_CONNECTED:
@@ -2806,33 +3104,91 @@ vcl_epoll_wait_handle_mq_event (vcl_worker_t * wrk, session_event_t * e,
 	break;
       session_events = s->vep.ev.events;
       /* Generate EPOLLOUT because there's no connected event */
-      if (!(EPOLLOUT & session_events))
+      if (!(EPOLLOUT & session_events) || !s->tx_fifo)
 	break;
+      /* We didn't have a fifo when the event was added */
+      svm_fifo_add_want_deq_ntf (
+	(vcl_session_is_ct (s) ? s->ct_tx_fifo : s->tx_fifo),
+	SVM_FIFO_WANT_DEQ_NOTIF_IF_FULL);
       add_event = 1;
-      events[*num_ev].events |= EPOLLOUT;
+      events[*num_ev].events = EPOLLOUT;
       session_evt_data = s->vep.ev.data.u64;
       if (s->session_state == VCL_STATE_DETACHED)
 	events[*num_ev].events |= EPOLLHUP;
       break;
     case SESSION_CTRL_EVT_DISCONNECTED:
-      disconnected_msg = (session_disconnected_msg_t *) e->data;
-      s = vcl_session_disconnected_handler (wrk, disconnected_msg);
-      if (vcl_session_is_closed (s))
-	break;
+      if (!e->postponed)
+	{
+	  disconnected_msg = (session_disconnected_msg_t *) e->data;
+	  s = vcl_session_disconnected_handler (wrk, disconnected_msg);
+	}
+      else
+	{
+	  s = vcl_session_get (wrk, e->session_index);
+	  s->flags &= ~VCL_SESSION_F_PENDING_DISCONNECT;
+	}
+      if (vcl_session_is_closed (s) ||
+	  !(s->flags & VCL_SESSION_F_IS_VEP_SESSION))
+	{
+	  if (s && (s->flags & VCL_SESSION_F_PENDING_FREE))
+	    vcl_session_free (wrk, s);
+	  break;
+	}
       sid = s->session_index;
       session_events = s->vep.ev.events;
       add_event = 1;
-      events[*num_ev].events |= EPOLLHUP | EPOLLRDHUP;
+      if (EPOLLRDHUP & session_events)
+	{
+	  /* If app can distinguish between RDHUP and HUP,
+	   * we make finer control */
+	  events[*num_ev].events = EPOLLRDHUP;
+	  if (s->flags & VCL_SESSION_F_WR_SHUTDOWN)
+	    {
+	      events[*num_ev].events |= EPOLLHUP;
+	    }
+	}
+      else
+	{
+	  events[*num_ev].events = EPOLLHUP;
+	}
       session_evt_data = s->vep.ev.data.u64;
+
+      break;
+    case SESSION_CTRL_EVT_BOUND:
+      vcl_session_bound_handler (wrk, (session_bound_msg_t *) e->data);
       break;
     case SESSION_CTRL_EVT_RESET:
-      sid = vcl_session_reset_handler (wrk, (session_reset_msg_t *) e->data);
-      s = vcl_session_get (wrk, sid);
-      if (vcl_session_is_closed (s))
-	break;
+      if (!e->postponed)
+	{
+	  sid =
+	    vcl_session_reset_handler (wrk, (session_reset_msg_t *) e->data);
+	  s = vcl_session_get (wrk, sid);
+	}
+      else
+	{
+	  sid = e->session_index;
+	  s = vcl_session_get (wrk, sid);
+	  s->flags &= ~VCL_SESSION_F_PENDING_DISCONNECT;
+	}
+      if (vcl_session_is_closed (s) ||
+	  !(s->flags & VCL_SESSION_F_IS_VEP_SESSION))
+	{
+	  if (s && (s->flags & VCL_SESSION_F_PENDING_FREE))
+	    vcl_session_free (wrk, s);
+	  break;
+	}
       session_events = s->vep.ev.events;
       add_event = 1;
-      events[*num_ev].events |= EPOLLHUP | EPOLLRDHUP;
+      events[*num_ev].events = EPOLLERR | EPOLLHUP;
+      if ((EPOLLRDHUP & session_events) &&
+	  (s->flags & VCL_SESSION_F_RD_SHUTDOWN))
+	{
+	  events[*num_ev].events |= EPOLLRDHUP;
+	}
+      if ((EPOLLIN & session_events) && (s->flags & VCL_SESSION_F_RD_SHUTDOWN))
+	{
+	  events[*num_ev].events |= EPOLLIN;
+	}
       session_evt_data = s->vep.ev.data.u64;
       break;
     case SESSION_CTRL_EVT_UNLISTEN_REPLY:
@@ -2871,6 +3227,12 @@ vcl_epoll_wait_handle_mq_event (vcl_worker_t * wrk, session_event_t * e,
 	{
 	  s = vcl_session_get (wrk, sid);
 	  s->vep.ev.events = 0;
+	}
+      else if (!(EPOLLET & session_events))
+	{
+	  s = vcl_session_get (wrk, sid);
+	  if (s->vep.lt_next == VCL_INVALID_SESSION_INDEX)
+	    vcl_epoll_lt_add (wrk, s);
 	}
       *num_ev += 1;
     }
@@ -2920,56 +3282,56 @@ handle_dequeued:
 }
 
 static int
-vppcom_epoll_wait_condvar (vcl_worker_t * wrk, struct epoll_event *events,
-			   int maxevents, u32 n_evts, double wait_for_time)
+vppcom_epoll_wait_condvar (vcl_worker_t *wrk, struct epoll_event *events,
+			   int maxevents, u32 n_evts, double timeout_ms)
 {
-  double wait = 0, start = 0, now;
+  double end = -1;
 
   if (!n_evts)
     {
-      wait = wait_for_time;
-      start = clib_time_now (&wrk->clib_time);
+      if (timeout_ms > 0)
+	end = clib_time_now (&wrk->clib_time) + (timeout_ms / 1e3);
     }
 
   do
     {
       vcl_epoll_wait_handle_mq (wrk, wrk->app_event_queue, events, maxevents,
-				wait, &n_evts);
-      if (n_evts)
+				timeout_ms, &n_evts);
+      if (n_evts || !timeout_ms)
 	return n_evts;
-      if (wait == -1)
-	continue;
-
-      now = clib_time_now (&wrk->clib_time);
-      wait -= (now - start) * 1e3;
-      start = now;
     }
-  while (wait > 0);
+  while (end == -1 || clib_time_now (&wrk->clib_time) < end);
 
   return 0;
 }
 
 static int
-vppcom_epoll_wait_eventfd (vcl_worker_t * wrk, struct epoll_event *events,
-			   int maxevents, u32 n_evts, double wait_for_time)
+vppcom_epoll_wait_eventfd (vcl_worker_t *wrk, struct epoll_event *events,
+			   int maxevents, u32 n_evts, double timeout_ms)
 {
-  double wait = 0, start = 0, now;
   int __clib_unused n_read;
   vcl_mq_evt_conn_t *mqc;
   int n_mq_evts, i;
+  double end = -1;
   u64 buf;
+
+  if (PREDICT_FALSE (wrk->api_client_handle == ~0))
+    {
+      vcl_api_retry_attach (wrk);
+      return n_evts;
+    }
 
   vec_validate (wrk->mq_events, pool_elts (wrk->mq_evt_conns));
   if (!n_evts)
     {
-      wait = wait_for_time;
-      start = clib_time_now (&wrk->clib_time);
+      if (timeout_ms > 0)
+	end = clib_time_now (&wrk->clib_time) + (timeout_ms / 1e3);
     }
 
   do
     {
       n_mq_evts = epoll_wait (wrk->mqs_epfd, wrk->mq_events,
-			      vec_len (wrk->mq_events), wait);
+			      vec_len (wrk->mq_events), timeout_ms);
       if (n_mq_evts < 0)
 	{
 	  VDBG (0, "epoll_wait error %u", errno);
@@ -2978,24 +3340,85 @@ vppcom_epoll_wait_eventfd (vcl_worker_t * wrk, struct epoll_event *events,
 
       for (i = 0; i < n_mq_evts; i++)
 	{
+	  if (PREDICT_FALSE (wrk->mq_events[i].data.u32 == ~0))
+	    {
+	      /* api socket was closed */
+	      vcl_api_handle_disconnect (wrk);
+	      continue;
+	    }
+
 	  mqc = vcl_mq_evt_conn_get (wrk, wrk->mq_events[i].data.u32);
 	  n_read = read (mqc->mq_fd, &buf, sizeof (buf));
 	  vcl_epoll_wait_handle_mq (wrk, mqc->mq, events, maxevents, 0,
 				    &n_evts);
 	}
 
-      if (n_evts)
+      if (n_evts || !timeout_ms)
 	return n_evts;
-      if (wait == -1)
-	continue;
-
-      now = clib_time_now (&wrk->clib_time);
-      wait -= (now - start) * 1e3;
-      start = now;
     }
-  while (wait > 0);
+  while (end == -1 || clib_time_now (&wrk->clib_time) < end);
 
   return 0;
+}
+
+static void
+vcl_epoll_wait_handle_lt (vcl_worker_t *wrk, struct epoll_event *events,
+			  int maxevents, u32 *n_evts)
+{
+  u32 add_event = 0, next;
+  vcl_session_t *s;
+  u64 evt_data;
+  int rv;
+
+  ASSERT (wrk->ep_lt_current != VCL_INVALID_SESSION_INDEX);
+  if (*n_evts >= maxevents)
+    return;
+
+  next = wrk->ep_lt_current;
+  do
+    {
+      s = vcl_session_get (wrk, next);
+      next = s->vep.lt_next;
+
+      if ((s->vep.ev.events & EPOLLIN) && (rv = vcl_session_read_ready (s)))
+	{
+	  add_event = 1;
+	  events[*n_evts].events |= rv > 0 ? EPOLLIN : EPOLLHUP | EPOLLRDHUP;
+	  evt_data = s->vep.ev.data.u64;
+	}
+      if ((s->vep.ev.events & EPOLLOUT) && (rv = vcl_session_write_ready (s)))
+	{
+	  add_event = 1;
+	  events[*n_evts].events |= rv > 0 ? EPOLLOUT : EPOLLHUP | EPOLLRDHUP;
+	  evt_data = s->vep.ev.data.u64;
+	}
+      if (!add_event && s->session_state > VCL_STATE_READY)
+	{
+	  add_event = 1;
+	  events[*n_evts].events |= EPOLLHUP | EPOLLRDHUP;
+	  evt_data = s->vep.ev.data.u64;
+	}
+      if (add_event)
+	{
+	  events[*n_evts].data.u64 = evt_data;
+	  *n_evts += 1;
+	  add_event = 0;
+	  if (EPOLLONESHOT & s->vep.ev.events)
+	    s->vep.ev.events = 0;
+	  if (*n_evts == maxevents)
+	    {
+	      wrk->ep_lt_current = next;
+	      break;
+	    }
+	}
+      else
+	{
+	  vcl_epoll_lt_del (wrk, s);
+	  if (wrk->ep_lt_current == VCL_INVALID_SESSION_INDEX)
+	    break;
+	}
+    }
+  while (next != wrk->ep_lt_current);
 }
 
 int
@@ -3023,8 +3446,6 @@ vppcom_epoll_wait (uint32_t vep_handle, struct epoll_event *events,
       return VPPCOM_EINVAL;
     }
 
-  memset (events, 0, sizeof (*events) * maxevents);
-
   if (vec_len (wrk->unhandled_evts_vector))
     {
       for (i = 0; i < vec_len (wrk->unhandled_evts_vector); i++)
@@ -3040,12 +3461,22 @@ vppcom_epoll_wait (uint32_t vep_handle, struct epoll_event *events,
       vec_reset_length (wrk->unhandled_evts_vector);
     }
 
-  if (vcm->cfg.use_mq_eventfd)
-    return vppcom_epoll_wait_eventfd (wrk, events, maxevents, n_evts,
-				      wait_for_time);
+  if (PREDICT_FALSE (wrk->ep_lt_current != VCL_INVALID_SESSION_INDEX))
+    vcl_epoll_wait_handle_lt (wrk, events, maxevents, &n_evts);
 
-  return vppcom_epoll_wait_condvar (wrk, events, maxevents, n_evts,
-				    wait_for_time);
+  /* Request to only drain unhandled */
+  if ((int) wait_for_time == -2)
+    return n_evts;
+
+
+  if (vcm->cfg.use_mq_eventfd)
+    n_evts = vppcom_epoll_wait_eventfd (wrk, events, maxevents, n_evts,
+					wait_for_time);
+  else
+    n_evts = vppcom_epoll_wait_condvar (wrk, events, maxevents, n_evts,
+					wait_for_time);
+
+  return n_evts;
 }
 
 int
@@ -3053,8 +3484,9 @@ vppcom_session_attr (uint32_t session_handle, uint32_t op,
 		     void *buffer, uint32_t * buflen)
 {
   vcl_worker_t *wrk = vcl_worker_get_current ();
-  u32 *flags = buffer, tmp_flags = 0;
+  u32 *flags = buffer;
   vppcom_endpt_t *ep = buffer;
+  transport_endpt_attr_t tea;
   vcl_session_t *session;
   int rv = VPPCOM_OK;
 
@@ -3121,9 +3553,11 @@ vppcom_session_attr (uint32_t session_handle, uint32_t op,
 	    clib_memcpy_fast (ep->ip, &session->transport.rmt_ip.ip6,
 			      sizeof (ip6_address_t));
 	  *buflen = sizeof (*ep);
-	  VDBG (1, "VPPCOM_ATTR_GET_PEER_ADDR: sh %u, is_ip4 = %u, "
-		"addr = %U, port %u", session_handle, ep->is_ip4,
-		format_ip46_address, &session->transport.rmt_ip,
+	  VDBG (1,
+		"VPPCOM_ATTR_GET_PEER_ADDR: sh %u, is_ip4 = %u, "
+		"addr = %U, port %u",
+		session_handle, ep->is_ip4, vcl_format_ip46_address,
+		&session->transport.rmt_ip,
 		ep->is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6,
 		clib_net_to_host_u16 (ep->port));
 	}
@@ -3144,8 +3578,10 @@ vppcom_session_attr (uint32_t session_handle, uint32_t op,
 	    clib_memcpy_fast (ep->ip, &session->transport.lcl_ip.ip6,
 			      sizeof (ip6_address_t));
 	  *buflen = sizeof (*ep);
-	  VDBG (1, "VPPCOM_ATTR_GET_LCL_ADDR: sh %u, is_ip4 = %u, addr = %U"
-		" port %d", session_handle, ep->is_ip4, format_ip46_address,
+	  VDBG (1,
+		"VPPCOM_ATTR_GET_LCL_ADDR: sh %u, is_ip4 = %u, addr = %U"
+		" port %d",
+		session_handle, ep->is_ip4, vcl_format_ip46_address,
 		&session->transport.lcl_ip,
 		ep->is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6,
 		clib_net_to_host_u16 (ep->port));
@@ -3162,8 +3598,10 @@ vppcom_session_attr (uint32_t session_handle, uint32_t op,
 	  session->transport.lcl_port = ep->port;
 	  vcl_ip_copy_from_ep (&session->transport.lcl_ip, ep);
 	  *buflen = sizeof (*ep);
-	  VDBG (1, "VPPCOM_ATTR_SET_LCL_ADDR: sh %u, is_ip4 = %u, addr = %U"
-		" port %d", session_handle, ep->is_ip4, format_ip46_address,
+	  VDBG (1,
+		"VPPCOM_ATTR_SET_LCL_ADDR: sh %u, is_ip4 = %u, addr = %U"
+		" port %d",
+		session_handle, ep->is_ip4, vcl_format_ip46_address,
 		&session->transport.lcl_ip,
 		ep->is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6,
 		clib_net_to_host_u16 (ep->port));
@@ -3245,6 +3683,18 @@ vppcom_session_attr (uint32_t session_handle, uint32_t op,
 	  VDBG (2, "VPPCOM_ATTR_GET_TX_FIFO_LEN: %u (0x%x), buflen %d,"
 		" #VPP-TBD#", *(size_t *) buffer, *(size_t *) buffer,
 		*buflen);
+	}
+      else
+	rv = VPPCOM_EINVAL;
+      break;
+
+    case VPPCOM_ATTR_SET_DSCP:
+      if (buffer && buflen && (*buflen >= sizeof (u8)))
+	{
+	  session->dscp = *(u8 *) buffer;
+
+	  VDBG (2, "VPPCOM_ATTR_SET_DSCP: %u (0x%x), buflen %d,",
+		*(u8 *) buffer, *(u8 *) buffer, *buflen);
 	}
       else
 	rv = VPPCOM_EINVAL;
@@ -3553,51 +4003,40 @@ vppcom_session_attr (uint32_t session_handle, uint32_t op,
       break;
 
     case VPPCOM_ATTR_GET_TCP_USER_MSS:
-      if (buffer && buflen && (*buflen >= sizeof (u32)))
+      if (!(buffer && buflen && (*buflen >= sizeof (u32))))
 	{
-	  /* VPP-TBD */
-	  *(u32 *) buffer = session->user_mss;
+	  rv = VPPCOM_EINVAL;
+	  break;
+	}
+
+      tea.type = TRANSPORT_ENDPT_ATTR_MSS;
+      tea.mss = *(u32 *) buffer;
+      if (vcl_session_transport_attr (wrk, session, 1 /* is_get */, &tea))
+	rv = VPPCOM_ENOPROTOOPT;
+
+      if (!rv)
+	{
+	  *(u32 *) buffer = tea.mss;
 	  *buflen = sizeof (int);
-
-	  VDBG (2, "VPPCOM_ATTR_GET_TCP_USER_MSS: %d, buflen %d, #VPP-TBD#",
-		*(int *) buffer, *buflen);
 	}
-      else
-	rv = VPPCOM_EINVAL;
-      break;
 
+      VDBG (2, "VPPCOM_ATTR_GET_TCP_USER_MSS: %d, buflen %d", *(int *) buffer,
+	    *buflen);
+      break;
     case VPPCOM_ATTR_SET_TCP_USER_MSS:
-      if (buffer && buflen && (*buflen == sizeof (u32)))
+      if (!(buffer && buflen && (*buflen == sizeof (u32))))
 	{
-	  /* VPP-TBD */
-	  session->user_mss = *(u32 *) buffer;
-
-	  VDBG (2, "VPPCOM_ATTR_SET_TCP_USER_MSS: %u, buflen %d, #VPP-TBD#",
-		session->user_mss, *buflen);
+	  rv = VPPCOM_EINVAL;
+	  break;
 	}
-      else
-	rv = VPPCOM_EINVAL;
-      break;
 
-    case VPPCOM_ATTR_SET_SHUT:
-      if (*flags == SHUT_RD || *flags == SHUT_RDWR)
-	vcl_session_set_attr (session, VCL_SESS_ATTR_SHUT_RD);
-      if (*flags == SHUT_WR || *flags == SHUT_RDWR)
-	vcl_session_set_attr (session, VCL_SESS_ATTR_SHUT_WR);
-      break;
+      tea.type = TRANSPORT_ENDPT_ATTR_MSS;
+      tea.mss = *(u32 *) buffer;
+      if (vcl_session_transport_attr (wrk, session, 0 /* is_get */, &tea))
+	rv = VPPCOM_ENOPROTOOPT;
 
-    case VPPCOM_ATTR_GET_SHUT:
-      if (vcl_session_has_attr (session, VCL_SESS_ATTR_SHUT_RD))
-	tmp_flags = 1;
-      if (vcl_session_has_attr (session, VCL_SESS_ATTR_SHUT_WR))
-	tmp_flags |= 2;
-      if (tmp_flags == 1)
-	*(int *) buffer = SHUT_RD;
-      else if (tmp_flags == 2)
-	*(int *) buffer = SHUT_WR;
-      else if (tmp_flags == 3)
-	*(int *) buffer = SHUT_RDWR;
-      *buflen = sizeof (int);
+      VDBG (2, "VPPCOM_ATTR_SET_TCP_USER_MSS: %u, buflen %d", tea.mss,
+	    *buflen);
       break;
 
     case VPPCOM_ATTR_SET_CONNECTED:
@@ -3611,7 +4050,18 @@ vppcom_session_attr (uint32_t session_handle, uint32_t op,
 	  rv = VPPCOM_EINVAL;
 	  break;
 	}
-      session->ckpair_index = *(uint32_t *) buffer;
+      if (!session->ext_config)
+	{
+	  vcl_session_alloc_ext_cfg (session, TRANSPORT_ENDPT_EXT_CFG_CRYPTO,
+				     sizeof (transport_endpt_ext_cfg_t));
+	}
+      else if (session->ext_config->type != TRANSPORT_ENDPT_EXT_CFG_CRYPTO)
+	{
+	  rv = VPPCOM_EINVAL;
+	  break;
+	}
+
+      session->ext_config->crypto.ckpair_index = *(uint32_t *) buffer;
       break;
 
     case VPPCOM_ATTR_SET_VRF:
@@ -3631,6 +4081,70 @@ vppcom_session_attr (uint32_t session_handle, uint32_t op,
 	}
       *(u32 *) buffer = session->vrf;
       *buflen = sizeof (u32);
+      break;
+
+    case VPPCOM_ATTR_GET_DOMAIN:
+      if (!(buffer && buflen && (*buflen >= sizeof (int))))
+	{
+	  rv = VPPCOM_EINVAL;
+	  break;
+	}
+
+      if (session->transport.is_ip4)
+	*(int *) buffer = AF_INET;
+      else
+	*(int *) buffer = AF_INET6;
+      *buflen = sizeof (int);
+
+      VDBG (2, "VPPCOM_ATTR_GET_DOMAIN: %d, buflen %u", *(int *) buffer,
+	    *buflen);
+      break;
+
+    case VPPCOM_ATTR_SET_ENDPT_EXT_CFG:
+      if (!(buffer && buflen && (*buflen > 0)))
+	{
+	  rv = VPPCOM_EINVAL;
+	  break;
+	}
+      if (session->ext_config)
+	{
+	  rv = VPPCOM_EINVAL;
+	  break;
+	}
+      vcl_session_alloc_ext_cfg (session, TRANSPORT_ENDPT_EXT_CFG_NONE,
+				 *buflen + sizeof (u32));
+      clib_memcpy (session->ext_config->data, buffer, *buflen);
+      session->ext_config->len = *buflen;
+      break;
+    case VPPCOM_ATTR_SET_IP_PKTINFO:
+      if (buffer && buflen && (*buflen == sizeof (int)) &&
+	  !vcl_session_has_attr (session, VCL_SESS_ATTR_IP_PKTINFO))
+	{
+	  if (*(int *) buffer)
+	    vcl_session_set_attr (session, VCL_SESS_ATTR_IP_PKTINFO);
+	  else
+	    vcl_session_clear_attr (session, VCL_SESS_ATTR_IP_PKTINFO);
+
+	  VDBG (2, "VCL_SESS_ATTR_IP_PKTINFO: %d, buflen %d",
+		vcl_session_has_attr (session, VCL_SESS_ATTR_IP_PKTINFO),
+		*buflen);
+	}
+      else
+	rv = VPPCOM_EINVAL;
+      break;
+
+    case VPPCOM_ATTR_GET_IP_PKTINFO:
+      if (buffer && buflen && (*buflen >= sizeof (int)))
+	{
+	  *(int *) buffer =
+	    vcl_session_has_attr (session, VCL_SESS_ATTR_IP_PKTINFO);
+	  *buflen = sizeof (int);
+
+	  VDBG (2, "VCL_SESS_ATTR_IP_PKTINFO: %d, buflen %d", *(int *) buffer,
+		*buflen);
+	}
+      else
+	rv = VPPCOM_EINVAL;
       break;
 
     default:
@@ -3675,6 +4189,31 @@ vppcom_session_recvfrom (uint32_t session_handle, void *buffer,
   return rv;
 }
 
+static void
+vcl_handle_ep_app_tlvs (vcl_session_t *s, vppcom_endpt_t *ep)
+{
+  vppcom_endpt_tlv_t *tlv = ep->app_tlvs;
+
+  do
+    {
+      switch (tlv->data_type)
+	{
+	case VCL_UDP_SEGMENT:
+	  s->gso_size = *(u16 *) tlv->data;
+	  break;
+	case VCL_IP_PKTINFO:
+	  clib_memcpy_fast (&s->transport.lcl_ip, (ip4_address_t *) tlv->data,
+			    sizeof (ip4_address_t));
+	  break;
+	default:
+	  VDBG (0, "Ignorning unsupported app tlv %u", tlv->data_type);
+	  break;
+	}
+      tlv = VCL_EP_NEXT_APP_TLV (ep, tlv);
+    }
+  while (tlv);
+}
+
 int
 vppcom_session_sendto (uint32_t session_handle, void *buffer,
 		       uint32_t buflen, int flags, vppcom_endpt_t * ep)
@@ -3683,16 +4222,20 @@ vppcom_session_sendto (uint32_t session_handle, void *buffer,
   vcl_session_t *s;
 
   s = vcl_session_get_w_handle (wrk, session_handle);
-  if (!s)
+  if (PREDICT_FALSE (!s))
     return VPPCOM_EBADFD;
-
-  if (!buffer)
-    return VPPCOM_EINVAL;
 
   if (ep)
     {
       if (!vcl_session_is_cl (s))
 	return VPPCOM_EINVAL;
+
+      s->transport.is_ip4 = ep->is_ip4;
+      s->transport.rmt_port = ep->port;
+      vcl_ip_copy_from_ep (&s->transport.rmt_ip, ep);
+
+      if (ep->app_tlvs)
+	vcl_handle_ep_app_tlvs (s, ep);
 
       /* Session not connected/bound in vpp. Create it by 'connecting' it */
       if (PREDICT_FALSE (s->session_state == VCL_STATE_CLOSED))
@@ -3709,10 +4252,6 @@ vppcom_session_sendto (uint32_t session_handle, void *buffer,
 	    return rv;
 	  s = vcl_session_get (wrk, session_index);
 	}
-
-      s->transport.is_ip4 = ep->is_ip4;
-      s->transport.rmt_port = ep->port;
-      vcl_ip_copy_from_ep (&s->transport.rmt_ip, ep);
     }
 
   if (flags)
@@ -3945,6 +4484,9 @@ vppcom_proto_str (vppcom_proto_t proto)
     case VPPCOM_PROTO_DTLS:
       proto_str = "DTLS";
       break;
+    case VPPCOM_PROTO_SRTP:
+      proto_str = "SRTP";
+      break;
     default:
       proto_str = "UNKNOWN";
       break;
@@ -4007,6 +4549,10 @@ vppcom_retval_str (int retval)
       st = "VPPCOM_ETIMEDOUT";
       break;
 
+    case VPPCOM_EADDRINUSE:
+      st = "VPPCOM_EADDRINUSE";
+      break;
+
     default:
       st = "UNKNOWN_STATE";
       break;
@@ -4019,22 +4565,55 @@ int
 vppcom_add_cert_key_pair (vppcom_cert_key_pair_t *ckpair)
 {
   if (vcm->cfg.vpp_app_socket_api)
-    {
-      clib_warning ("not supported");
-      return VPPCOM_EINVAL;
-    }
-  return vcl_bapi_add_cert_key_pair (ckpair);
+    return vcl_sapi_add_cert_key_pair (ckpair);
+  else
+    return vcl_bapi_add_cert_key_pair (ckpair);
 }
 
 int
 vppcom_del_cert_key_pair (uint32_t ckpair_index)
 {
   if (vcm->cfg.vpp_app_socket_api)
+    return vcl_sapi_del_cert_key_pair (ckpair_index);
+  else
+    return vcl_bapi_del_cert_key_pair (ckpair_index);
+}
+
+int
+vppcom_session_get_error (uint32_t session_handle)
+{
+  vcl_worker_t *wrk = vcl_worker_get_current ();
+  vcl_session_t *session = 0;
+
+  session = vcl_session_get_w_handle (wrk, session_handle);
+  if (!session)
+    return VPPCOM_EBADFD;
+
+  if (PREDICT_FALSE (session->flags & VCL_SESSION_F_IS_VEP))
     {
-      clib_warning ("not supported");
-      return VPPCOM_EINVAL;
+      VWRN ("epoll session %u! will not have connect", session->session_index);
+      return VPPCOM_EBADFD;
     }
-  return vcl_bapi_del_cert_key_pair (ckpair_index);
+
+  if (session->vpp_error == SESSION_E_PORTINUSE)
+    return VPPCOM_EADDRINUSE;
+  else if (session->vpp_error == SESSION_E_REFUSED)
+    return VPPCOM_ECONNREFUSED;
+  else if (session->vpp_error != SESSION_E_NONE)
+    return VPPCOM_EFAULT;
+  else
+    return VPPCOM_OK;
+}
+
+int
+vppcom_worker_is_detached (void)
+{
+  vcl_worker_t *wrk = vcl_worker_get_current ();
+
+  if (!vcm->cfg.use_mq_eventfd)
+    return VPPCOM_ENOTSUP;
+
+  return wrk->api_client_handle == ~0;
 }
 
 /*

@@ -326,9 +326,6 @@ l2_rw_mod_entry (u32 * index,
       *index = e - rw->entries;
     }
 
-  if (!e)
-    return -1;
-
   if (is_del)
     {
       pool_put (rw->entries, e);
@@ -591,7 +588,7 @@ l2_rw_set_cli_fn (vlib_main_t * vm,
 
 /*?
  * Layer 2-Rewrite node uses classify tables to match packets. Then, using
- * the provisioned mask and value, modfies the packet header.
+ * the provisioned mask and value, modifies the packet header.
  *
  * @cliexpar
  * @todo This is incomplete. This needs a detailed description and a

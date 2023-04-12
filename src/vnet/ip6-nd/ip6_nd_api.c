@@ -83,7 +83,7 @@ static void
 vl_api_ip6nd_proxy_dump_t_handler (vl_api_ip6nd_proxy_dump_t * mp)
 {
   ip6_main_t *im6 = &ip6_main;
-  fib_table_t *fib_table;
+  u32 fib_index;
   api_ip6nd_proxy_fib_table_walk_ctx_t ctx = {
     .indices = NULL,
   };
@@ -96,13 +96,11 @@ vl_api_ip6nd_proxy_dump_t_handler (vl_api_ip6nd_proxy_dump_t * mp)
     return;
 
   /* *INDENT-OFF* */
-  pool_foreach (fib_table, im6->fibs)
-   {
-    fib_table_walk(fib_table->ft_index,
-                   FIB_PROTOCOL_IP6,
-                   api_ip6nd_proxy_fib_table_walk,
-                   &ctx);
-  }
+  pool_foreach_index (fib_index, im6->fibs)
+    {
+      fib_table_walk (fib_index, FIB_PROTOCOL_IP6,
+		      api_ip6nd_proxy_fib_table_walk, &ctx);
+    }
   /* *INDENT-ON* */
 
   vec_sort_with_function (ctx.indices, fib_entry_cmp_for_sort);
@@ -118,6 +116,24 @@ vl_api_ip6nd_proxy_dump_t_handler (vl_api_ip6nd_proxy_dump_t * mp)
   }
 
   vec_free (ctx.indices);
+}
+
+static void
+vl_api_ip6nd_proxy_enable_disable_t_handler (
+  vl_api_ip6nd_proxy_enable_disable_t *mp)
+{
+  vl_api_ip6nd_proxy_enable_disable_reply_t *rmp;
+  int rv = 0;
+
+  VALIDATE_SW_IF_INDEX (mp);
+
+  if (mp->is_enable)
+    rv = ip6_nd_proxy_enable_disable (ntohl (mp->sw_if_index), 1);
+  else
+    rv = ip6_nd_proxy_enable_disable (ntohl (mp->sw_if_index), 0);
+
+  BAD_SW_IF_INDEX_LABEL;
+  REPLY_MACRO (VL_API_IP6ND_PROXY_ENABLE_DISABLE_REPLY);
 }
 
 static void
@@ -203,6 +219,175 @@ static void
 
   BAD_SW_IF_INDEX_LABEL;
   REPLY_MACRO (VL_API_SW_INTERFACE_IP6ND_RA_PREFIX_REPLY);
+}
+
+static void
+ip6_radv_prefix_encode (f64 now, const ip6_radv_prefix_t *in,
+			vl_api_ip6nd_ra_prefix_t *out)
+{
+  fib_prefix_t in_ip6_pfx = {
+    .fp_addr = {
+      .ip6 = in->prefix,
+    },
+    .fp_len = in->prefix_len,
+    .fp_proto = FIB_PROTOCOL_IP6,
+  };
+
+  ip_prefix_encode (&in_ip6_pfx, &out->prefix);
+
+  out->onlink_flag = in->adv_on_link_flag;
+  out->autonomous_flag = in->adv_autonomous_flag;
+  out->val_lifetime = htonl (in->adv_valid_lifetime_in_secs);
+  out->pref_lifetime = htonl (in->adv_pref_lifetime_in_secs);
+
+  if (in->adv_valid_lifetime_in_secs != ~0)
+    {
+      out->valid_lifetime_expires =
+	clib_host_to_net_f64 (in->valid_lifetime_expires - now);
+    }
+
+  if (in->adv_pref_lifetime_in_secs != ~0)
+    {
+      out->pref_lifetime_expires =
+	clib_host_to_net_f64 (in->pref_lifetime_expires - now);
+    }
+
+  out->decrement_lifetime_flag = in->decrement_lifetime_flag;
+  out->no_advertise = (in->enabled == 0);
+}
+
+static void
+send_sw_interface_ip6nd_ra_details (vl_api_registration_t *reg, u32 context,
+				    ip6_ra_t *radv_info)
+{
+  vl_api_sw_interface_ip6nd_ra_details_t *rmp = 0;
+  vl_api_ip6nd_ra_prefix_t *api_radv_pfx;
+  u32 n_prefixes = pool_elts (radv_info->adv_prefixes_pool);
+  ip6_radv_prefix_t *radv_pfx;
+  u32 msg_size = sizeof (*rmp) + n_prefixes * sizeof (*api_radv_pfx);
+  vlib_main_t *vm = vlib_get_main ();
+  f64 now = vlib_time_now (vm);
+
+  rmp = vl_msg_api_alloc (msg_size);
+  if (!rmp)
+    return;
+  clib_memset (rmp, 0, msg_size);
+  rmp->_vl_msg_id =
+    ntohs (VL_API_SW_INTERFACE_IP6ND_RA_DETAILS + REPLY_MSG_ID_BASE);
+  rmp->context = context;
+
+  rmp->sw_if_index = htonl (radv_info->sw_if_index);
+  rmp->cur_hop_limit = radv_info->curr_hop_limit;
+  rmp->adv_managed_flag = radv_info->adv_managed_flag;
+  rmp->adv_other_flag = radv_info->adv_other_flag;
+  rmp->adv_router_lifetime = htons (radv_info->adv_router_lifetime_in_sec);
+  rmp->adv_neighbor_reachable_time =
+    htonl (radv_info->adv_neighbor_reachable_time_in_msec);
+  rmp->adv_retransmit_interval = htonl (
+    radv_info->adv_time_in_msec_between_retransmitted_neighbor_solicitations);
+  rmp->adv_link_mtu = htonl (radv_info->adv_link_mtu);
+  rmp->send_radv = radv_info->send_radv;
+  rmp->cease_radv = radv_info->cease_radv;
+  rmp->send_unicast = radv_info->send_unicast;
+  rmp->adv_link_layer_address = radv_info->adv_link_layer_address;
+  rmp->max_radv_interval = clib_host_to_net_f64 (radv_info->max_radv_interval);
+  rmp->min_radv_interval = clib_host_to_net_f64 (radv_info->min_radv_interval);
+
+  if (radv_info->last_radv_time > 0.0)
+    {
+      rmp->last_radv_time =
+	clib_host_to_net_f64 (now - radv_info->last_radv_time);
+    }
+
+  if ((radv_info->next_multicast_time - radv_info->last_multicast_time) > 0.0)
+    {
+      rmp->last_multicast_time =
+	clib_host_to_net_f64 (now - radv_info->last_multicast_time);
+      rmp->next_multicast_time =
+	clib_host_to_net_f64 (radv_info->next_multicast_time - now);
+    }
+
+  rmp->initial_adverts_count = htonl (radv_info->initial_adverts_count);
+  rmp->initial_adverts_interval =
+    clib_host_to_net_f64 (radv_info->initial_adverts_interval);
+  rmp->initial_adverts_sent = (radv_info->initial_adverts_sent == 0);
+  rmp->n_advertisements_sent = htonl (radv_info->n_advertisements_sent);
+  rmp->n_solicitations_rcvd = htonl (radv_info->n_solicitations_rcvd);
+  rmp->n_solicitations_dropped = htonl (radv_info->n_solicitations_dropped);
+  rmp->n_prefixes = htonl (n_prefixes);
+
+  api_radv_pfx = rmp->prefixes;
+  pool_foreach (radv_pfx, radv_info->adv_prefixes_pool)
+    {
+      ip6_radv_prefix_encode (now, radv_pfx, api_radv_pfx);
+
+      api_radv_pfx++;
+    }
+
+  vl_api_send_msg (reg, (u8 *) rmp);
+}
+
+typedef struct
+{
+  u32 *sw_if_indices;
+} api_dump_ip6_ra_itf_walk_ctx_t;
+
+static walk_rc_t
+api_dump_ip6_ra_itf_walk_fn (u32 sw_if_index, void *arg)
+{
+  api_dump_ip6_ra_itf_walk_ctx_t *ctx = arg;
+
+  vec_add1 (ctx->sw_if_indices, sw_if_index);
+
+  return (WALK_CONTINUE);
+}
+
+static void
+vl_api_sw_interface_ip6nd_ra_dump_t_handler (
+  vl_api_sw_interface_ip6nd_ra_dump_t *mp)
+{
+  vl_api_registration_t *reg;
+  u32 sw_if_index;
+  ip6_ra_t *radv_info;
+
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
+
+  sw_if_index = ntohl (mp->sw_if_index);
+
+  if (sw_if_index == INDEX_INVALID)
+    {
+      /* dump all interfaces */
+
+      api_dump_ip6_ra_itf_walk_ctx_t ctx = {
+	.sw_if_indices = NULL,
+      };
+      u32 *sw_if_i;
+
+      ip6_ra_itf_walk (api_dump_ip6_ra_itf_walk_fn, &ctx);
+
+      vec_foreach (sw_if_i, ctx.sw_if_indices)
+	{
+	  radv_info = ip6_ra_get_itf (*sw_if_i);
+	  if (radv_info != NULL)
+	    {
+	      send_sw_interface_ip6nd_ra_details (reg, mp->context, radv_info);
+	    }
+	}
+
+      vec_free (ctx.sw_if_indices);
+    }
+  else
+    {
+      /* dump a single interface */
+
+      radv_info = ip6_ra_get_itf (sw_if_index);
+      if (radv_info != NULL)
+	{
+	  send_sw_interface_ip6nd_ra_details (reg, mp->context, radv_info);
+	}
+    }
 }
 
 static void

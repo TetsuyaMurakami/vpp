@@ -19,6 +19,7 @@
 #include <vlib/unix/unix.h>
 #include <vlib/pci/pci.h>
 #include <vppinfra/ring.h>
+#include <vppinfra/vector/ip_csum.h>
 
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/ip/ip4_packet.h>
@@ -60,12 +61,17 @@ avf_tx_prepare_cksum (vlib_buffer_t * b, u8 is_tso)
   if (!is_tso && !(b->flags & VNET_BUFFER_F_OFFLOAD))
     return 0;
 
-  u32 oflags = vnet_buffer2 (b)->oflags;
+  vnet_buffer_oflags_t oflags = vnet_buffer (b)->oflags;
   u32 is_tcp = is_tso || oflags & VNET_BUFFER_OFFLOAD_F_TCP_CKSUM;
   u32 is_udp = !is_tso && oflags & VNET_BUFFER_OFFLOAD_F_UDP_CKSUM;
+
+  if (!is_tcp && !is_udp)
+    return 0;
+
   u32 is_ip4 = b->flags & VNET_BUFFER_F_IS_IP4;
   u32 is_ip6 = b->flags & VNET_BUFFER_F_IS_IP6;
-  ASSERT (!is_tcp || !is_udp);
+
+  ASSERT (!(is_tcp && is_udp));
   ASSERT (is_ip4 || is_ip6);
   i16 l2_hdr_offset = b->current_data;
   i16 l3_hdr_offset = vnet_buffer (b)->l3_hdr_offset;
@@ -76,14 +82,13 @@ avf_tx_prepare_cksum (vlib_buffer_t * b, u8 is_tso)
   ip6_header_t *ip6 = (void *) (b->data + l3_hdr_offset);
   tcp_header_t *tcp = (void *) (b->data + l4_hdr_offset);
   udp_header_t *udp = (void *) (b->data + l4_hdr_offset);
-  u16 l4_len =
-    is_tcp ? tcp_header_bytes (tcp) : is_udp ? sizeof (udp_header_t) : 0;
+  u16 l4_len = is_tcp ? tcp_header_bytes (tcp) : sizeof (udp_header_t);
   u16 sum = 0;
 
   flags |= AVF_TXD_OFFSET_MACLEN (l2_len) |
     AVF_TXD_OFFSET_IPLEN (l3_len) | AVF_TXD_OFFSET_L4LEN (l4_len);
   flags |= is_ip4 ? AVF_TXD_CMD_IIPT_IPV4 : AVF_TXD_CMD_IIPT_IPV6;
-  flags |= is_tcp ? AVF_TXD_CMD_L4T_TCP : is_udp ? AVF_TXD_CMD_L4T_UDP : 0;
+  flags |= is_tcp ? AVF_TXD_CMD_L4T_TCP : AVF_TXD_CMD_L4T_UDP;
 
   if (is_ip4)
     ip4->checksum = 0;
@@ -96,8 +101,6 @@ avf_tx_prepare_cksum (vlib_buffer_t * b, u8 is_tso)
 	ip6->payload_length = 0;
     }
 
-  if (is_tcp || is_udp)
-    {
       if (is_ip4)
 	{
 	  struct avf_ip4_psh psh = { 0 };
@@ -108,7 +111,7 @@ avf_tx_prepare_cksum (vlib_buffer_t * b, u8 is_tso)
 	    is_tso ? 0 :
 	    clib_host_to_net_u16 (clib_net_to_host_u16 (ip4->length) -
 				  (l4_hdr_offset - l3_hdr_offset));
-	  sum = ~ip_csum (&psh, sizeof (psh));
+	  sum = ~clib_ip_csum ((u8 *) &psh, sizeof (psh));
 	}
       else
 	{
@@ -117,40 +120,29 @@ avf_tx_prepare_cksum (vlib_buffer_t * b, u8 is_tso)
 	  psh.dst = ip6->dst_address;
 	  psh.proto = clib_host_to_net_u32 ((u32) ip6->protocol);
 	  psh.l4len = is_tso ? 0 : ip6->payload_length;
-	  sum = ~ip_csum (&psh, sizeof (psh));
+	  sum = ~clib_ip_csum ((u8 *) &psh, sizeof (psh));
 	}
-    }
-  /* ip_csum does a byte swap for some reason... */
-  sum = clib_net_to_host_u16 (sum);
+
   if (is_tcp)
     tcp->checksum = sum;
-  else if (is_udp)
+  else
     udp->checksum = sum;
   return flags;
 }
 
-static_always_inline int
-avf_tx_fill_ctx_desc (vlib_main_t * vm, avf_txq_t * txq, avf_tx_desc_t * d,
-		      vlib_buffer_t * b)
+static_always_inline u32
+avf_tx_fill_ctx_desc (vlib_main_t *vm, avf_txq_t *txq, avf_tx_desc_t *d,
+		      vlib_buffer_t *b)
 {
-  vlib_buffer_t *ctx_ph = vlib_get_buffer (vm, txq->ctx_desc_placeholder_bi);
+  vlib_buffer_t *ctx_ph;
+  u32 *bi = txq->ph_bufs;
+
+next:
+  ctx_ph = vlib_get_buffer (vm, bi[0]);
   if (PREDICT_FALSE (ctx_ph->ref_count == 255))
     {
-      /* We need a new placeholder buffer */
-      u32 new_bi;
-      u8 bpi = vlib_buffer_pool_get_default_for_numa (vm, vm->numa_node);
-      if (PREDICT_TRUE
-	  (vlib_buffer_alloc_from_pool (vm, &new_bi, 1, bpi) == 1))
-	{
-	  /* Remove our own reference on the current placeholder buffer */
-	  ctx_ph->ref_count--;
-	  /* Replace with the new placeholder buffer */
-	  txq->ctx_desc_placeholder_bi = new_bi;
-	  ctx_ph = vlib_get_buffer (vm, new_bi);
-	}
-      else
-	/* Impossible to enqueue a ctx descriptor, fail */
-	return 1;
+      bi++;
+      goto next;
     }
 
   /* Acquire a reference on the placeholder buffer */
@@ -163,40 +155,120 @@ avf_tx_fill_ctx_desc (vlib_main_t * vm, avf_txq_t * txq, avf_tx_desc_t * d,
   d[0].qword[1] = AVF_TXD_DTYP_CTX | AVF_TXD_CTX_CMD_TSO
     | AVF_TXD_CTX_SEG_MSS (vnet_buffer2 (b)->gso_size) |
     AVF_TXD_CTX_SEG_TLEN (tlen);
-  return 0;
+  return bi[0];
 }
 
-
-static_always_inline u16
-avf_tx_enqueue (vlib_main_t * vm, vlib_node_runtime_t * node, avf_txq_t * txq,
-		u32 * buffers, u32 n_packets, int use_va_dma)
+static_always_inline void
+avf_tx_copy_desc (avf_tx_desc_t *d, avf_tx_desc_t *s, u32 n_descs)
 {
-  u16 next = txq->next;
-  u64 bits = AVF_TXD_CMD_EOP | AVF_TXD_CMD_RSV;
-  const u32 offload_mask = VNET_BUFFER_F_OFFLOAD | VNET_BUFFER_F_GSO;
-  u64 one_by_one_offload_flags = 0;
-  int is_tso;
-  u16 n_desc = 0;
-  u16 *slot, n_desc_left, n_packets_left = n_packets;
-  u16 mask = txq->size - 1;
-  vlib_buffer_t *b[4];
-  avf_tx_desc_t *d = txq->descs + next;
-  u16 n_desc_needed;
-  vlib_buffer_t *b0;
+#if defined CLIB_HAVE_VEC512
+  while (n_descs >= 8)
+    {
+      u64x8u *dv = (u64x8u *) d;
+      u64x8u *sv = (u64x8u *) s;
 
-  /* avoid ring wrap */
-  n_desc_left = txq->size - clib_max (txq->next, txq->n_enqueued + 8);
+      dv[0] = sv[0];
+      dv[1] = sv[1];
+
+      /* next */
+      d += 8;
+      s += 8;
+      n_descs -= 8;
+    }
+#elif defined CLIB_HAVE_VEC256
+  while (n_descs >= 4)
+    {
+      u64x4u *dv = (u64x4u *) d;
+      u64x4u *sv = (u64x4u *) s;
+
+      dv[0] = sv[0];
+      dv[1] = sv[1];
+
+      /* next */
+      d += 4;
+      s += 4;
+      n_descs -= 4;
+    }
+#elif defined CLIB_HAVE_VEC128
+  while (n_descs >= 2)
+    {
+      u64x2u *dv = (u64x2u *) d;
+      u64x2u *sv = (u64x2u *) s;
+
+      dv[0] = sv[0];
+      dv[1] = sv[1];
+
+      /* next */
+      d += 2;
+      s += 2;
+      n_descs -= 2;
+    }
+#endif
+  while (n_descs)
+    {
+      d[0].qword[0] = s[0].qword[0];
+      d[0].qword[1] = s[0].qword[1];
+      d++;
+      s++;
+      n_descs--;
+    }
+}
+
+static_always_inline void
+avf_tx_fill_data_desc (vlib_main_t *vm, avf_tx_desc_t *d, vlib_buffer_t *b,
+		       u64 cmd, int use_va_dma)
+{
+  if (use_va_dma)
+    d->qword[0] = vlib_buffer_get_current_va (b);
+  else
+    d->qword[0] = vlib_buffer_get_current_pa (vm, b);
+  d->qword[1] = (((u64) b->current_length) << 34 | cmd | AVF_TXD_CMD_RSV);
+}
+static_always_inline u16
+avf_tx_prepare (vlib_main_t *vm, vlib_node_runtime_t *node, avf_txq_t *txq,
+		u32 *buffers, u32 n_packets, u16 *n_enq_descs, int use_va_dma)
+{
+  const u64 cmd_eop = AVF_TXD_CMD_EOP;
+  u16 n_free_desc, n_desc_left, n_packets_left = n_packets;
+#if defined CLIB_HAVE_VEC512
+  vlib_buffer_t *b[8];
+#else
+  vlib_buffer_t *b[4];
+#endif
+  avf_tx_desc_t *d = txq->tmp_descs;
+  u32 *tb = txq->tmp_bufs;
+
+  n_free_desc = n_desc_left = txq->size - txq->n_enqueued - 8;
 
   if (n_desc_left == 0)
     return 0;
 
-  /* Fast path, no ring wrap */
   while (n_packets_left && n_desc_left)
     {
-      u32 or_flags;
+#if defined CLIB_HAVE_VEC512
+      u32 flags;
+      u64x8 or_flags_vec512;
+      u64x8 flags_mask_vec512;
+#else
+      u32 flags, or_flags;
+#endif
+
+#if defined CLIB_HAVE_VEC512
+      if (n_packets_left < 8 || n_desc_left < 8)
+#else
       if (n_packets_left < 8 || n_desc_left < 4)
+#endif
 	goto one_by_one;
 
+#if defined CLIB_HAVE_VEC512
+      u64x8 base_ptr = u64x8_splat (vm->buffer_main->buffer_mem_start);
+      u32x8 buf_indices = u32x8_load_unaligned (buffers);
+
+      *(u64x8 *) &b = base_ptr + u64x8_from_u32x8 (
+				   buf_indices << CLIB_LOG2_CACHE_LINE_BYTES);
+
+      or_flags_vec512 = u64x8_i64gather (u64x8_load_unaligned (b), 0, 1);
+#else
       vlib_prefetch_buffer_with_index (vm, buffers[4], LOAD);
       vlib_prefetch_buffer_with_index (vm, buffers[5], LOAD);
       vlib_prefetch_buffer_with_index (vm, buffers[6], LOAD);
@@ -208,63 +280,90 @@ avf_tx_enqueue (vlib_main_t * vm, vlib_node_runtime_t * node, avf_txq_t * txq,
       b[3] = vlib_get_buffer (vm, buffers[3]);
 
       or_flags = b[0]->flags | b[1]->flags | b[2]->flags | b[3]->flags;
+#endif
 
-      if (or_flags & (VLIB_BUFFER_NEXT_PRESENT | offload_mask))
+#if defined CLIB_HAVE_VEC512
+      flags_mask_vec512 = u64x8_splat (
+	VLIB_BUFFER_NEXT_PRESENT | VNET_BUFFER_F_OFFLOAD | VNET_BUFFER_F_GSO);
+      if (PREDICT_FALSE (
+	    !u64x8_is_all_zero (or_flags_vec512 & flags_mask_vec512)))
+#else
+      if (PREDICT_FALSE (or_flags &
+			 (VLIB_BUFFER_NEXT_PRESENT | VNET_BUFFER_F_OFFLOAD |
+			  VNET_BUFFER_F_GSO)))
+#endif
 	goto one_by_one;
 
-      vlib_buffer_copy_indices (txq->bufs + next, buffers, 4);
+#if defined CLIB_HAVE_VEC512
+      vlib_buffer_copy_indices (tb, buffers, 8);
+      avf_tx_fill_data_desc (vm, d + 0, b[0], cmd_eop, use_va_dma);
+      avf_tx_fill_data_desc (vm, d + 1, b[1], cmd_eop, use_va_dma);
+      avf_tx_fill_data_desc (vm, d + 2, b[2], cmd_eop, use_va_dma);
+      avf_tx_fill_data_desc (vm, d + 3, b[3], cmd_eop, use_va_dma);
+      avf_tx_fill_data_desc (vm, d + 4, b[4], cmd_eop, use_va_dma);
+      avf_tx_fill_data_desc (vm, d + 5, b[5], cmd_eop, use_va_dma);
+      avf_tx_fill_data_desc (vm, d + 6, b[6], cmd_eop, use_va_dma);
+      avf_tx_fill_data_desc (vm, d + 7, b[7], cmd_eop, use_va_dma);
 
-      if (use_va_dma)
-	{
-	  d[0].qword[0] = vlib_buffer_get_current_va (b[0]);
-	  d[1].qword[0] = vlib_buffer_get_current_va (b[1]);
-	  d[2].qword[0] = vlib_buffer_get_current_va (b[2]);
-	  d[3].qword[0] = vlib_buffer_get_current_va (b[3]);
-	}
-      else
-	{
-	  d[0].qword[0] = vlib_buffer_get_current_pa (vm, b[0]);
-	  d[1].qword[0] = vlib_buffer_get_current_pa (vm, b[1]);
-	  d[2].qword[0] = vlib_buffer_get_current_pa (vm, b[2]);
-	  d[3].qword[0] = vlib_buffer_get_current_pa (vm, b[3]);
-	}
+      buffers += 8;
+      n_packets_left -= 8;
+      n_desc_left -= 8;
+      d += 8;
+      tb += 8;
+#else
+      vlib_buffer_copy_indices (tb, buffers, 4);
 
-      d[0].qword[1] = ((u64) b[0]->current_length) << 34 | bits;
-      d[1].qword[1] = ((u64) b[1]->current_length) << 34 | bits;
-      d[2].qword[1] = ((u64) b[2]->current_length) << 34 | bits;
-      d[3].qword[1] = ((u64) b[3]->current_length) << 34 | bits;
+      avf_tx_fill_data_desc (vm, d + 0, b[0], cmd_eop, use_va_dma);
+      avf_tx_fill_data_desc (vm, d + 1, b[1], cmd_eop, use_va_dma);
+      avf_tx_fill_data_desc (vm, d + 2, b[2], cmd_eop, use_va_dma);
+      avf_tx_fill_data_desc (vm, d + 3, b[3], cmd_eop, use_va_dma);
 
-      next += 4;
-      n_desc += 4;
       buffers += 4;
       n_packets_left -= 4;
       n_desc_left -= 4;
       d += 4;
+      tb += 4;
+#endif
+
       continue;
 
     one_by_one:
-      one_by_one_offload_flags = 0;
-      txq->bufs[next] = buffers[0];
+      tb[0] = buffers[0];
       b[0] = vlib_get_buffer (vm, buffers[0]);
-      is_tso = ! !(b[0]->flags & VNET_BUFFER_F_GSO);
-      if (PREDICT_FALSE (is_tso || b[0]->flags & offload_mask))
-	one_by_one_offload_flags |= avf_tx_prepare_cksum (b[0], is_tso);
+      flags = b[0]->flags;
 
-      /* Deal with chain buffer if present */
-      if (is_tso || b[0]->flags & VLIB_BUFFER_NEXT_PRESENT)
+      /* No chained buffers or TSO case */
+      if (PREDICT_TRUE (
+	    (flags & (VLIB_BUFFER_NEXT_PRESENT | VNET_BUFFER_F_GSO)) == 0))
 	{
-	  n_desc_needed = 1 + is_tso;
-	  b0 = b[0];
+	  u64 cmd = cmd_eop;
 
-	  /* Wish there were a buffer count for chain buffer */
-	  while (b0->flags & VLIB_BUFFER_NEXT_PRESENT)
+	  if (PREDICT_FALSE (flags & VNET_BUFFER_F_OFFLOAD))
+	    cmd |= avf_tx_prepare_cksum (b[0], 0 /* is_tso */);
+
+	  avf_tx_fill_data_desc (vm, d, b[0], cmd, use_va_dma);
+	}
+      else
+	{
+	  u16 n_desc_needed = 1;
+	  u64 cmd = 0;
+
+	  if (flags & VLIB_BUFFER_NEXT_PRESENT)
 	    {
-	      b0 = vlib_get_buffer (vm, b0->next_buffer);
-	      n_desc_needed++;
+	      vlib_buffer_t *next = vlib_get_buffer (vm, b[0]->next_buffer);
+	      n_desc_needed = 2;
+	      while (next->flags & VLIB_BUFFER_NEXT_PRESENT)
+		{
+		  next = vlib_get_buffer (vm, next->next_buffer);
+		  n_desc_needed++;
+		}
 	    }
 
-	  /* spec says data descriptor is limited to 8 segments */
-	  if (PREDICT_FALSE (!is_tso && n_desc_needed > 8))
+	  if (flags & VNET_BUFFER_F_GSO)
+	    {
+	      n_desc_needed++;
+	    }
+	  else if (PREDICT_FALSE (n_desc_needed > 8))
 	    {
 	      vlib_buffer_free_one (vm, buffers[0]);
 	      vlib_error_count (vm, node->node_index,
@@ -275,172 +374,47 @@ avf_tx_enqueue (vlib_main_t * vm, vlib_node_runtime_t * node, avf_txq_t * txq,
 	    }
 
 	  if (PREDICT_FALSE (n_desc_left < n_desc_needed))
-	    /*
-	     * Slow path may be able to to deal with this since it can handle
-	     * ring wrap
-	     */
 	    break;
 
-	  /* Enqueue a context descriptor if needed */
-	  if (PREDICT_FALSE (is_tso))
+	  if (flags & VNET_BUFFER_F_GSO)
 	    {
-	      if (avf_tx_fill_ctx_desc (vm, txq, d, b[0]))
-		/* Failure to acquire ref on ctx placeholder */
-		break;
-	      txq->bufs[next + 1] = txq->bufs[next];
-	      txq->bufs[next] = txq->ctx_desc_placeholder_bi;
-	      next += 1;
-	      n_desc += 1;
+	      /* Enqueue a context descriptor */
+	      tb[1] = tb[0];
+	      tb[0] = avf_tx_fill_ctx_desc (vm, txq, d, b[0]);
 	      n_desc_left -= 1;
 	      d += 1;
+	      tb += 1;
+	      cmd = avf_tx_prepare_cksum (b[0], 1 /* is_tso */);
 	    }
+	  else if (flags & VNET_BUFFER_F_OFFLOAD)
+	    {
+	      cmd = avf_tx_prepare_cksum (b[0], 0 /* is_tso */);
+	    }
+
+	  /* Deal with chain buffer if present */
 	  while (b[0]->flags & VLIB_BUFFER_NEXT_PRESENT)
 	    {
-	      if (use_va_dma)
-		d[0].qword[0] = vlib_buffer_get_current_va (b[0]);
-	      else
-		d[0].qword[0] = vlib_buffer_get_current_pa (vm, b[0]);
+	      avf_tx_fill_data_desc (vm, d, b[0], cmd, use_va_dma);
 
-	      d[0].qword[1] = (((u64) b[0]->current_length) << 34) |
-		AVF_TXD_CMD_RSV | one_by_one_offload_flags;
-
-	      next += 1;
-	      n_desc += 1;
 	      n_desc_left -= 1;
 	      d += 1;
+	      tb += 1;
 
-	      txq->bufs[next] = b[0]->next_buffer;
+	      tb[0] = b[0]->next_buffer;
 	      b[0] = vlib_get_buffer (vm, b[0]->next_buffer);
 	    }
+
+	  avf_tx_fill_data_desc (vm, d, b[0], cmd_eop | cmd, use_va_dma);
 	}
 
-      if (use_va_dma)
-	d[0].qword[0] = vlib_buffer_get_current_va (b[0]);
-      else
-	d[0].qword[0] = vlib_buffer_get_current_pa (vm, b[0]);
-
-      d[0].qword[1] =
-	(((u64) b[0]->current_length) << 34) | bits |
-	one_by_one_offload_flags;
-
-      next += 1;
-      n_desc += 1;
       buffers += 1;
       n_packets_left -= 1;
       n_desc_left -= 1;
       d += 1;
+      tb += 1;
     }
 
-  /* Slow path to support ring wrap */
-  if (PREDICT_FALSE (n_packets_left))
-    {
-      txq->n_enqueued += n_desc;
-
-      n_desc = 0;
-      d = txq->descs + (next & mask);
-
-      /* +8 to be consistent with fast path */
-      n_desc_left = txq->size - (txq->n_enqueued + 8);
-
-      while (n_packets_left && n_desc_left)
-	{
-
-	  txq->bufs[next & mask] = buffers[0];
-	  b[0] = vlib_get_buffer (vm, buffers[0]);
-
-	  one_by_one_offload_flags = 0;
-	  is_tso = ! !(b[0]->flags & VNET_BUFFER_F_GSO);
-	  if (PREDICT_FALSE (is_tso || b[0]->flags & offload_mask))
-	    one_by_one_offload_flags |= avf_tx_prepare_cksum (b[0], is_tso);
-
-	  /* Deal with chain buffer if present */
-	  if (is_tso || b[0]->flags & VLIB_BUFFER_NEXT_PRESENT)
-	    {
-	      n_desc_needed = 1 + is_tso;
-	      b0 = b[0];
-
-	      while (b0->flags & VLIB_BUFFER_NEXT_PRESENT)
-		{
-		  b0 = vlib_get_buffer (vm, b0->next_buffer);
-		  n_desc_needed++;
-		}
-
-	      /* Spec says data descriptor is limited to 8 segments */
-	      if (PREDICT_FALSE (!is_tso && n_desc_needed > 8))
-		{
-		  vlib_buffer_free_one (vm, buffers[0]);
-		  vlib_error_count (vm, node->node_index,
-				    AVF_TX_ERROR_SEGMENT_SIZE_EXCEEDED, 1);
-		  n_packets_left -= 1;
-		  buffers += 1;
-		  continue;
-		}
-
-	      if (PREDICT_FALSE (n_desc_left < n_desc_needed))
-		break;
-
-	      /* Enqueue a context descriptor if needed */
-	      if (PREDICT_FALSE (is_tso))
-		{
-		  if (avf_tx_fill_ctx_desc (vm, txq, d, b[0]))
-		    /* Failure to acquire ref on ctx placeholder */
-		    break;
-
-		  txq->bufs[(next + 1) & mask] = txq->bufs[next & mask];
-		  txq->bufs[next & mask] = txq->ctx_desc_placeholder_bi;
-		  next += 1;
-		  n_desc += 1;
-		  n_desc_left -= 1;
-		  d = txq->descs + (next & mask);
-		}
-	      while (b[0]->flags & VLIB_BUFFER_NEXT_PRESENT)
-		{
-		  if (use_va_dma)
-		    d[0].qword[0] = vlib_buffer_get_current_va (b[0]);
-		  else
-		    d[0].qword[0] = vlib_buffer_get_current_pa (vm, b[0]);
-
-		  d[0].qword[1] = (((u64) b[0]->current_length) << 34) |
-		    AVF_TXD_CMD_RSV | one_by_one_offload_flags;
-
-		  next += 1;
-		  n_desc += 1;
-		  n_desc_left -= 1;
-		  d = txq->descs + (next & mask);
-
-		  txq->bufs[next & mask] = b[0]->next_buffer;
-		  b[0] = vlib_get_buffer (vm, b[0]->next_buffer);
-		}
-	    }
-
-	  if (use_va_dma)
-	    d[0].qword[0] = vlib_buffer_get_current_va (b[0]);
-	  else
-	    d[0].qword[0] = vlib_buffer_get_current_pa (vm, b[0]);
-
-	  d[0].qword[1] =
-	    (((u64) b[0]->current_length) << 34) | bits |
-	    one_by_one_offload_flags;
-
-	  next += 1;
-	  n_desc += 1;
-	  buffers += 1;
-	  n_packets_left -= 1;
-	  n_desc_left -= 1;
-	  d = txq->descs + (next & mask);
-	}
-    }
-
-  if ((slot = clib_ring_enq (txq->rs_slots)))
-    {
-      u16 rs_slot = slot[0] = (next - 1) & mask;
-      d = txq->descs + rs_slot;
-      d[0].qword[1] |= AVF_TXD_CMD_RS;
-    }
-
-  txq->next = next & mask;
-  avf_tail_write (txq->qtx_tail, txq->next);
-  txq->n_enqueued += n_desc;
+  *n_enq_descs = n_free_desc - n_desc_left;
   return n_packets - n_packets_left;
 }
 
@@ -450,18 +424,22 @@ VNET_DEVICE_CLASS_TX_FN (avf_device_class) (vlib_main_t * vm,
 {
   vnet_interface_output_runtime_t *rd = (void *) node->runtime_data;
   avf_device_t *ad = avf_get_device (rd->dev_instance);
-  u32 thread_index = vm->thread_index;
-  u8 qid = thread_index;
-  avf_txq_t *txq = vec_elt_at_index (ad->txqs, qid % ad->num_queue_pairs);
+  vnet_hw_if_tx_frame_t *tf = vlib_frame_scalar_args (frame);
+  u8 qid = tf->queue_id;
+  avf_txq_t *txq = vec_elt_at_index (ad->txqs, qid);
+  u16 next;
+  u16 mask = txq->size - 1;
   u32 *buffers = vlib_frame_vector_args (frame);
-  u16 n_enq, n_left;
+  u16 n_enq, n_left, n_desc, *slot;
   u16 n_retry = 2;
 
-  clib_spinlock_lock_if_init (&txq->lock);
+  if (tf->shared_queue)
+    clib_spinlock_lock (&txq->lock);
 
   n_left = frame->n_vectors;
 
 retry:
+  next = txq->next;
   /* release consumed bufs */
   if (txq->n_enqueued)
     {
@@ -494,12 +472,45 @@ retry:
 	}
     }
 
+  n_desc = 0;
   if (ad->flags & AVF_DEVICE_F_VA_DMA)
-    n_enq = avf_tx_enqueue (vm, node, txq, buffers, n_left, 1);
+    n_enq = avf_tx_prepare (vm, node, txq, buffers, n_left, &n_desc, 1);
   else
-    n_enq = avf_tx_enqueue (vm, node, txq, buffers, n_left, 0);
+    n_enq = avf_tx_prepare (vm, node, txq, buffers, n_left, &n_desc, 0);
 
-  n_left -= n_enq;
+  if (n_desc)
+    {
+      if (PREDICT_TRUE (next + n_desc <= txq->size))
+	{
+	  /* no wrap */
+	  avf_tx_copy_desc (txq->descs + next, txq->tmp_descs, n_desc);
+	  vlib_buffer_copy_indices (txq->bufs + next, txq->tmp_bufs, n_desc);
+	}
+      else
+	{
+	  /* wrap */
+	  u32 n_not_wrap = txq->size - next;
+	  avf_tx_copy_desc (txq->descs + next, txq->tmp_descs, n_not_wrap);
+	  avf_tx_copy_desc (txq->descs, txq->tmp_descs + n_not_wrap,
+			    n_desc - n_not_wrap);
+	  vlib_buffer_copy_indices (txq->bufs + next, txq->tmp_bufs,
+				    n_not_wrap);
+	  vlib_buffer_copy_indices (txq->bufs, txq->tmp_bufs + n_not_wrap,
+				    n_desc - n_not_wrap);
+	}
+
+      next += n_desc;
+      if ((slot = clib_ring_enq (txq->rs_slots)))
+	{
+	  u16 rs_slot = slot[0] = (next - 1) & mask;
+	  txq->descs[rs_slot].qword[1] |= AVF_TXD_CMD_RS;
+	}
+
+      txq->next = next & mask;
+      avf_tail_write (txq->qtx_tail, txq->next);
+      txq->n_enqueued += n_desc;
+      n_left -= n_enq;
+    }
 
   if (n_left)
     {
@@ -513,7 +524,8 @@ retry:
 			AVF_TX_ERROR_NO_FREE_SLOTS, n_left);
     }
 
-  clib_spinlock_unlock_if_init (&txq->lock);
+  if (tf->shared_queue)
+    clib_spinlock_unlock (&txq->lock);
 
   return frame->n_vectors - n_left;
 }

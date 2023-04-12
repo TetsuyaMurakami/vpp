@@ -24,25 +24,102 @@
 #include <vnet/session/application_local.h>
 #include <vnet/session/session_debug.h>
 #include <svm/queue.h>
+#include <sys/timerfd.h>
 
-#define app_check_thread_and_barrier(_fn, _arg)				\
-  if (!vlib_thread_is_main_w_barrier ())				\
-    {									\
-     vlib_rpc_call_main_thread (_fn, (u8 *) _arg, sizeof(*_arg));	\
-      return;								\
-   }
+static inline void
+session_wrk_send_evt_to_main (session_worker_t *wrk, session_evt_elt_t *elt)
+{
+  session_evt_elt_t *he;
+  uword thread_index;
+  u8 is_empty;
+
+  thread_index = wrk->vm->thread_index;
+  he = clib_llist_elt (wrk->event_elts, wrk->evts_pending_main);
+  is_empty = clib_llist_is_empty (wrk->event_elts, evt_list, he);
+  clib_llist_add_tail (wrk->event_elts, evt_list, elt, he);
+  if (is_empty)
+    session_send_rpc_evt_to_thread (0, session_wrk_handle_evts_main_rpc,
+				    uword_to_pointer (thread_index, void *));
+}
+
+#define app_check_thread_and_barrier(_wrk, _elt)                              \
+  if (!vlib_thread_is_main_w_barrier ())                                      \
+    {                                                                         \
+      session_wrk_send_evt_to_main (wrk, elt);                                \
+      return;                                                                 \
+    }
 
 static void
-session_mq_listen_handler (void *data)
+session_wrk_timerfd_update (session_worker_t *wrk, u64 time_ns)
 {
-  session_listen_msg_t *mp = (session_listen_msg_t *) data;
+  struct itimerspec its;
+
+  its.it_value.tv_sec = 0;
+  its.it_value.tv_nsec = time_ns;
+  its.it_interval.tv_sec = 0;
+  its.it_interval.tv_nsec = its.it_value.tv_nsec;
+
+  if (timerfd_settime (wrk->timerfd, 0, &its, NULL) == -1)
+    clib_warning ("timerfd_settime");
+}
+
+always_inline u64
+session_wrk_tfd_timeout (session_wrk_state_t state, u32 thread_index)
+{
+  if (state == SESSION_WRK_INTERRUPT)
+    return thread_index ? 1e6 : vlib_num_workers () ? 5e8 : 1e6;
+  else if (state == SESSION_WRK_IDLE)
+    return thread_index ? 1e8 : vlib_num_workers () ? 5e8 : 1e8;
+  else
+    return 0;
+}
+
+static inline void
+session_wrk_set_state (session_worker_t *wrk, session_wrk_state_t state)
+{
+  u64 time_ns;
+
+  wrk->state = state;
+  if (wrk->timerfd == -1)
+    return;
+  time_ns = session_wrk_tfd_timeout (state, wrk->vm->thread_index);
+  session_wrk_timerfd_update (wrk, time_ns);
+}
+
+static transport_endpt_ext_cfg_t *
+session_mq_get_ext_config (application_t *app, uword offset)
+{
+  svm_fifo_chunk_t *c;
+  fifo_segment_t *fs;
+
+  fs = application_get_rx_mqs_segment (app);
+  c = fs_chunk_ptr (fs->h, offset);
+  return (transport_endpt_ext_cfg_t *) c->data;
+}
+
+static void
+session_mq_free_ext_config (application_t *app, uword offset)
+{
+  svm_fifo_chunk_t *c;
+  fifo_segment_t *fs;
+
+  fs = application_get_rx_mqs_segment (app);
+  c = fs_chunk_ptr (fs->h, offset);
+  fifo_segment_collect_chunk (fs, 0 /* only one slice */, c);
+}
+
+static void
+session_mq_listen_handler (session_worker_t *wrk, session_evt_elt_t *elt)
+{
   vnet_listen_args_t _a, *a = &_a;
+  session_listen_msg_t *mp;
   app_worker_t *app_wrk;
   application_t *app;
   int rv;
 
-  app_check_thread_and_barrier (session_mq_listen_handler, mp);
+  app_check_thread_and_barrier (wrk, elt);
 
+  mp = session_evt_ctrl_data (wrk, elt);
   app = application_lookup (mp->client_index);
   if (!app)
     return;
@@ -54,31 +131,35 @@ session_mq_listen_handler (void *data)
   a->sep.fib_index = mp->vrf;
   a->sep.sw_if_index = ENDPOINT_INVALID_INDEX;
   a->sep.transport_proto = mp->proto;
-  a->sep_ext.ckpair_index = mp->ckpair_index;
-  a->sep_ext.crypto_engine = mp->crypto_engine;
   a->app_index = app->app_index;
   a->wrk_map_index = mp->wrk_index;
   a->sep_ext.transport_flags = mp->flags;
 
+  if (mp->ext_config)
+    a->sep_ext.ext_cfg = session_mq_get_ext_config (app, mp->ext_config);
+
   if ((rv = vnet_listen (a)))
-    clib_warning ("listen returned: %U", format_session_error, rv);
+    session_worker_stat_error_inc (wrk, rv, 1);
 
   app_wrk = application_get_worker (app, mp->wrk_index);
   mq_send_session_bound_cb (app_wrk->wrk_index, mp->context, a->handle, rv);
-  return;
+
+  if (mp->ext_config)
+    session_mq_free_ext_config (app, mp->ext_config);
 }
 
 static void
-session_mq_listen_uri_handler (void *data)
+session_mq_listen_uri_handler (session_worker_t *wrk, session_evt_elt_t *elt)
 {
-  session_listen_uri_msg_t *mp = (session_listen_uri_msg_t *) data;
   vnet_listen_args_t _a, *a = &_a;
+  session_listen_uri_msg_t *mp;
   app_worker_t *app_wrk;
   application_t *app;
   int rv;
 
-  app_check_thread_and_barrier (session_mq_listen_uri_handler, mp);
+  app_check_thread_and_barrier (wrk, elt);
 
+  mp = session_evt_ctrl_data (wrk, elt);
   app = application_lookup (mp->client_index);
   if (!app)
     return;
@@ -93,15 +174,13 @@ session_mq_listen_uri_handler (void *data)
 }
 
 static void
-session_mq_connect_handler (void *data)
+session_mq_connect_one (session_connect_msg_t *mp)
 {
-  session_connect_msg_t *mp = (session_connect_msg_t *) data;
   vnet_connect_args_t _a, *a = &_a;
   app_worker_t *app_wrk;
+  session_worker_t *wrk;
   application_t *app;
   int rv;
-
-  app_check_thread_and_barrier (session_mq_connect_handler, mp);
 
   app = application_lookup (mp->client_index);
   if (!app)
@@ -113,6 +192,7 @@ session_mq_connect_handler (void *data)
   a->sep.port = mp->port;
   a->sep.transport_proto = mp->proto;
   a->sep.peer.fib_index = mp->vrf;
+  a->sep.dscp = mp->dscp;
   clib_memcpy_fast (&a->sep.peer.ip, &mp->lcl_ip, sizeof (mp->lcl_ip));
   if (mp->is_ip4)
     {
@@ -122,39 +202,116 @@ session_mq_connect_handler (void *data)
   a->sep.peer.port = mp->lcl_port;
   a->sep.peer.sw_if_index = ENDPOINT_INVALID_INDEX;
   a->sep_ext.parent_handle = mp->parent_handle;
-  a->sep_ext.ckpair_index = mp->ckpair_index;
-  a->sep_ext.crypto_engine = mp->crypto_engine;
   a->sep_ext.transport_flags = mp->flags;
-  if (mp->hostname_len)
-    {
-      vec_validate (a->sep_ext.hostname, mp->hostname_len - 1);
-      clib_memcpy_fast (a->sep_ext.hostname, mp->hostname, mp->hostname_len);
-    }
   a->api_context = mp->context;
   a->app_index = app->app_index;
   a->wrk_map_index = mp->wrk_index;
 
+  if (mp->ext_config)
+    a->sep_ext.ext_cfg = session_mq_get_ext_config (app, mp->ext_config);
+
   if ((rv = vnet_connect (a)))
     {
-      clib_warning ("connect returned: %U", format_session_error, rv);
+      wrk = session_main_get_worker (vlib_get_thread_index ());
+      session_worker_stat_error_inc (wrk, rv, 1);
       app_wrk = application_get_worker (app, mp->wrk_index);
       mq_send_session_connected_cb (app_wrk->wrk_index, mp->context, 0, rv);
     }
 
-  vec_free (a->sep_ext.hostname);
+  if (mp->ext_config)
+    session_mq_free_ext_config (app, mp->ext_config);
 }
 
 static void
-session_mq_connect_uri_handler (void *data)
+session_mq_handle_connects_rpc (void *arg)
 {
-  session_connect_uri_msg_t *mp = (session_connect_uri_msg_t *) data;
+  u32 max_connects = 32, n_connects = 0;
+  session_evt_elt_t *he, *elt, *next;
+  session_worker_t *fwrk;
+
+  ASSERT (session_vlib_thread_is_cl_thread ());
+
+  /* Pending connects on linked list pertaining to first worker */
+  fwrk = session_main_get_worker (transport_cl_thread ());
+  if (!fwrk->n_pending_connects)
+    return;
+
+  he = clib_llist_elt (fwrk->event_elts, fwrk->pending_connects);
+  elt = clib_llist_next (fwrk->event_elts, evt_list, he);
+
+  /* Avoid holding the worker for too long */
+  while (n_connects < max_connects && elt != he)
+    {
+      next = clib_llist_next (fwrk->event_elts, evt_list, elt);
+      clib_llist_remove (fwrk->event_elts, evt_list, elt);
+      session_mq_connect_one (session_evt_ctrl_data (fwrk, elt));
+      session_evt_ctrl_data_free (fwrk, elt);
+      clib_llist_put (fwrk->event_elts, elt);
+      elt = next;
+      n_connects += 1;
+    }
+
+  /* Decrement with worker barrier */
+  fwrk->n_pending_connects -= n_connects;
+  if (fwrk->n_pending_connects > 0)
+    {
+      session_send_rpc_evt_to_thread_force (fwrk->vm->thread_index,
+					    session_mq_handle_connects_rpc, 0);
+    }
+}
+
+static void
+session_mq_connect_handler (session_worker_t *wrk, session_evt_elt_t *elt)
+{
+  u32 thread_index = wrk - session_main.wrk;
+  session_evt_elt_t *he;
+
+  if (PREDICT_FALSE (thread_index > transport_cl_thread ()))
+    {
+      clib_warning ("Connect on wrong thread. Dropping");
+      return;
+    }
+
+  /* If on worker, check if main has any pending messages. Avoids reordering
+   * with other control messages that need to be handled by main
+   */
+  if (thread_index)
+    {
+      he = clib_llist_elt (wrk->event_elts, wrk->evts_pending_main);
+
+      /* Events pending on main, postpone to avoid reordering */
+      if (!clib_llist_is_empty (wrk->event_elts, evt_list, he))
+	{
+	  clib_llist_add_tail (wrk->event_elts, evt_list, elt, he);
+	  return;
+	}
+    }
+
+  /* Add to pending list to be handled by first worker */
+  he = clib_llist_elt (wrk->event_elts, wrk->pending_connects);
+  clib_llist_add_tail (wrk->event_elts, evt_list, elt, he);
+
+  /* Decremented with worker barrier */
+  wrk->n_pending_connects += 1;
+  if (wrk->n_pending_connects == 1)
+    {
+      session_send_rpc_evt_to_thread_force (thread_index,
+					    session_mq_handle_connects_rpc, 0);
+    }
+}
+
+static void
+session_mq_connect_uri_handler (session_worker_t *wrk, session_evt_elt_t *elt)
+{
   vnet_connect_args_t _a, *a = &_a;
+  session_connect_uri_msg_t *mp;
   app_worker_t *app_wrk;
   application_t *app;
   int rv;
 
-  app_check_thread_and_barrier (session_mq_connect_uri_handler, mp);
+  app_check_thread_and_barrier (wrk, elt);
 
+  mp = session_evt_ctrl_data (wrk, elt);
   app = application_lookup (mp->client_index);
   if (!app)
     return;
@@ -165,10 +322,26 @@ session_mq_connect_uri_handler (void *data)
   a->app_index = app->app_index;
   if ((rv = vnet_connect_uri (a)))
     {
-      clib_warning ("connect_uri returned: %d", rv);
+      session_worker_stat_error_inc (wrk, rv, 1);
       app_wrk = application_get_worker (app, 0 /* default wrk only */ );
       mq_send_session_connected_cb (app_wrk->wrk_index, mp->context, 0, rv);
     }
+}
+
+static void
+session_mq_shutdown_handler (void *data)
+{
+  session_shutdown_msg_t *mp = (session_shutdown_msg_t *) data;
+  vnet_shutdown_args_t _a, *a = &_a;
+  application_t *app;
+
+  app = application_lookup (mp->client_index);
+  if (!app)
+    return;
+
+  a->app_index = app->app_index;
+  a->handle = mp->handle;
+  vnet_shutdown_session (a);
 }
 
 static void
@@ -188,14 +361,15 @@ session_mq_disconnect_handler (void *data)
 }
 
 static void
-app_mq_detach_handler (void *data)
+app_mq_detach_handler (session_worker_t *wrk, session_evt_elt_t *elt)
 {
-  session_app_detach_msg_t *mp = (session_app_detach_msg_t *) data;
   vnet_app_detach_args_t _a, *a = &_a;
+  session_app_detach_msg_t *mp;
   application_t *app;
 
-  app_check_thread_and_barrier (app_mq_detach_handler, mp);
+  app_check_thread_and_barrier (wrk, elt);
 
+  mp = session_evt_ctrl_data (wrk, elt);
   app = application_lookup (mp->client_index);
   if (!app)
     return;
@@ -206,15 +380,19 @@ app_mq_detach_handler (void *data)
 }
 
 static void
-session_mq_unlisten_handler (void *data)
+session_mq_unlisten_handler (session_worker_t *wrk, session_evt_elt_t *elt)
 {
-  session_unlisten_msg_t *mp = (session_unlisten_msg_t *) data;
   vnet_unlisten_args_t _a, *a = &_a;
+  session_unlisten_msg_t *mp;
   app_worker_t *app_wrk;
+  session_handle_t sh;
   application_t *app;
   int rv;
 
-  app_check_thread_and_barrier (session_mq_unlisten_handler, mp);
+  app_check_thread_and_barrier (wrk, elt);
+
+  mp = session_evt_ctrl_data (wrk, elt);
+  sh = mp->handle;
 
   app = application_lookup (mp->client_index);
   if (!app)
@@ -222,43 +400,37 @@ session_mq_unlisten_handler (void *data)
 
   clib_memset (a, 0, sizeof (*a));
   a->app_index = app->app_index;
-  a->handle = mp->handle;
+  a->handle = sh;
   a->wrk_map_index = mp->wrk_index;
+
   if ((rv = vnet_unlisten (a)))
-    clib_warning ("unlisten returned: %d", rv);
+    session_worker_stat_error_inc (wrk, rv, 1);
 
   app_wrk = application_get_worker (app, a->wrk_map_index);
   if (!app_wrk)
     return;
 
-  mq_send_unlisten_reply (app_wrk, mp->handle, mp->context, rv);
+  mq_send_unlisten_reply (app_wrk, sh, mp->context, rv);
 }
 
 static void
-session_mq_accepted_reply_handler (void *data)
+session_mq_accepted_reply_handler (session_worker_t *wrk,
+				   session_evt_elt_t *elt)
 {
-  session_accepted_reply_msg_t *mp = (session_accepted_reply_msg_t *) data;
   vnet_disconnect_args_t _a = { 0 }, *a = &_a;
+  session_accepted_reply_msg_t *mp;
   session_state_t old_state;
   app_worker_t *app_wrk;
   session_t *s;
 
-  /* Server isn't interested, kill the session */
-  if (mp->retval)
-    {
-      a->app_index = mp->context;
-      a->handle = mp->handle;
-      vnet_disconnect_session (a);
-      return;
-    }
+  mp = session_evt_ctrl_data (wrk, elt);
 
   /* Mail this back from the main thread. We're not polling in main
    * thread so we're using other workers for notifications. */
-  if (vlib_num_workers () && vlib_get_thread_index () != 0
-      && session_thread_from_handle (mp->handle) == 0)
+  if (session_thread_from_handle (mp->handle) == 0 && vlib_num_workers () &&
+      vlib_get_thread_index () != 0)
     {
-      vlib_rpc_call_main_thread (session_mq_accepted_reply_handler,
-				 (u8 *) mp, sizeof (*mp));
+      session_wrk_send_evt_to_main (wrk, elt);
       return;
     }
 
@@ -273,27 +445,35 @@ session_mq_accepted_reply_handler (void *data)
       return;
     }
 
+  /* Server isn't interested, disconnect the session */
+  if (mp->retval)
+    {
+      a->app_index = mp->context;
+      a->handle = mp->handle;
+      vnet_disconnect_session (a);
+      return;
+    }
+
+  /* Special handling for cut-through sessions */
   if (!session_has_transport (s))
     {
-      s->session_state = SESSION_STATE_READY;
-      if (ct_session_connect_notify (s))
-	return;
+      session_set_state (s, SESSION_STATE_READY);
+      ct_session_connect_notify (s, SESSION_E_NONE);
+      return;
     }
-  else
+
+  old_state = s->session_state;
+  session_set_state (s, SESSION_STATE_READY);
+
+  if (!svm_fifo_is_empty_prod (s->rx_fifo))
+    app_worker_lock_and_send_event (app_wrk, s, SESSION_IO_EVT_RX);
+
+  /* Closed while waiting for app to reply. Resend disconnect */
+  if (old_state >= SESSION_STATE_TRANSPORT_CLOSING)
     {
-      old_state = s->session_state;
-      s->session_state = SESSION_STATE_READY;
-
-      if (!svm_fifo_is_empty_prod (s->rx_fifo))
-	app_worker_lock_and_send_event (app_wrk, s, SESSION_IO_EVT_RX);
-
-      /* Closed while waiting for app to reply. Resend disconnect */
-      if (old_state >= SESSION_STATE_TRANSPORT_CLOSING)
-	{
-	  app_worker_close_notify (app_wrk, s);
-	  s->session_state = old_state;
-	  return;
-	}
+      app_worker_close_notify (app_wrk, s);
+      session_set_state (s, old_state);
+      return;
     }
 }
 
@@ -423,6 +603,7 @@ session_mq_worker_update_handler (void *data)
   session_event_t *evt;
   session_t *s;
   application_t *app;
+  int rv;
 
   app = application_lookup (mp->client_index);
   if (!app)
@@ -459,7 +640,9 @@ session_mq_worker_update_handler (void *data)
       return;
     }
 
-  app_worker_own_session (app_wrk, s);
+  rv = app_worker_own_session (app_wrk, s);
+  if (rv)
+    session_stat_error_inc (rv, 1);
 
   /*
    * Send reply
@@ -519,6 +702,112 @@ session_mq_app_wrk_rpc_handler (void *data)
   svm_msg_q_add_and_unlock (app_wrk->event_queue, msg);
 }
 
+static void
+session_mq_transport_attr_handler (void *data)
+{
+  session_transport_attr_msg_t *mp = (session_transport_attr_msg_t *) data;
+  session_transport_attr_reply_msg_t *rmp;
+  svm_msg_q_msg_t _msg, *msg = &_msg;
+  app_worker_t *app_wrk;
+  session_event_t *evt;
+  application_t *app;
+  session_t *s;
+  int rv;
+
+  app = application_lookup (mp->client_index);
+  if (!app)
+    return;
+
+  if (!(s = session_get_from_handle_if_valid (mp->handle)))
+    {
+      clib_warning ("invalid handle %llu", mp->handle);
+      return;
+    }
+  app_wrk = app_worker_get (s->app_wrk_index);
+  if (app_wrk->app_index != app->app_index)
+    {
+      clib_warning ("app %u does not own session %llu", app->app_index,
+		    mp->handle);
+      return;
+    }
+
+  rv = session_transport_attribute (s, mp->is_get, &mp->attr);
+
+  svm_msg_q_lock_and_alloc_msg_w_ring (
+    app_wrk->event_queue, SESSION_MQ_CTRL_EVT_RING, SVM_Q_WAIT, msg);
+  evt = svm_msg_q_msg_data (app_wrk->event_queue, msg);
+  clib_memset (evt, 0, sizeof (*evt));
+  evt->event_type = SESSION_CTRL_EVT_TRANSPORT_ATTR_REPLY;
+  rmp = (session_transport_attr_reply_msg_t *) evt->data;
+  rmp->handle = mp->handle;
+  rmp->retval = rv;
+  rmp->is_get = mp->is_get;
+  if (!rv && mp->is_get)
+    rmp->attr = mp->attr;
+  svm_msg_q_add_and_unlock (app_wrk->event_queue, msg);
+}
+
+void
+session_wrk_handle_evts_main_rpc (void *args)
+{
+  vlib_main_t *vm = vlib_get_main ();
+  clib_llist_index_t ei, next_ei;
+  session_evt_elt_t *he, *elt;
+  session_worker_t *fwrk;
+  u32 thread_index;
+
+  vlib_worker_thread_barrier_sync (vm);
+
+  thread_index = pointer_to_uword (args);
+  fwrk = session_main_get_worker (thread_index);
+
+  he = clib_llist_elt (fwrk->event_elts, fwrk->evts_pending_main);
+  ei = clib_llist_next_index (he, evt_list);
+
+  while (ei != fwrk->evts_pending_main)
+    {
+      elt = clib_llist_elt (fwrk->event_elts, ei);
+      next_ei = clib_llist_next_index (elt, evt_list);
+      clib_llist_remove (fwrk->event_elts, evt_list, elt);
+      switch (elt->evt.event_type)
+	{
+	case SESSION_CTRL_EVT_LISTEN:
+	  session_mq_listen_handler (fwrk, elt);
+	  break;
+	case SESSION_CTRL_EVT_UNLISTEN:
+	  session_mq_unlisten_handler (fwrk, elt);
+	  break;
+	case SESSION_CTRL_EVT_APP_DETACH:
+	  app_mq_detach_handler (fwrk, elt);
+	  break;
+	case SESSION_CTRL_EVT_CONNECT_URI:
+	  session_mq_connect_uri_handler (fwrk, elt);
+	  break;
+	case SESSION_CTRL_EVT_ACCEPTED_REPLY:
+	  session_mq_accepted_reply_handler (fwrk, elt);
+	  break;
+	case SESSION_CTRL_EVT_CONNECT:
+	  session_mq_connect_handler (fwrk, elt);
+	  break;
+	default:
+	  clib_warning ("unhandled %u", elt->evt.event_type);
+	  ALWAYS_ASSERT (0);
+	  break;
+	}
+
+      /* Regrab element in case pool moved */
+      elt = clib_llist_elt (fwrk->event_elts, ei);
+      if (!clib_llist_elt_is_linked (elt, evt_list))
+	{
+	  session_evt_ctrl_data_free (fwrk, elt);
+	  clib_llist_put (fwrk->event_elts, elt);
+	}
+      ei = next_ei;
+    }
+
+  vlib_worker_thread_barrier_release (vm);
+}
+
 vlib_node_registration_t session_queue_node;
 
 typedef struct
@@ -540,21 +829,21 @@ format_session_queue_trace (u8 * s, va_list * args)
   return s;
 }
 
-#define foreach_session_queue_error		\
-_(TX, "Packets transmitted")                  	\
-_(TIMER, "Timer events")			\
-_(NO_BUFFER, "Out of buffers")
+#define foreach_session_queue_error                                           \
+  _ (TX, tx, INFO, "Packets transmitted")                                     \
+  _ (TIMER, timer, INFO, "Timer events")                                      \
+  _ (NO_BUFFER, no_buffer, ERROR, "Out of buffers")
 
 typedef enum
 {
-#define _(sym,str) SESSION_QUEUE_ERROR_##sym,
+#define _(f, n, s, d) SESSION_QUEUE_ERROR_##f,
   foreach_session_queue_error
 #undef _
     SESSION_QUEUE_N_ERROR,
 } session_queue_error_t;
 
-static char *session_queue_error_strings[] = {
-#define _(sym,string) string,
+static vlib_error_desc_t session_error_counters[] = {
+#define _(f, n, s, d) { #n, d, VL_COUNTER_SEVERITY_##s },
   foreach_session_queue_error
 #undef _
 };
@@ -567,40 +856,136 @@ enum
 };
 
 static void
-session_tx_trace_frame (vlib_main_t * vm, vlib_node_runtime_t * node,
-			u32 next_index, u32 * to_next, u16 n_segs,
-			session_t * s, u32 n_trace)
+session_tx_trace_frame (vlib_main_t *vm, vlib_node_runtime_t *node,
+			u32 next_index, vlib_buffer_t **bufs, u16 n_segs,
+			session_t *s, u32 n_trace)
 {
+  vlib_buffer_t **b = bufs;
+
   while (n_trace && n_segs)
     {
-      vlib_buffer_t *b = vlib_get_buffer (vm, to_next[0]);
-      if (PREDICT_TRUE
-	  (vlib_trace_buffer
-	   (vm, node, next_index, b, 1 /* follow_chain */ )))
+      if (PREDICT_TRUE (vlib_trace_buffer (vm, node, next_index, b[0],
+					   1 /* follow_chain */)))
 	{
 	  session_queue_trace_t *t =
-	    vlib_add_trace (vm, node, b, sizeof (*t));
+	    vlib_add_trace (vm, node, b[0], sizeof (*t));
 	  t->session_index = s->session_index;
 	  t->server_thread_index = s->thread_index;
 	  n_trace--;
 	}
-      to_next++;
+      b++;
       n_segs--;
     }
   vlib_set_trace_count (vm, node, n_trace);
 }
 
-always_inline void
-session_tx_fifo_chain_tail (vlib_main_t * vm, session_tx_context_t * ctx,
-			    vlib_buffer_t * b, u16 * n_bufs, u8 peek_data)
+always_inline int
+session_tx_fill_dma_transfers (session_worker_t *wrk,
+			       session_tx_context_t *ctx, vlib_buffer_t *b)
 {
+  vlib_main_t *vm = wrk->vm;
+  u32 len_to_deq;
+  u8 *data0 = NULL;
+  int n_bytes_read, len_write;
+  svm_fifo_seg_t data_fs[2];
+
+  u32 n_segs = 2;
+  u16 n_transfers = 0;
+  /*
+   * Start with the first buffer in chain
+   */
+  b->error = 0;
+  b->flags = VNET_BUFFER_F_LOCALLY_ORIGINATED;
+  b->current_data = 0;
+  data0 = vlib_buffer_make_headroom (b, TRANSPORT_MAX_HDRS_LEN);
+  len_to_deq = clib_min (ctx->left_to_snd, ctx->deq_per_first_buf);
+
+  n_bytes_read = svm_fifo_segments (ctx->s->tx_fifo, ctx->sp.tx_offset,
+				    data_fs, &n_segs, len_to_deq);
+
+  len_write = n_bytes_read;
+  ASSERT (n_bytes_read == len_to_deq);
+
+  while (n_bytes_read)
+    {
+      wrk->batch_num++;
+      vlib_dma_batch_add (vm, wrk->batch, data0, data_fs[n_transfers].data,
+			  data_fs[n_transfers].len);
+      data0 += data_fs[n_transfers].len;
+      n_bytes_read -= data_fs[n_transfers].len;
+      n_transfers++;
+    }
+  return len_write;
+}
+
+always_inline int
+session_tx_fill_dma_transfers_tail (session_worker_t *wrk,
+				    session_tx_context_t *ctx,
+				    vlib_buffer_t *b, u32 len_to_deq, u8 *data)
+{
+  vlib_main_t *vm = wrk->vm;
+  int n_bytes_read, len_write;
+  svm_fifo_seg_t data_fs[2];
+  u32 n_segs = 2;
+  u16 n_transfers = 0;
+
+  n_bytes_read = svm_fifo_segments (ctx->s->tx_fifo, ctx->sp.tx_offset,
+				    data_fs, &n_segs, len_to_deq);
+
+  len_write = n_bytes_read;
+
+  ASSERT (n_bytes_read == len_to_deq);
+
+  while (n_bytes_read)
+    {
+      wrk->batch_num++;
+      vlib_dma_batch_add (vm, wrk->batch, data, data_fs[n_transfers].data,
+			  data_fs[n_transfers].len);
+      data += data_fs[n_transfers].len;
+      n_bytes_read -= data_fs[n_transfers].len;
+      n_transfers++;
+    }
+
+  return len_write;
+}
+
+always_inline int
+session_tx_copy_data (session_worker_t *wrk, session_tx_context_t *ctx,
+		      vlib_buffer_t *b, u32 len_to_deq, u8 *data0)
+{
+  int n_bytes_read;
+  if (PREDICT_TRUE (!wrk->dma_enabled))
+    n_bytes_read =
+      svm_fifo_peek (ctx->s->tx_fifo, ctx->sp.tx_offset, len_to_deq, data0);
+  else
+    n_bytes_read = session_tx_fill_dma_transfers (wrk, ctx, b);
+  return n_bytes_read;
+}
+
+always_inline int
+session_tx_copy_data_tail (session_worker_t *wrk, session_tx_context_t *ctx,
+			   vlib_buffer_t *b, u32 len_to_deq, u8 *data)
+{
+  int n_bytes_read;
+  if (PREDICT_TRUE (!wrk->dma_enabled))
+    n_bytes_read =
+      svm_fifo_peek (ctx->s->tx_fifo, ctx->sp.tx_offset, len_to_deq, data);
+  else
+    n_bytes_read =
+      session_tx_fill_dma_transfers_tail (wrk, ctx, b, len_to_deq, data);
+  return n_bytes_read;
+}
+
+always_inline void
+session_tx_fifo_chain_tail (session_worker_t *wrk, session_tx_context_t *ctx,
+			    vlib_buffer_t *b, u16 *n_bufs, u8 peek_data)
+{
+  vlib_main_t *vm = wrk->vm;
   vlib_buffer_t *chain_b, *prev_b;
   u32 chain_bi0, to_deq, left_from_seg;
-  session_worker_t *wrk;
-  u16 len_to_deq, n_bytes_read;
+  int len_to_deq, n_bytes_read;
   u8 *data, j;
 
-  wrk = session_main_get_worker (ctx->s->thread_index);
   b->flags |= VLIB_BUFFER_TOTAL_LENGTH_VALID;
   b->total_length_not_including_first_buffer = 0;
 
@@ -614,14 +999,14 @@ session_tx_fifo_chain_tail (vlib_main_t * vm, session_tx_context_t * ctx,
       len_to_deq = clib_min (to_deq, ctx->deq_per_buf);
 
       *n_bufs -= 1;
-      chain_bi0 = wrk->tx_buffers[*n_bufs];
+      chain_bi0 = ctx->tx_buffers[*n_bufs];
       chain_b = vlib_get_buffer (vm, chain_bi0);
       chain_b->current_data = 0;
       data = vlib_buffer_get_current (chain_b);
       if (peek_data)
 	{
-	  n_bytes_read = svm_fifo_peek (ctx->s->tx_fifo,
-					ctx->sp.tx_offset, len_to_deq, data);
+	  n_bytes_read =
+	    session_tx_copy_data_tail (wrk, ctx, b, len_to_deq, data);
 	  ctx->sp.tx_offset += n_bytes_read;
 	}
       else
@@ -632,16 +1017,18 @@ session_tx_fifo_chain_tail (vlib_main_t * vm, session_tx_context_t * ctx,
 	      svm_fifo_t *f = ctx->s->tx_fifo;
 	      session_dgram_hdr_t *hdr = &ctx->hdr;
 	      u16 deq_now;
+	      u32 offset;
+
 	      deq_now = clib_min (hdr->data_length - hdr->data_offset,
 				  len_to_deq);
-	      n_bytes_read = svm_fifo_peek (f, hdr->data_offset, deq_now,
-					    data);
+	      offset = hdr->data_offset + SESSION_CONN_HDR_LEN;
+	      n_bytes_read = svm_fifo_peek (f, offset, deq_now, data);
 	      ASSERT (n_bytes_read > 0);
 
 	      hdr->data_offset += n_bytes_read;
 	      if (hdr->data_offset == hdr->data_length)
 		{
-		  u32 offset = hdr->data_length + SESSION_CONN_HDR_LEN;
+		  offset = hdr->data_length + SESSION_CONN_HDR_LEN;
 		  svm_fifo_dequeue_drop (f, offset);
 		  if (ctx->left_to_snd > n_bytes_read)
 		    svm_fifo_peek (ctx->s->tx_fifo, 0, sizeof (ctx->hdr),
@@ -676,13 +1063,12 @@ session_tx_fifo_chain_tail (vlib_main_t * vm, session_tx_context_t * ctx,
 }
 
 always_inline void
-session_tx_fill_buffer (vlib_main_t * vm, session_tx_context_t * ctx,
-			vlib_buffer_t * b, u16 * n_bufs, u8 peek_data)
+session_tx_fill_buffer (session_worker_t *wrk, session_tx_context_t *ctx,
+			vlib_buffer_t *b, u16 *n_bufs, u8 peek_data)
 {
   u32 len_to_deq;
   u8 *data0;
   int n_bytes_read;
-
   /*
    * Start with the first buffer in chain
    */
@@ -695,8 +1081,7 @@ session_tx_fill_buffer (vlib_main_t * vm, session_tx_context_t * ctx,
 
   if (peek_data)
     {
-      n_bytes_read = svm_fifo_peek (ctx->s->tx_fifo, ctx->sp.tx_offset,
-				    len_to_deq, data0);
+      n_bytes_read = session_tx_copy_data (wrk, ctx, b, len_to_deq, data0);
       ASSERT (n_bytes_read > 0);
       /* Keep track of progress locally, transport is also supposed to
        * increment it independently when pushing the header */
@@ -718,9 +1103,11 @@ session_tx_fill_buffer (vlib_main_t * vm, session_tx_context_t * ctx,
 	  n_bytes_read = svm_fifo_peek (f, offset, deq_now, data0);
 	  ASSERT (n_bytes_read > 0);
 
-	  if (ctx->s->session_state == SESSION_STATE_LISTENING)
+	  if (transport_connection_is_cless (ctx->tc))
 	    {
 	      ip_copy (&ctx->tc->rmt_ip, &hdr->rmt_ip, ctx->tc->is_ip4);
+	      ip_copy (&ctx->tc->lcl_ip, &hdr->lcl_ip, ctx->tc->is_ip4);
+	      /* Local port assumed to be bound, not overwriting it */
 	      ctx->tc->rmt_port = hdr->rmt_port;
 	    }
 	  hdr->data_offset += n_bytes_read;
@@ -743,6 +1130,7 @@ session_tx_fill_buffer (vlib_main_t * vm, session_tx_context_t * ctx,
 	  ASSERT (n_bytes_read > 0);
 	}
     }
+
   b->current_length = n_bytes_read;
   ctx->left_to_snd -= n_bytes_read;
 
@@ -750,7 +1138,7 @@ session_tx_fill_buffer (vlib_main_t * vm, session_tx_context_t * ctx,
    * Fill in the remaining buffers in the chain, if any
    */
   if (PREDICT_FALSE (ctx->n_bufs_per_seg > 1 && ctx->left_to_snd))
-    session_tx_fifo_chain_tail (vm, ctx, b, n_bufs, peek_data);
+    session_tx_fifo_chain_tail (wrk, ctx, b, n_bufs, peek_data);
 }
 
 always_inline u8
@@ -763,7 +1151,15 @@ session_tx_not_ready (session_t * s, u8 peek_data)
       /* Can retransmit for closed sessions but can't send new data if
        * session is not ready or closed */
       else if (s->session_state < SESSION_STATE_READY)
-	return 1;
+	{
+	  /* Allow accepting session to send custom packets.
+	   * For instance, tcp want to send acks in established, but
+	   * the app has not called accept() yet */
+	  if (s->session_state == SESSION_STATE_ACCEPTING &&
+	      (s->flags & SESSION_F_CUSTOM_TX))
+	    return 0;
+	  return 1;
+	}
       else if (s->session_state >= SESSION_STATE_TRANSPORT_CLOSED)
 	{
 	  /* Allow closed transports to still send custom packets.
@@ -773,6 +1169,11 @@ session_tx_not_ready (session_t * s, u8 peek_data)
 	    return 0;
 	  return 2;
 	}
+    }
+  else
+    {
+      if (s->session_state == SESSION_STATE_TRANSPORT_DELETED)
+	return 2;
     }
   return 0;
 }
@@ -830,8 +1231,20 @@ session_tx_set_dequeue_params (vlib_main_t * vm, session_tx_context_t * ctx,
 
 	  svm_fifo_peek (ctx->s->tx_fifo, 0, sizeof (ctx->hdr),
 			 (u8 *) & ctx->hdr);
+	  /* Zero length dgrams not supported */
+	  if (PREDICT_FALSE (ctx->hdr.data_length == 0))
+	    {
+	      svm_fifo_dequeue_drop (ctx->s->tx_fifo, sizeof (ctx->hdr));
+	      ctx->max_len_to_snd = 0;
+	      return;
+	    }
 	  ASSERT (ctx->hdr.data_length > ctx->hdr.data_offset);
 	  len = ctx->hdr.data_length - ctx->hdr.data_offset;
+
+	  if (ctx->hdr.gso_size)
+	    {
+	      ctx->sp.snd_mss = clib_min (ctx->sp.snd_mss, ctx->hdr.gso_size);
+	    }
 
 	  /* Process multiple dgrams if smaller than min (buf_space, mss).
 	   * This avoids handling multiple dgrams if they require buffer
@@ -852,11 +1265,13 @@ session_tx_set_dequeue_params (vlib_main_t * vm, session_tx_context_t * ctx,
 		{
 		  svm_fifo_peek (ctx->s->tx_fifo, offset, sizeof (ctx->hdr),
 				 (u8 *) & hdr);
-		  ASSERT (hdr.data_length > hdr.data_offset);
 		  dgram_len = hdr.data_length - hdr.data_offset;
-		  if (len + dgram_len > ctx->max_dequeue
-		      || first_dgram_len != dgram_len)
+		  if (offset + sizeof (hdr) + hdr.data_length >
+			ctx->max_dequeue ||
+		      first_dgram_len != dgram_len)
 		    break;
+		  /* Assert here to allow test above with zero length dgrams */
+		  ASSERT (hdr.data_length > hdr.data_offset);
 		  len += dgram_len;
 		  offset += sizeof (hdr) + hdr.data_length;
 		}
@@ -925,8 +1340,30 @@ session_tx_maybe_reschedule (session_worker_t * wrk,
 
   svm_fifo_unset_event (s->tx_fifo);
   if (svm_fifo_max_dequeue_cons (s->tx_fifo) > ctx->sp.tx_offset)
-    if (svm_fifo_set_event (s->tx_fifo))
-      session_evt_add_head_old (wrk, elt);
+    {
+      if (svm_fifo_set_event (s->tx_fifo))
+	session_evt_add_head_old (wrk, elt);
+    }
+  else
+    {
+      transport_connection_deschedule (ctx->tc);
+    }
+}
+
+always_inline void
+session_tx_add_pending_buffer (session_worker_t *wrk, u32 bi, u32 next_index)
+{
+  if (PREDICT_TRUE (!wrk->dma_enabled))
+    {
+      vec_add1 (wrk->pending_tx_buffers, bi);
+      vec_add1 (wrk->pending_tx_nexts, next_index);
+    }
+  else
+    {
+      session_dma_transfer *dma_transfer = &wrk->dma_trans[wrk->trans_tail];
+      vec_add1 (dma_transfer->pending_tx_buffers, bi);
+      vec_add1 (dma_transfer->pending_tx_nexts, next_index);
+    }
 }
 
 always_inline int
@@ -983,6 +1420,11 @@ session_tx_fifo_read_and_snd_i (session_worker_t * wrk,
 	}
     }
 
+  /* Connection previously descheduled because it had no data to send.
+   * Clear descheduled flag and reset pacer if in use */
+  if (transport_connection_is_descheduled (ctx->tc))
+    transport_connection_clear_descheduled (ctx->tc);
+
   transport_connection_snd_params (ctx->tc, &ctx->sp);
 
   if (!ctx->sp.snd_space)
@@ -1026,13 +1468,13 @@ session_tx_fifo_read_and_snd_i (session_worker_t * wrk,
       return SESSION_TX_NO_DATA;
     }
 
-  vec_validate_aligned (wrk->tx_buffers, ctx->n_bufs_needed - 1,
+  vec_validate_aligned (ctx->tx_buffers, ctx->n_bufs_needed - 1,
 			CLIB_CACHE_LINE_BYTES);
-  n_bufs = vlib_buffer_alloc (vm, wrk->tx_buffers, ctx->n_bufs_needed);
+  n_bufs = vlib_buffer_alloc (vm, ctx->tx_buffers, ctx->n_bufs_needed);
   if (PREDICT_FALSE (n_bufs < ctx->n_bufs_needed))
     {
       if (n_bufs)
-	vlib_buffer_free (vm, wrk->tx_buffers, n_bufs);
+	vlib_buffer_free (vm, ctx->tx_buffers, n_bufs);
       session_evt_add_head_old (wrk, elt);
       vlib_node_increment_counter (wrk->vm, node->node_index,
 				   SESSION_QUEUE_ERROR_NO_BUFFER, 1);
@@ -1045,39 +1487,35 @@ session_tx_fifo_read_and_snd_i (session_worker_t * wrk,
   ctx->left_to_snd = ctx->max_len_to_snd;
   n_left = ctx->n_segs_per_evt;
 
+  vec_validate (ctx->transport_pending_bufs, n_left);
+
   while (n_left >= 4)
     {
       vlib_buffer_t *b0, *b1;
       u32 bi0, bi1;
 
-      pbi = wrk->tx_buffers[n_bufs - 3];
+      pbi = ctx->tx_buffers[n_bufs - 3];
       pb = vlib_get_buffer (vm, pbi);
       vlib_prefetch_buffer_header (pb, STORE);
-      pbi = wrk->tx_buffers[n_bufs - 4];
+      pbi = ctx->tx_buffers[n_bufs - 4];
       pb = vlib_get_buffer (vm, pbi);
       vlib_prefetch_buffer_header (pb, STORE);
 
-      bi0 = wrk->tx_buffers[--n_bufs];
-      bi1 = wrk->tx_buffers[--n_bufs];
+      bi0 = ctx->tx_buffers[--n_bufs];
+      bi1 = ctx->tx_buffers[--n_bufs];
 
       b0 = vlib_get_buffer (vm, bi0);
       b1 = vlib_get_buffer (vm, bi1);
 
-      session_tx_fill_buffer (vm, ctx, b0, &n_bufs, peek_data);
-      session_tx_fill_buffer (vm, ctx, b1, &n_bufs, peek_data);
+      session_tx_fill_buffer (wrk, ctx, b0, &n_bufs, peek_data);
+      session_tx_fill_buffer (wrk, ctx, b1, &n_bufs, peek_data);
 
-      ctx->transport_vft->push_header (ctx->tc, b0);
-      ctx->transport_vft->push_header (ctx->tc, b1);
-
+      ctx->transport_pending_bufs[ctx->n_segs_per_evt - n_left] = b0;
+      ctx->transport_pending_bufs[ctx->n_segs_per_evt - n_left + 1] = b1;
       n_left -= 2;
 
-      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b0);
-      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b1);
-
-      vec_add1 (wrk->pending_tx_buffers, bi0);
-      vec_add1 (wrk->pending_tx_buffers, bi1);
-      vec_add1 (wrk->pending_tx_nexts, next_index);
-      vec_add1 (wrk->pending_tx_nexts, next_index);
+      session_tx_add_pending_buffer (wrk, bi0, next_index);
+      session_tx_add_pending_buffer (wrk, bi1, next_index);
     }
   while (n_left)
     {
@@ -1086,38 +1524,36 @@ session_tx_fifo_read_and_snd_i (session_worker_t * wrk,
 
       if (n_left > 1)
 	{
-	  pbi = wrk->tx_buffers[n_bufs - 2];
+	  pbi = ctx->tx_buffers[n_bufs - 2];
 	  pb = vlib_get_buffer (vm, pbi);
 	  vlib_prefetch_buffer_header (pb, STORE);
 	}
 
-      bi0 = wrk->tx_buffers[--n_bufs];
+      bi0 = ctx->tx_buffers[--n_bufs];
       b0 = vlib_get_buffer (vm, bi0);
-      session_tx_fill_buffer (vm, ctx, b0, &n_bufs, peek_data);
+      session_tx_fill_buffer (wrk, ctx, b0, &n_bufs, peek_data);
 
-      /* Ask transport to push header after current_length and
-       * total_length_not_including_first_buffer are updated */
-      ctx->transport_vft->push_header (ctx->tc, b0);
-
+      ctx->transport_pending_bufs[ctx->n_segs_per_evt - n_left] = b0;
       n_left -= 1;
 
-      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b0);
-
-      vec_add1 (wrk->pending_tx_buffers, bi0);
-      vec_add1 (wrk->pending_tx_nexts, next_index);
+      session_tx_add_pending_buffer (wrk, bi0, next_index);
     }
 
+  /* Ask transport to push headers */
+  ctx->transport_vft->push_header (ctx->tc, ctx->transport_pending_bufs,
+				   ctx->n_segs_per_evt);
+
   if (PREDICT_FALSE ((n_trace = vlib_get_trace_count (vm, node)) > 0))
-    session_tx_trace_frame (vm, node, next_index, wrk->pending_tx_buffers,
+    session_tx_trace_frame (vm, node, next_index, ctx->transport_pending_bufs,
 			    ctx->n_segs_per_evt, ctx->s, n_trace);
 
   if (PREDICT_FALSE (n_bufs))
-    vlib_buffer_free (vm, wrk->tx_buffers, n_bufs);
+    vlib_buffer_free (vm, ctx->tx_buffers, n_bufs);
 
   *n_tx_packets += ctx->n_segs_per_evt;
 
   SESSION_EVT (SESSION_EVT_DEQ, ctx->s, ctx->max_len_to_snd, ctx->max_dequeue,
-	       ctx->s->tx_fifo->has_event, wrk->last_vlib_time);
+	       ctx->s->tx_fifo->shr->has_event, wrk->last_vlib_time);
 
   ASSERT (ctx->left_to_snd == 0);
 
@@ -1170,6 +1606,8 @@ session_tx_fifo_dequeue_internal (session_worker_t * wrk,
   /* Clear custom-tx flag used to request reschedule for tx */
   s->flags &= ~SESSION_F_CUSTOM_TX;
 
+  sp->flags = 0;
+  sp->bytes_dequeued = 0;
   sp->max_burst_size = clib_min (SESSION_NODE_FRAME_SIZE - *n_tx_packets,
 				 TRANSPORT_PACER_MAX_BURST_PKTS);
 
@@ -1187,6 +1625,10 @@ session_tx_fifo_dequeue_internal (session_worker_t * wrk,
 	if (svm_fifo_set_event (s->tx_fifo))
 	  session_evt_add_head_old (wrk, elt);
     }
+
+  if (sp->bytes_dequeued &&
+      svm_fifo_needs_deq_ntf (s->tx_fifo, sp->bytes_dequeued))
+    session_dequeue_notify (s);
 
   return n_packets;
 }
@@ -1218,6 +1660,12 @@ session_event_dispatch_ctrl (session_worker_t * wrk, session_evt_elt_t * elt)
       fp = e->rpc_args.fp;
       (*fp) (e->rpc_args.arg);
       break;
+    case SESSION_CTRL_EVT_HALF_CLOSE:
+      s = session_get_from_handle_if_valid (e->session_handle);
+      if (PREDICT_FALSE (!s))
+	break;
+      session_transport_half_close (s);
+      break;
     case SESSION_CTRL_EVT_CLOSE:
       s = session_get_from_handle_if_valid (e->session_handle);
       if (PREDICT_FALSE (!s))
@@ -1231,19 +1679,22 @@ session_event_dispatch_ctrl (session_worker_t * wrk, session_evt_elt_t * elt)
       session_transport_reset (s);
       break;
     case SESSION_CTRL_EVT_LISTEN:
-      session_mq_listen_handler (session_evt_ctrl_data (wrk, elt));
+      session_mq_listen_handler (wrk, elt);
       break;
     case SESSION_CTRL_EVT_LISTEN_URI:
-      session_mq_listen_uri_handler (session_evt_ctrl_data (wrk, elt));
+      session_mq_listen_uri_handler (wrk, elt);
       break;
     case SESSION_CTRL_EVT_UNLISTEN:
-      session_mq_unlisten_handler (session_evt_ctrl_data (wrk, elt));
+      session_mq_unlisten_handler (wrk, elt);
       break;
     case SESSION_CTRL_EVT_CONNECT:
-      session_mq_connect_handler (session_evt_ctrl_data (wrk, elt));
+      session_mq_connect_handler (wrk, elt);
       break;
     case SESSION_CTRL_EVT_CONNECT_URI:
-      session_mq_connect_uri_handler (session_evt_ctrl_data (wrk, elt));
+      session_mq_connect_uri_handler (wrk, elt);
+      break;
+    case SESSION_CTRL_EVT_SHUTDOWN:
+      session_mq_shutdown_handler (session_evt_ctrl_data (wrk, elt));
       break;
     case SESSION_CTRL_EVT_DISCONNECT:
       session_mq_disconnect_handler (session_evt_ctrl_data (wrk, elt));
@@ -1252,7 +1703,7 @@ session_event_dispatch_ctrl (session_worker_t * wrk, session_evt_elt_t * elt)
       session_mq_disconnected_handler (session_evt_ctrl_data (wrk, elt));
       break;
     case SESSION_CTRL_EVT_ACCEPTED_REPLY:
-      session_mq_accepted_reply_handler (session_evt_ctrl_data (wrk, elt));
+      session_mq_accepted_reply_handler (wrk, elt);
       break;
     case SESSION_CTRL_EVT_DISCONNECTED_REPLY:
       session_mq_disconnected_reply_handler (session_evt_ctrl_data (wrk,
@@ -1265,23 +1716,26 @@ session_event_dispatch_ctrl (session_worker_t * wrk, session_evt_elt_t * elt)
       session_mq_worker_update_handler (session_evt_ctrl_data (wrk, elt));
       break;
     case SESSION_CTRL_EVT_APP_DETACH:
-      app_mq_detach_handler (session_evt_ctrl_data (wrk, elt));
+      app_mq_detach_handler (wrk, elt);
       break;
     case SESSION_CTRL_EVT_APP_WRK_RPC:
       session_mq_app_wrk_rpc_handler (session_evt_ctrl_data (wrk, elt));
+      break;
+    case SESSION_CTRL_EVT_TRANSPORT_ATTR:
+      session_mq_transport_attr_handler (session_evt_ctrl_data (wrk, elt));
       break;
     default:
       clib_warning ("unhandled event type %d", e->event_type);
     }
 
   /* Regrab elements in case pool moved */
-  elt = pool_elt_at_index (wrk->event_elts, ei);
+  elt = clib_llist_elt (wrk->event_elts, ei);
   if (!clib_llist_elt_is_linked (elt, evt_list))
     {
       e = &elt->evt;
       if (e->event_type >= SESSION_CTRL_EVT_BOUND)
 	session_evt_ctrl_data_free (wrk, elt);
-      session_evt_elt_free (wrk, elt);
+      clib_llist_put (wrk->event_elts, elt);
     }
   SESSION_EVT (SESSION_EVT_COUNTS, CNT_CTRL_EVTS, 1, wrk);
 }
@@ -1306,7 +1760,7 @@ session_event_dispatch_io (session_worker_t * wrk, vlib_node_runtime_t * node,
       s = session_event_get_session (wrk, e);
       if (PREDICT_FALSE (!s))
 	break;
-      CLIB_PREFETCH (s->tx_fifo, 2 * CLIB_CACHE_LINE_BYTES, LOAD);
+      CLIB_PREFETCH (s->tx_fifo, sizeof (*(s->tx_fifo)), LOAD);
       wrk->ctx.s = s;
       /* Spray packets in per session type frames, since they go to
        * different nodes */
@@ -1327,22 +1781,24 @@ session_event_dispatch_io (session_worker_t * wrk, vlib_node_runtime_t * node,
       app_wrk = app_worker_get (s->app_wrk_index);
       app_worker_builtin_rx (app_wrk, s);
       break;
-    case SESSION_IO_EVT_BUILTIN_TX:
-      s = session_get_from_handle_if_valid (e->session_handle);
+    case SESSION_IO_EVT_TX_MAIN:
+      s = session_get_if_valid (e->session_index, 0 /* main thread */);
+      if (PREDICT_FALSE (!s))
+	break;
       wrk->ctx.s = s;
       if (PREDICT_TRUE (s != 0))
-	session_tx_fifo_dequeue_internal (wrk, node, elt, n_tx_packets);
+	(smm->session_tx_fns[s->session_type]) (wrk, node, elt, n_tx_packets);
       break;
     default:
       clib_warning ("unhandled event type %d", e->event_type);
     }
 
-  SESSION_EVT (SESSION_IO_EVT_COUNTS, e->event_type, 1, wrk);
+  SESSION_EVT (SESSION_EVT_IO_EVT_COUNTS, e->event_type, 1, wrk);
 
   /* Regrab elements in case pool moved */
-  elt = pool_elt_at_index (wrk->event_elts, ei);
+  elt = clib_llist_elt (wrk->event_elts, ei);
   if (!clib_llist_elt_is_linked (elt, evt_list))
-    session_evt_elt_free (wrk, elt);
+    clib_llist_put (wrk->event_elts, elt);
 }
 
 /* *INDENT-OFF* */
@@ -1353,6 +1809,16 @@ static const u32 session_evt_msg_sizes[] = {
 #undef _
 };
 /* *INDENT-ON* */
+
+always_inline void
+session_update_time_subscribers (session_main_t *smm, clib_time_type_t now,
+				 u32 thread_index)
+{
+  session_update_time_fn *fn;
+
+  vec_foreach (fn, smm->update_time_fns)
+    (*fn) (now, thread_index);
+}
 
 always_inline void
 session_evt_add_to_list (session_worker_t * wrk, session_event_t * evt)
@@ -1386,72 +1852,124 @@ static void
 session_flush_pending_tx_buffers (session_worker_t * wrk,
 				  vlib_node_runtime_t * node)
 {
-  vlib_buffer_enqueue_to_next (wrk->vm, node, wrk->pending_tx_buffers,
-			       wrk->pending_tx_nexts,
-			       vec_len (wrk->pending_tx_nexts));
+  vlib_buffer_enqueue_to_next_vec (wrk->vm, node, &wrk->pending_tx_buffers,
+				   &wrk->pending_tx_nexts,
+				   vec_len (wrk->pending_tx_nexts));
   vec_reset_length (wrk->pending_tx_buffers);
   vec_reset_length (wrk->pending_tx_nexts);
+}
+
+int
+session_wrk_handle_mq (session_worker_t *wrk, svm_msg_q_t *mq)
+{
+  svm_msg_q_msg_t _msg, *msg = &_msg;
+  u32 i, n_to_dequeue = 0;
+  session_event_t *evt;
+
+  n_to_dequeue = svm_msg_q_size (mq);
+  for (i = 0; i < n_to_dequeue; i++)
+    {
+      svm_msg_q_sub_raw (mq, msg);
+      evt = svm_msg_q_msg_data (mq, msg);
+      session_evt_add_to_list (wrk, evt);
+      svm_msg_q_free_msg (mq, msg);
+    }
+
+  return n_to_dequeue;
+}
+
+static void
+session_wrk_update_state (session_worker_t *wrk)
+{
+  vlib_main_t *vm = wrk->vm;
+
+  if (wrk->state == SESSION_WRK_POLLING)
+    {
+      if (clib_llist_elts (wrk->event_elts) == 5 &&
+	  vlib_last_vectors_per_main_loop (vm) < 1)
+	{
+	  session_wrk_set_state (wrk, SESSION_WRK_INTERRUPT);
+	  vlib_node_set_state (vm, session_queue_node.index,
+			       VLIB_NODE_STATE_INTERRUPT);
+	}
+    }
+  else if (wrk->state == SESSION_WRK_INTERRUPT)
+    {
+      if (clib_llist_elts (wrk->event_elts) > 5 ||
+	  vlib_last_vectors_per_main_loop (vm) > 1)
+	{
+	  session_wrk_set_state (wrk, SESSION_WRK_POLLING);
+	  vlib_node_set_state (vm, session_queue_node.index,
+			       VLIB_NODE_STATE_POLLING);
+	}
+      else if (PREDICT_FALSE (!pool_elts (wrk->sessions)))
+	{
+	  session_wrk_set_state (wrk, SESSION_WRK_IDLE);
+	}
+    }
+  else
+    {
+      if (clib_llist_elts (wrk->event_elts))
+	{
+	  session_wrk_set_state (wrk, SESSION_WRK_INTERRUPT);
+	}
+    }
 }
 
 static uword
 session_queue_node_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
 		       vlib_frame_t * frame)
 {
-  session_main_t *smm = vnet_get_session_main ();
-  u32 thread_index = vm->thread_index, n_to_dequeue;
-  session_worker_t *wrk = &smm->wrk[thread_index];
+  u32 thread_index = vm->thread_index, __clib_unused n_evts;
   session_evt_elt_t *elt, *ctrl_he, *new_he, *old_he;
+  session_main_t *smm = vnet_get_session_main ();
+  session_worker_t *wrk = &smm->wrk[thread_index];
   clib_llist_index_t ei, next_ei, old_ti;
-  svm_msg_q_msg_t _msg, *msg = &_msg;
-  int i = 0, n_tx_packets;
-  session_event_t *evt;
-  svm_msg_q_t *mq;
+  int n_tx_packets;
 
   SESSION_EVT (SESSION_EVT_DISPATCH_START, wrk);
 
-  wrk->last_vlib_time = vlib_time_now (vm);
-  wrk->last_vlib_us_time = wrk->last_vlib_time * CLIB_US_TIME_FREQ;
+  session_wrk_update_time (wrk, vlib_time_now (vm));
 
   /*
    *  Update transport time
    */
-  transport_update_time (wrk->last_vlib_time, thread_index);
+  session_update_time_subscribers (smm, wrk->last_vlib_time, thread_index);
   n_tx_packets = vec_len (wrk->pending_tx_buffers);
   SESSION_EVT (SESSION_EVT_DSP_CNTRS, UPDATE_TIME, wrk);
 
-  /*
-   *  Dequeue and handle new events
-   */
-
-  /* Try to dequeue what is available. Don't wait for lock.
-   * XXX: we may need priorities here */
-  mq = wrk->vpp_event_queue;
-  n_to_dequeue = svm_msg_q_size (mq);
-  if (n_to_dequeue)
+  if (PREDICT_FALSE (wrk->dma_enabled))
     {
-      for (i = 0; i < n_to_dequeue; i++)
-	{
-	  svm_msg_q_sub_raw (mq, msg);
-	  evt = svm_msg_q_msg_data (mq, msg);
-	  session_evt_add_to_list (wrk, evt);
-	  svm_msg_q_free_msg (mq, msg);
-	}
+      if (wrk->trans_head == ((wrk->trans_tail + 1) & (wrk->trans_size - 1)))
+	return 0;
+      wrk->batch = vlib_dma_batch_new (vm, wrk->config_index);
+      if (!wrk->batch)
+	return 0;
     }
 
-  SESSION_EVT (SESSION_EVT_DSP_CNTRS, MQ_DEQ, wrk, n_to_dequeue, !i);
+  /*
+   *  Dequeue new internal mq events
+   */
+
+  n_evts = session_wrk_handle_mq (wrk, wrk->vpp_event_queue);
+  SESSION_EVT (SESSION_EVT_DSP_CNTRS, MQ_DEQ, wrk, n_evts);
 
   /*
    * Handle control events
    */
 
-  ctrl_he = pool_elt_at_index (wrk->event_elts, wrk->ctrl_head);
-
-  /* *INDENT-OFF* */
-  clib_llist_foreach_safe (wrk->event_elts, evt_list, ctrl_he, elt, ({
-    clib_llist_remove (wrk->event_elts, evt_list, elt);
-    session_event_dispatch_ctrl (wrk, elt);
-  }));
-  /* *INDENT-ON* */
+  ei = wrk->ctrl_head;
+  ctrl_he = clib_llist_elt (wrk->event_elts, ei);
+  next_ei = clib_llist_next_index (ctrl_he, evt_list);
+  old_ti = clib_llist_prev_index (ctrl_he, evt_list);
+  while (ei != old_ti)
+    {
+      ei = next_ei;
+      elt = clib_llist_elt (wrk->event_elts, next_ei);
+      next_ei = clib_llist_next_index (elt, evt_list);
+      clib_llist_remove (wrk->event_elts, evt_list, elt);
+      session_event_dispatch_ctrl (wrk, elt);
+    }
 
   SESSION_EVT (SESSION_EVT_DSP_CNTRS, CTRL_EVTS, wrk);
 
@@ -1459,14 +1977,14 @@ session_queue_node_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
    * Handle the new io events.
    */
 
-  new_he = pool_elt_at_index (wrk->event_elts, wrk->new_head);
-  old_he = pool_elt_at_index (wrk->event_elts, wrk->old_head);
+  new_he = clib_llist_elt (wrk->event_elts, wrk->new_head);
+  old_he = clib_llist_elt (wrk->event_elts, wrk->old_head);
   old_ti = clib_llist_prev_index (old_he, evt_list);
 
   ei = clib_llist_next_index (new_he, evt_list);
   while (ei != wrk->new_head && n_tx_packets < SESSION_NODE_FRAME_SIZE)
     {
-      elt = pool_elt_at_index (wrk->event_elts, ei);
+      elt = clib_llist_elt (wrk->event_elts, ei);
       ei = clib_llist_next_index (elt, evt_list);
       clib_llist_remove (wrk->event_elts, evt_list, elt);
       session_event_dispatch_io (wrk, node, elt, &n_tx_packets);
@@ -1480,12 +1998,12 @@ session_queue_node_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
 
   if (old_ti != wrk->old_head)
     {
-      old_he = pool_elt_at_index (wrk->event_elts, wrk->old_head);
+      old_he = clib_llist_elt (wrk->event_elts, wrk->old_head);
       ei = clib_llist_next_index (old_he, evt_list);
 
       while (n_tx_packets < SESSION_NODE_FRAME_SIZE)
 	{
-	  elt = pool_elt_at_index (wrk->event_elts, ei);
+	  elt = clib_llist_elt (wrk->event_elts, ei);
 	  next_ei = clib_llist_next_index (elt, evt_list);
 	  clib_llist_remove (wrk->event_elts, evt_list, elt);
 
@@ -1498,6 +2016,20 @@ session_queue_node_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
 	};
     }
 
+  if (PREDICT_FALSE (wrk->dma_enabled))
+    {
+      if (wrk->batch_num)
+	{
+	  vlib_dma_batch_set_cookie (vm, wrk->batch, wrk->trans_tail);
+	  wrk->batch_num = 0;
+	  wrk->trans_tail++;
+	  if (wrk->trans_tail == wrk->trans_size)
+	    wrk->trans_tail = 0;
+	}
+
+      vlib_dma_batch_submit (vm, wrk->batch);
+    }
+
   SESSION_EVT (SESSION_EVT_DSP_CNTRS, OLD_IO_EVTS, wrk);
 
   if (vec_len (wrk->pending_tx_buffers))
@@ -1508,27 +2040,69 @@ session_queue_node_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
 
   SESSION_EVT (SESSION_EVT_DISPATCH_END, wrk, n_tx_packets);
 
+  if (wrk->flags & SESSION_WRK_F_ADAPTIVE)
+    session_wrk_update_state (wrk);
+
   return n_tx_packets;
 }
 
 /* *INDENT-OFF* */
-VLIB_REGISTER_NODE (session_queue_node) =
-{
+VLIB_REGISTER_NODE (session_queue_node) = {
   .function = session_queue_node_fn,
   .flags = VLIB_NODE_FLAG_TRACE_SUPPORTED,
   .name = "session-queue",
   .format_trace = format_session_queue_trace,
   .type = VLIB_NODE_TYPE_INPUT,
-  .n_errors = ARRAY_LEN (session_queue_error_strings),
-  .error_strings = session_queue_error_strings,
+  .n_errors = SESSION_QUEUE_N_ERROR,
+  .error_counters = session_error_counters,
   .state = VLIB_NODE_STATE_DISABLED,
 };
 /* *INDENT-ON* */
 
 static clib_error_t *
+session_wrk_tfd_read_ready (clib_file_t *cf)
+{
+  session_worker_t *wrk = session_main_get_worker (cf->private_data);
+  u64 buf;
+  int rv;
+
+  vlib_node_set_interrupt_pending (wrk->vm, session_queue_node.index);
+  rv = read (wrk->timerfd, &buf, sizeof (buf));
+  if (rv < 0 && errno != EAGAIN)
+    clib_unix_warning ("failed");
+  return 0;
+}
+
+static clib_error_t *
+session_wrk_tfd_write_ready (clib_file_t *cf)
+{
+  return 0;
+}
+
+void
+session_wrk_enable_adaptive_mode (session_worker_t *wrk)
+{
+  u32 thread_index = wrk->vm->thread_index;
+  clib_file_t template = { 0 };
+
+  if ((wrk->timerfd = timerfd_create (CLOCK_MONOTONIC, TFD_NONBLOCK)) < 0)
+    clib_warning ("timerfd_create");
+
+  template.read_function = session_wrk_tfd_read_ready;
+  template.write_function = session_wrk_tfd_write_ready;
+  template.file_descriptor = wrk->timerfd;
+  template.private_data = thread_index;
+  template.polling_thread_index = thread_index;
+  template.description = format (0, "session-wrk-tfd-%u", thread_index);
+
+  wrk->timerfd_file = clib_file_add (&file_main, &template);
+  wrk->flags |= SESSION_WRK_F_ADAPTIVE;
+}
+
+static clib_error_t *
 session_queue_exit (vlib_main_t * vm)
 {
-  if (vec_len (vlib_mains) < 2)
+  if (vlib_get_n_threads () < 2)
     return 0;
 
   /*

@@ -42,6 +42,7 @@
 
 #include <vnet/ip/ip.h>
 #include <vnet/ethernet/ethernet.h>
+#include <vppinfra/vector/ip_csum.h>
 
 typedef enum
 {
@@ -51,7 +52,6 @@ typedef enum
   IP4_INPUT_NEXT_LOOKUP,
   IP4_INPUT_NEXT_LOOKUP_MULTICAST,
   IP4_INPUT_NEXT_ICMP_ERROR,
-  IP4_INPUT_NEXT_REASSEMBLY,
   IP4_INPUT_N_NEXT,
 } ip4_input_next_t;
 
@@ -60,18 +60,21 @@ check_ver_opt_csum (ip4_header_t * ip, u8 * error, int verify_checksum)
 {
   if (PREDICT_FALSE (ip->ip_version_and_header_length != 0x45))
     {
-      if ((ip->ip_version_and_header_length & 0xf) != 5)
+      if ((ip->ip_version_and_header_length & 0xf0) != 0x40)
+	*error = IP4_ERROR_VERSION;
+      else if ((ip->ip_version_and_header_length & 0x0f) < 5)
+	*error = IP4_ERROR_HDR_TOO_SHORT;
+      else
 	{
 	  *error = IP4_ERROR_OPTIONS;
-	  if (verify_checksum && ip_csum (ip, ip4_header_bytes (ip)) != 0)
+	  if (verify_checksum &&
+	      clib_ip_csum ((u8 *) ip, ip4_header_bytes (ip)) != 0)
 	    *error = IP4_ERROR_BAD_CHECKSUM;
 	}
-      else
-	*error = IP4_ERROR_VERSION;
     }
-  else
-    if (PREDICT_FALSE (verify_checksum &&
-		       ip_csum (ip, sizeof (ip4_header_t)) != 0))
+  else if (PREDICT_FALSE (verify_checksum &&
+			  clib_ip_csum ((u8 *) ip, sizeof (ip4_header_t)) !=
+			    0))
     *error = IP4_ERROR_BAD_CHECKSUM;
 }
 

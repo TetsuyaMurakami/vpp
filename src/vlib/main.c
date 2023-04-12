@@ -41,75 +41,17 @@
 #include <vppinfra/format.h>
 #include <vlib/vlib.h>
 #include <vlib/threads.h>
+#include <vlib/stats/stats.h>
 #include <vppinfra/tw_timer_1t_3w_1024sl_ov.h>
 
 #include <vlib/unix/unix.h>
 
-/* Actually allocate a few extra slots of vector data to support
-   speculative vector enqueues which overflow vector data in next frame. */
-#define VLIB_FRAME_SIZE_ALLOC (VLIB_FRAME_SIZE + 4)
-
-always_inline u32
-vlib_frame_bytes (u32 n_scalar_bytes, u32 n_vector_bytes)
-{
-  u32 n_bytes;
-
-  /* Make room for vlib_frame_t plus scalar arguments. */
-  n_bytes = vlib_frame_vector_byte_offset (n_scalar_bytes);
-
-  /* Make room for vector arguments.
-     Allocate a few extra slots of vector data to support
-     speculative vector enqueues which overflow vector data in next frame. */
-#define VLIB_FRAME_SIZE_EXTRA 4
-  n_bytes += (VLIB_FRAME_SIZE + VLIB_FRAME_SIZE_EXTRA) * n_vector_bytes;
-
-  /* Magic number is first 32bit number after vector data.
-     Used to make sure that vector data is never overrun. */
 #define VLIB_FRAME_MAGIC (0xabadc0ed)
-  n_bytes += sizeof (u32);
-
-  /* Pad to cache line. */
-  n_bytes = round_pow2 (n_bytes, CLIB_CACHE_LINE_BYTES);
-
-  return n_bytes;
-}
 
 always_inline u32 *
 vlib_frame_find_magic (vlib_frame_t * f, vlib_node_t * node)
 {
-  void *p = f;
-
-  p += vlib_frame_vector_byte_offset (node->scalar_size);
-
-  p += (VLIB_FRAME_SIZE + VLIB_FRAME_SIZE_EXTRA) * node->vector_size;
-
-  return p;
-}
-
-static inline vlib_frame_size_t *
-get_frame_size_info (vlib_node_main_t * nm,
-		     u32 n_scalar_bytes, u32 n_vector_bytes)
-{
-#ifdef VLIB_SUPPORTS_ARBITRARY_SCALAR_SIZES
-  uword key = (n_scalar_bytes << 16) | n_vector_bytes;
-  uword *p, i;
-
-  p = hash_get (nm->frame_size_hash, key);
-  if (p)
-    i = p[0];
-  else
-    {
-      i = vec_len (nm->frame_sizes);
-      vec_validate (nm->frame_sizes, i);
-      hash_set (nm->frame_size_hash, key, i);
-    }
-
-  return vec_elt_at_index (nm->frame_sizes, i);
-#else
-  ASSERT (vlib_frame_bytes (n_scalar_bytes, n_vector_bytes)
-	  == (vlib_frame_bytes (0, 4)));
-  return vec_elt_at_index (nm->frame_sizes, 0);
-#endif
+  return (void *) f + node->magic_offset;
 }
 
 static vlib_frame_t *
@@ -120,31 +62,35 @@ vlib_frame_alloc_to_node (vlib_main_t * vm, u32 to_node_index,
   vlib_frame_size_t *fs;
   vlib_node_t *to_node;
   vlib_frame_t *f;
-  u32 l, n, scalar_size, vector_size;
+  u32 l, n;
 
   ASSERT (vm == vlib_get_main ());
 
   to_node = vlib_get_node (vm, to_node_index);
 
-  scalar_size = to_node->scalar_size;
-  vector_size = to_node->vector_size;
+  vec_validate (nm->frame_sizes, to_node->frame_size_index);
+  fs = vec_elt_at_index (nm->frame_sizes, to_node->frame_size_index);
 
-  fs = get_frame_size_info (nm, scalar_size, vector_size);
-  n = vlib_frame_bytes (scalar_size, vector_size);
+  if (fs->frame_size == 0)
+    fs->frame_size = to_node->frame_size;
+  else
+    ASSERT (fs->frame_size == to_node->frame_size);
+
+  n = fs->frame_size;
   if ((l = vec_len (fs->free_frames)) > 0)
     {
       /* Allocate from end of free list. */
       f = fs->free_frames[l - 1];
-      _vec_len (fs->free_frames) = l - 1;
+      vec_set_len (fs->free_frames, l - 1);
     }
   else
     {
-      f = clib_mem_alloc_aligned_no_fail (n, VLIB_FRAME_ALIGN);
+      f = clib_mem_alloc_aligned_no_fail (n, CLIB_CACHE_LINE_BYTES);
     }
 
   /* Poison frame when debugging. */
   if (CLIB_DEBUG > 0)
-    clib_memset (f, 0xfe, n);
+    clib_memset_u8 (f, 0xfe, n);
 
   /* Insert magic number. */
   {
@@ -156,9 +102,11 @@ vlib_frame_alloc_to_node (vlib_main_t * vm, u32 to_node_index,
 
   f->frame_flags = VLIB_FRAME_IS_ALLOCATED | frame_flags;
   f->n_vectors = 0;
-  f->scalar_size = scalar_size;
-  f->vector_size = vector_size;
+  f->scalar_offset = to_node->scalar_offset;
+  f->vector_offset = to_node->vector_offset;
+  f->aux_offset = to_node->aux_offset;
   f->flags = 0;
+  f->frame_size_index = to_node->frame_size_index;
 
   fs->n_alloc_frames += 1;
 
@@ -239,17 +187,15 @@ vlib_put_frame_to_node (vlib_main_t * vm, u32 to_node_index, vlib_frame_t * f)
 
 /* Free given frame. */
 void
-vlib_frame_free (vlib_main_t * vm, vlib_node_runtime_t * r, vlib_frame_t * f)
+vlib_frame_free (vlib_main_t *vm, vlib_frame_t *f)
 {
   vlib_node_main_t *nm = &vm->node_main;
-  vlib_node_t *node;
   vlib_frame_size_t *fs;
 
   ASSERT (vm == vlib_get_main ());
   ASSERT (f->frame_flags & VLIB_FRAME_IS_ALLOCATED);
 
-  node = vlib_get_node (vm, r->node_index);
-  fs = get_frame_size_info (nm, node->scalar_size, node->vector_size);
+  fs = vec_elt_at_index (nm->frame_sizes, f->frame_size_index);
 
   ASSERT (f->frame_flags & VLIB_FRAME_IS_ALLOCATED);
 
@@ -261,6 +207,7 @@ vlib_frame_free (vlib_main_t * vm, vlib_node_runtime_t * r, vlib_frame_t * f)
     }
 
   f->frame_flags &= ~(VLIB_FRAME_IS_ALLOCATED | VLIB_FRAME_NO_APPEND);
+  f->flags = 0;
 
   vec_add1 (fs->free_frames, f);
   ASSERT (fs->n_alloc_frames > 0);
@@ -271,19 +218,24 @@ static clib_error_t *
 show_frame_stats (vlib_main_t * vm,
 		  unformat_input_t * input, vlib_cli_command_t * cmd)
 {
-  vlib_node_main_t *nm = &vm->node_main;
   vlib_frame_size_t *fs;
 
-  vlib_cli_output (vm, "%=6s%=12s%=12s", "Size", "# Alloc", "# Free");
-  vec_foreach (fs, nm->frame_sizes)
-  {
-    u32 n_alloc = fs->n_alloc_frames;
-    u32 n_free = vec_len (fs->free_frames);
+  vlib_cli_output (vm, "%=8s%=6s%=12s%=12s", "Thread", "Size", "# Alloc",
+		   "# Free");
+  foreach_vlib_main ()
+    {
+      vlib_node_main_t *nm = &this_vlib_main->node_main;
+      vec_foreach (fs, nm->frame_sizes)
+	{
+	  u32 n_alloc = fs->n_alloc_frames;
+	  u32 n_free = vec_len (fs->free_frames);
 
-    if (n_alloc + n_free > 0)
-      vlib_cli_output (vm, "%=6d%=12d%=12d",
-		       fs - nm->frame_sizes, n_alloc, n_free);
-  }
+	  if (n_alloc + n_free > 0)
+	    vlib_cli_output (vm, "%=8d%=6d%=12d%=12d",
+			     this_vlib_main->thread_index, fs->frame_size,
+			     n_alloc, n_free);
+	}
+    }
 
   return 0;
 }
@@ -525,12 +477,8 @@ vlib_put_next_frame (vlib_main_t * vm,
       if (!(f->frame_flags & VLIB_FRAME_PENDING))
 	{
 	  __attribute__ ((unused)) vlib_node_t *node;
-	  vlib_node_t *next_node;
-	  vlib_node_runtime_t *next_runtime;
 
 	  node = vlib_get_node (vm, r->node_index);
-	  next_node = vlib_get_next_node (vm, r->node_index, next_index);
-	  next_runtime = vlib_node_get_runtime (vm, next_node->index);
 
 	  vec_add2 (nm->pending_frames, p, 1);
 
@@ -539,18 +487,6 @@ vlib_put_next_frame (vlib_main_t * vm,
 	  p->next_frame_index = nf - nm->next_frames;
 	  nf->flags |= VLIB_FRAME_PENDING;
 	  f->frame_flags |= VLIB_FRAME_PENDING;
-
-	  /*
-	   * If we're going to dispatch this frame on another thread,
-	   * force allocation of a new frame. Otherwise, we create
-	   * a dangling frame reference. Each thread has its own copy of
-	   * the next_frames vector.
-	   */
-	  if (0 && r->thread_index != next_runtime->thread_index)
-	    {
-	      nf->frame = NULL;
-	      nf->flags &= ~(VLIB_FRAME_PENDING | VLIB_FRAME_IS_ALLOCATED);
-	    }
 	}
 
       /* Copy trace flag from next_frame and from runtime. */
@@ -570,13 +506,11 @@ vlib_put_next_frame (vlib_main_t * vm,
 }
 
 /* Sync up runtime (32 bit counters) and main node stats (64 bit counters). */
-never_inline void
-vlib_node_runtime_sync_stats (vlib_main_t * vm,
-			      vlib_node_runtime_t * r,
-			      uword n_calls, uword n_vectors, uword n_clocks)
+void
+vlib_node_runtime_sync_stats_node (vlib_node_t *n, vlib_node_runtime_t *r,
+				   uword n_calls, uword n_vectors,
+				   uword n_clocks)
 {
-  vlib_node_t *n = vlib_get_node (vm, r->node_index);
-
   n->stats_total.calls += n_calls + r->calls_since_last_overflow;
   n->stats_total.vectors += n_vectors + r->vectors_since_last_overflow;
   n->stats_total.clocks += n_clocks + r->clocks_since_last_overflow;
@@ -586,6 +520,14 @@ vlib_node_runtime_sync_stats (vlib_main_t * vm,
   r->calls_since_last_overflow = 0;
   r->vectors_since_last_overflow = 0;
   r->clocks_since_last_overflow = 0;
+}
+
+void
+vlib_node_runtime_sync_stats (vlib_main_t *vm, vlib_node_runtime_t *r,
+			      uword n_calls, uword n_vectors, uword n_clocks)
+{
+  vlib_node_t *n = vlib_get_node (vm, r->node_index);
+  vlib_node_runtime_sync_stats_node (n, r, n_calls, n_vectors, n_clocks);
 }
 
 always_inline void __attribute__ ((unused))
@@ -608,7 +550,7 @@ vlib_node_sync_stats (vlib_main_t * vm, vlib_node_t * n)
   if (n->type == VLIB_NODE_TYPE_PROCESS)
     {
       /* Nothing to do for PROCESS nodes except in main thread */
-      if (vm != &vlib_global_main)
+      if (vm != vlib_get_first_main ())
 	return;
 
       vlib_process_t *p = vlib_get_process_from_node (vm, n);
@@ -688,7 +630,7 @@ static clib_error_t *
 vlib_cli_elog_clear (vlib_main_t * vm,
 		     unformat_input_t * input, vlib_cli_command_t * cmd)
 {
-  elog_reset_buffer (&vm->elog_main);
+  elog_reset_buffer (&vlib_global_main.elog_main);
   return 0;
 }
 
@@ -705,7 +647,7 @@ static clib_error_t *
 elog_save_buffer (vlib_main_t * vm,
 		  unformat_input_t * input, vlib_cli_command_t * cmd)
 {
-  elog_main_t *em = &vm->elog_main;
+  elog_main_t *em = &vlib_global_main.elog_main;
   char *file, *chroot_file;
   clib_error_t *error = 0;
 
@@ -741,42 +683,10 @@ elog_save_buffer (vlib_main_t * vm,
 void
 vlib_post_mortem_dump (void)
 {
-  vlib_main_t *vm = &vlib_global_main;
-  elog_main_t *em = &vm->elog_main;
+  vlib_global_main_t *vgm = vlib_get_global_main ();
 
-  u8 *filename;
-  clib_error_t *error;
-
-  if ((vm->elog_post_mortem_dump + vm->dispatch_pcap_postmortem) == 0)
-    return;
-
-  if (vm->dispatch_pcap_postmortem)
-    {
-      clib_error_t *error;
-      pcap_main_t *pm = &vm->dispatch_pcap_main;
-
-      pm->n_packets_to_capture = pm->n_packets_captured;
-      pm->file_name = (char *) format (0, "/tmp/dispatch_post_mortem.%d%c",
-				       getpid (), 0);
-      error = pcap_write (pm);
-      pcap_close (pm);
-      if (error)
-	clib_error_report (error);
-      /*
-       * We're in the middle of crashing. Don't try to free the filename.
-       */
-    }
-
-  if (vm->elog_post_mortem_dump)
-    {
-      filename = format (0, "/tmp/elog_post_mortem.%d%c", getpid (), 0);
-      error = elog_write_file (em, (char *) filename, 1 /* flush ring */ );
-      if (error)
-	clib_error_report (error);
-      /*
-       * We're in the middle of crashing. Don't try to free the filename.
-       */
-    }
+  for (int i = 0; i < vec_len (vgm->post_mortem_callbacks); i++)
+    (vgm->post_mortem_callbacks[i]) ();
 }
 
 /* *INDENT-OFF* */
@@ -791,7 +701,7 @@ static clib_error_t *
 elog_stop (vlib_main_t * vm,
 	   unformat_input_t * input, vlib_cli_command_t * cmd)
 {
-  elog_main_t *em = &vm->elog_main;
+  elog_main_t *em = &vlib_global_main.elog_main;
 
   em->n_total_events_disable_limit = em->n_total_events;
 
@@ -811,7 +721,7 @@ static clib_error_t *
 elog_restart (vlib_main_t * vm,
 	      unformat_input_t * input, vlib_cli_command_t * cmd)
 {
-  elog_main_t *em = &vm->elog_main;
+  elog_main_t *em = &vlib_global_main.elog_main;
 
   em->n_total_events_disable_limit = ~0;
 
@@ -831,11 +741,11 @@ static clib_error_t *
 elog_resize_command_fn (vlib_main_t * vm,
 			unformat_input_t * input, vlib_cli_command_t * cmd)
 {
-  elog_main_t *em = &vm->elog_main;
+  elog_main_t *em = &vlib_global_main.elog_main;
   u32 tmp;
 
   /* Stop the parade */
-  elog_reset_buffer (&vm->elog_main);
+  elog_reset_buffer (em);
 
   if (unformat (input, "%d", &tmp))
     {
@@ -862,7 +772,7 @@ VLIB_CLI_COMMAND (elog_resize_cli, static) = {
 static void
 elog_show_buffer_internal (vlib_main_t * vm, u32 n_events_to_show)
 {
-  elog_main_t *em = &vm->elog_main;
+  elog_main_t *em = &vlib_global_main.elog_main;
   elog_event_t *e, *es;
   f64 dt;
 
@@ -927,8 +837,8 @@ vlib_elog_main_loop_event (vlib_main_t * vm,
 			   u32 node_index,
 			   u64 time, u32 n_vectors, u32 is_return)
 {
-  vlib_main_t *evm = &vlib_global_main;
-  elog_main_t *em = &evm->elog_main;
+  vlib_main_t *evm = vlib_get_first_main ();
+  elog_main_t *em = vlib_get_elog_main ();
   int enabled = evm->elog_trace_graph_dispatch |
     evm->elog_trace_graph_circuit;
 
@@ -960,187 +870,15 @@ vlib_elog_main_loop_event (vlib_main_t * vm,
     }
 }
 
-#if VLIB_BUFFER_TRACE_TRAJECTORY > 0
-void (*vlib_buffer_trace_trajectory_cb) (vlib_buffer_t * b, u32 node_index);
-void (*vlib_buffer_trace_trajectory_init_cb) (vlib_buffer_t * b);
-
-void
-vlib_buffer_trace_trajectory_init (vlib_buffer_t * b)
-{
-  if (PREDICT_TRUE (vlib_buffer_trace_trajectory_init_cb != 0))
-    {
-      (*vlib_buffer_trace_trajectory_init_cb) (b);
-    }
-}
-
-#endif
-
 static inline void
 add_trajectory_trace (vlib_buffer_t * b, u32 node_index)
 {
 #if VLIB_BUFFER_TRACE_TRAJECTORY > 0
-  if (PREDICT_TRUE (vlib_buffer_trace_trajectory_cb != 0))
-    {
-      (*vlib_buffer_trace_trajectory_cb) (b, node_index);
-    }
-#endif
-}
-
-u8 *format_vnet_buffer_flags (u8 * s, va_list * args) __attribute__ ((weak));
-u8 *
-format_vnet_buffer_flags (u8 * s, va_list * args)
-{
-  s = format (s, "BUG STUB %s", __FUNCTION__);
-  return s;
-}
-
-u8 *format_vnet_buffer_opaque (u8 * s, va_list * args) __attribute__ ((weak));
-u8 *
-format_vnet_buffer_opaque (u8 * s, va_list * args)
-{
-  s = format (s, "BUG STUB %s", __FUNCTION__);
-  return s;
-}
-
-u8 *format_vnet_buffer_opaque2 (u8 * s, va_list * args)
-  __attribute__ ((weak));
-u8 *
-format_vnet_buffer_opaque2 (u8 * s, va_list * args)
-{
-  s = format (s, "BUG STUB %s", __FUNCTION__);
-  return s;
-}
-
-static u8 *
-format_buffer_metadata (u8 * s, va_list * args)
-{
-  vlib_buffer_t *b = va_arg (*args, vlib_buffer_t *);
-
-  s = format (s, "flags: %U\n", format_vnet_buffer_flags, b);
-  s = format (s, "current_data: %d, current_length: %d\n",
-	      (i32) (b->current_data), (i32) (b->current_length));
-  s = format
-    (s,
-     "current_config_index/punt_reason: %d, flow_id: %x, next_buffer: %x\n",
-     b->current_config_index, b->flow_id, b->next_buffer);
-  s =
-    format (s, "error: %d, ref_count: %d, buffer_pool_index: %d\n",
-	    (u32) (b->error), (u32) (b->ref_count),
-	    (u32) (b->buffer_pool_index));
-  s =
-    format (s, "trace_handle: 0x%x, len_not_first_buf: %d\n", b->trace_handle,
-	    b->total_length_not_including_first_buffer);
-  return s;
-}
-
-#define A(x) vec_add1(vm->pcap_buffer, (x))
-
-static void
-dispatch_pcap_trace (vlib_main_t * vm,
-		     vlib_node_runtime_t * node, vlib_frame_t * frame)
-{
-  int i;
-  vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **bufp, *b;
-  pcap_main_t *pm = &vlib_global_main.dispatch_pcap_main;
-  vlib_trace_main_t *tm = &vm->trace_main;
-  u32 capture_size;
-  vlib_node_t *n;
-  i32 n_left;
-  f64 time_now = vlib_time_now (vm);
-  u32 *from;
-  u8 *d;
-  u8 string_count;
-
-  /* Input nodes don't have frames yet */
-  if (frame == 0 || frame->n_vectors == 0)
+  if (PREDICT_FALSE (b->trajectory_nb >= VLIB_BUFFER_TRACE_TRAJECTORY_MAX))
     return;
-
-  from = vlib_frame_vector_args (frame);
-  vlib_get_buffers (vm, from, bufs, frame->n_vectors);
-  bufp = bufs;
-
-  n = vlib_get_node (vm, node->node_index);
-
-  for (i = 0; i < frame->n_vectors; i++)
-    {
-      if (PREDICT_TRUE (pm->n_packets_captured < pm->n_packets_to_capture))
-	{
-	  b = bufp[i];
-
-	  vec_reset_length (vm->pcap_buffer);
-	  string_count = 0;
-
-	  /* Version, flags */
-	  A ((u8) VLIB_PCAP_MAJOR_VERSION);
-	  A ((u8) VLIB_PCAP_MINOR_VERSION);
-	  A (0 /* string_count */ );
-	  A (n->protocol_hint);
-
-	  /* Buffer index (big endian) */
-	  A ((from[i] >> 24) & 0xff);
-	  A ((from[i] >> 16) & 0xff);
-	  A ((from[i] >> 8) & 0xff);
-	  A ((from[i] >> 0) & 0xff);
-
-	  /* Node name, NULL-terminated ASCII */
-	  vm->pcap_buffer = format (vm->pcap_buffer, "%v%c", n->name, 0);
-	  string_count++;
-
-	  vm->pcap_buffer = format (vm->pcap_buffer, "%U%c",
-				    format_buffer_metadata, b, 0);
-	  string_count++;
-	  vm->pcap_buffer = format (vm->pcap_buffer, "%U%c",
-				    format_vnet_buffer_opaque, b, 0);
-	  string_count++;
-	  vm->pcap_buffer = format (vm->pcap_buffer, "%U%c",
-				    format_vnet_buffer_opaque2, b, 0);
-	  string_count++;
-
-	  /* Is this packet traced? */
-	  if (PREDICT_FALSE (b->flags & VLIB_BUFFER_IS_TRACED))
-	    {
-	      vlib_trace_header_t **h
-		= pool_elt_at_index (tm->trace_buffer_pool,
-				     vlib_buffer_get_trace_index (b));
-
-	      vm->pcap_buffer = format (vm->pcap_buffer, "%U%c",
-					format_vlib_trace, vm, h[0], 0);
-	      string_count++;
-	    }
-
-	  /* Save the string count */
-	  vm->pcap_buffer[2] = string_count;
-
-	  /* Figure out how many bytes in the pcap trace */
-	  capture_size = vec_len (vm->pcap_buffer) +
-	    +vlib_buffer_length_in_chain (vm, b);
-
-	  clib_spinlock_lock_if_init (&pm->lock);
-	  n_left = clib_min (capture_size, 16384);
-	  d = pcap_add_packet (pm, time_now, n_left, capture_size);
-
-	  /* Copy the header */
-	  clib_memcpy_fast (d, vm->pcap_buffer, vec_len (vm->pcap_buffer));
-	  d += vec_len (vm->pcap_buffer);
-
-	  n_left = clib_min
-	    (vlib_buffer_length_in_chain (vm, b),
-	     (16384 - vec_len (vm->pcap_buffer)));
-	  /* Copy the packet data */
-	  while (1)
-	    {
-	      u32 copy_length = clib_min ((u32) n_left, b->current_length);
-	      clib_memcpy_fast (d, b->data + b->current_data, copy_length);
-	      n_left -= b->current_length;
-	      if (n_left <= 0)
-		break;
-	      d += b->current_length;
-	      ASSERT (b->flags & VLIB_BUFFER_NEXT_PRESENT);
-	      b = vlib_get_buffer (vm, b->next_buffer);
-	    }
-	  clib_spinlock_unlock_if_init (&pm->lock);
-	}
-    }
+  b->trajectory_trace[b->trajectory_nb] = node_index;
+  b->trajectory_nb++;
+#endif
 }
 
 static_always_inline u64
@@ -1211,9 +949,6 @@ dispatch_node (vlib_main_t * vm,
 	  vlib_buffer_t *b = vlib_get_buffer (vm, from[i]);
 	  add_trajectory_trace (b, node->node_index);
 	}
-      if (PREDICT_FALSE (vm->dispatch_pcap_enable))
-	dispatch_pcap_trace (vm, node, frame);
-
       if (PREDICT_TRUE (vm->dispatch_wrapper_fn == 0))
 	n = node->function (vm, node, frame);
       else
@@ -1221,9 +956,6 @@ dispatch_node (vlib_main_t * vm,
     }
   else
     {
-      if (PREDICT_FALSE (vm->dispatch_pcap_enable))
-	dispatch_pcap_trace (vm, node, frame);
-
       if (PREDICT_TRUE (vm->dispatch_wrapper_fn == 0))
 	n = node->function (vm, node, frame);
       else
@@ -1245,13 +977,9 @@ dispatch_node (vlib_main_t * vm,
 				      /* n_vectors */ n,
 				      /* n_clocks */ t - last_time_stamp);
 
-  /* When in interrupt mode and vector rate crosses threshold switch to
-     polling mode. */
-  if (PREDICT_FALSE ((dispatch_state == VLIB_NODE_STATE_INTERRUPT)
-		     || (dispatch_state == VLIB_NODE_STATE_POLLING
-			 && (node->flags
-			     &
-			     VLIB_NODE_FLAG_SWITCH_FROM_INTERRUPT_TO_POLLING_MODE))))
+  /* When in adaptive mode and vector rate crosses threshold switch to
+     polling mode and vice versa. */
+  if (PREDICT_FALSE (node->flags & VLIB_NODE_FLAG_ADAPTIVE_MODE))
     {
       /* *INDENT-OFF* */
       ELOG_TYPE_DECLARE (e) =
@@ -1284,7 +1012,8 @@ dispatch_node (vlib_main_t * vm,
 	  nm->input_node_counts_by_state[VLIB_NODE_STATE_INTERRUPT] -= 1;
 	  nm->input_node_counts_by_state[VLIB_NODE_STATE_POLLING] += 1;
 
-	  if (PREDICT_FALSE (vlib_global_main.elog_trace_graph_dispatch))
+	  if (PREDICT_FALSE (
+		vlib_get_first_main ()->elog_trace_graph_dispatch))
 	    {
 	      vlib_worker_thread_t *w = vlib_worker_threads
 		+ vm->thread_index;
@@ -1319,7 +1048,8 @@ dispatch_node (vlib_main_t * vm,
 		+ vm->thread_index;
 	      node->flags |=
 		VLIB_NODE_FLAG_SWITCH_FROM_POLLING_TO_INTERRUPT_MODE;
-	      if (PREDICT_FALSE (vlib_global_main.elog_trace_graph_dispatch))
+	      if (PREDICT_FALSE (
+		    vlib_get_first_main ()->elog_trace_graph_dispatch))
 		{
 		  ed = ELOG_TRACK_DATA (&vlib_global_main.elog_main, e,
 					w->elog_track);
@@ -1433,13 +1163,14 @@ dispatch_pending_node (vlib_main_t * vm, uword pending_frame_index,
 	  /* no new frame has been assigned to this node, use the saved one */
 	  nf->frame = restore_frame;
 	  f->n_vectors = 0;
+	  f->flags = 0;
 	}
       else
 	{
 	  /* The node has gained a frame, implying packets from the current frame
 	     were re-queued to this same node. we don't need the saved one
 	     anymore */
-	  vlib_frame_free (vm, n, f);
+	  vlib_frame_free (vm, f);
 	}
     }
   else
@@ -1447,7 +1178,7 @@ dispatch_pending_node (vlib_main_t * vm, uword pending_frame_index,
       if (f->frame_flags & VLIB_FRAME_FREE_AFTER_DISPATCH)
 	{
 	  ASSERT (!(n->flags & VLIB_NODE_FLAG_FRAME_NO_FREE_AFTER_DISPATCH));
-	  vlib_frame_free (vm, n, f);
+	  vlib_frame_free (vm, f);
 	}
     }
 
@@ -1713,19 +1444,6 @@ vl_api_send_pending_rpc_requests (vlib_main_t * vm)
 {
 }
 
-static inline void
-pcap_postmortem_reset (vlib_main_t * vm)
-{
-  pcap_main_t *pm = &vm->dispatch_pcap_main;
-
-  /* Reset the trace buffer and capture count */
-  clib_spinlock_lock_if_init (&pm->lock);
-  vec_reset_length (pm->pcap_data);
-  pm->n_packets_captured = 0;
-  clib_spinlock_unlock_if_init (&pm->lock);
-}
-
-
 static_always_inline void
 vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
 {
@@ -1741,7 +1459,7 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
   if (is_main)
     {
       vec_resize (nm->pending_frames, 32);
-      _vec_len (nm->pending_frames) = 0;
+      vec_set_len (nm->pending_frames, 0);
     }
 
   /* Mark time of main loop start. */
@@ -1754,7 +1472,7 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
     cpu_time_now = clib_cpu_time_now ();
 
   /* Pre-allocate interupt runtime indices and lock. */
-  vec_alloc_aligned (nm->pending_interrupts, 1, CLIB_CACHE_LINE_BYTES);
+  vec_validate_aligned (nm->pending_interrupts, 0, CLIB_CACHE_LINE_BYTES);
 
   /* Pre-allocate expired nodes. */
   if (!nm->polling_threshold_vector_length)
@@ -1800,6 +1518,7 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
       if (PREDICT_FALSE (vm->check_frame_queues + frame_queue_check_counter))
 	{
 	  u32 processed = 0;
+	  vlib_frame_queue_dequeue_fn_t *fn;
 
 	  if (vm->check_frame_queues)
 	    {
@@ -1808,7 +1527,10 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
 	    }
 
 	  vec_foreach (fqm, tm->frame_queue_mains)
-	    processed += vlib_frame_queue_dequeue (vm, fqm);
+	    {
+	      fn = fqm->frame_queue_dequeue_fn;
+	      processed += (fn) (vm, fqm);
+	    }
 
 	  /* No handoff queue work found? */
 	  if (processed)
@@ -1820,17 +1542,6 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
       if (PREDICT_FALSE (vec_len (vm->worker_thread_main_loop_callbacks)))
 	clib_call_callbacks (vm->worker_thread_main_loop_callbacks, vm,
 			     cpu_time_now);
-
-      /*
-       * When trying to understand aggravating, hard-to-reproduce
-       * bugs: reset / restart the pcap dispatch trace once per
-       * main thread dispatch cycle. All threads share the same
-       * (spinlock-protected) dispatch trace buffer. It might take
-       * a few tries to capture a good post-mortem trace of
-       * a multi-thread issue. Best we can do without a big refactor job.
-       */
-      if (is_main && PREDICT_FALSE (vm->dispatch_pcap_postmortem != 0))
-	pcap_postmortem_reset (vm);
 
       /* Process pre-input nodes. */
       cpu_time_now = clib_cpu_time_now ();
@@ -1876,7 +1587,7 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
       for (i = 0; i < _vec_len (nm->pending_frames); i++)
 	cpu_time_now = dispatch_pending_node (vm, i, cpu_time_now);
       /* Reset pending vector for next iteration. */
-      _vec_len (nm->pending_frames) = 0;
+      vec_set_len (nm->pending_frames, 0);
 
       if (is_main)
 	{
@@ -1904,10 +1615,8 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
 	  if (PREDICT_FALSE (vm->elog_trace_graph_dispatch))
 	    ed = ELOG_DATA (&vlib_global_main.elog_main, es);
 
-	  nm->data_from_advancing_timing_wheel =
-	    TW (tw_timer_expire_timers_vec)
-	    ((TWT (tw_timer_wheel) *) nm->timing_wheel, vlib_time_now (vm),
-	     nm->data_from_advancing_timing_wheel);
+	  TW (tw_timer_expire_timers)
+	  ((TWT (tw_timer_wheel) *) nm->timing_wheel, vlib_time_now (vm));
 
 	  ASSERT (nm->data_from_advancing_timing_wheel != 0);
 
@@ -1938,6 +1647,7 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
 			vlib_get_node (vm, te->process_node_index);
 		      vlib_process_t *p =
 			vec_elt (nm->processes, n->runtime_index);
+		      p->stop_timer_handle = ~0;
 		      void *data;
 		      data =
 			vlib_process_signal_event_helper (nm, n, p,
@@ -1962,7 +1672,7 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
 			dispatch_suspended_process (vm, di, cpu_time_now);
 		    }
 		}
-	      _vec_len (nm->data_from_advancing_timing_wheel) = 0;
+	      vec_set_len (nm->data_from_advancing_timing_wheel, 0);
 	    }
 	}
       vlib_increment_main_loop_counter (vm);
@@ -2011,11 +1721,49 @@ vlib_worker_loop (vlib_main_t * vm)
   vlib_main_or_worker_loop (vm, /* is_main */ 0);
 }
 
-vlib_main_t vlib_global_main;
+vlib_global_main_t vlib_global_main;
+
+void
+vlib_add_del_post_mortem_callback (void *cb, int is_add)
+{
+  vlib_global_main_t *vgm = vlib_get_global_main ();
+  int i;
+
+  if (is_add == 0)
+    {
+      for (i = vec_len (vgm->post_mortem_callbacks) - 1; i >= 0; i--)
+	if (vgm->post_mortem_callbacks[i] == cb)
+	  vec_del1 (vgm->post_mortem_callbacks, i);
+      return;
+    }
+
+  for (i = 0; i < vec_len (vgm->post_mortem_callbacks); i++)
+    if (vgm->post_mortem_callbacks[i] == cb)
+      return;
+  vec_add1 (vgm->post_mortem_callbacks, cb);
+}
+
+static void
+elog_post_mortem_dump (void)
+{
+  elog_main_t *em = vlib_get_elog_main ();
+
+  u8 *filename;
+  clib_error_t *error;
+
+  filename = format (0, "/tmp/elog_post_mortem.%d%c", getpid (), 0);
+  error = elog_write_file (em, (char *) filename, 1 /* flush ring */);
+  if (error)
+    clib_error_report (error);
+  /*
+   * We're in the middle of crashing. Don't try to free the filename.
+   */
+}
 
 static clib_error_t *
 vlib_main_configure (vlib_main_t * vm, unformat_input_t * input)
 {
+  vlib_global_main_t *vgm = vlib_get_global_main ();
   int turn_on_mem_trace = 0;
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
@@ -2024,11 +1772,12 @@ vlib_main_configure (vlib_main_t * vm, unformat_input_t * input)
 	turn_on_mem_trace = 1;
 
       else if (unformat (input, "elog-events %d",
-			 &vm->configured_elog_ring_size))
-	vm->configured_elog_ring_size =
-	  1 << max_log2 (vm->configured_elog_ring_size);
+			 &vgm->configured_elog_ring_size))
+	vgm->configured_elog_ring_size =
+	  1 << max_log2 (vgm->configured_elog_ring_size);
       else if (unformat (input, "elog-post-mortem-dump"))
-	vm->elog_post_mortem_dump = 1;
+	vlib_add_del_post_mortem_callback (elog_post_mortem_dump,
+					   /* is_add */ 1);
       else if (unformat (input, "buffer-alloc-success-rate %f",
 			 &vm->buffer_alloc_success_rate))
 	{
@@ -2064,7 +1813,6 @@ placeholder_queue_signal_callback (vlib_main_t * vm)
 }
 
 #define foreach_weak_reference_stub             \
-_(vlib_map_stat_segment_init)                   \
 _(vpe_api_init)                                 \
 _(vlibmemory_init)                              \
 _(map_api_segment_init)
@@ -2098,25 +1846,43 @@ vl_api_get_elog_trace_api_messages (void)
   return 0;
 }
 
+static void
+process_expired_timer_cb (u32 *expired_timer_handles)
+{
+  vlib_main_t *vm = vlib_get_main ();
+  vlib_node_main_t *nm = &vm->node_main;
+  u32 *handle;
+
+  vec_foreach (handle, expired_timer_handles)
+    {
+      u32 pi = vlib_timing_wheel_data_get_index (*handle);
+      vlib_process_t *p = vec_elt (nm->processes, pi);
+
+      p->stop_timer_handle = ~0;
+    }
+  vec_append (nm->data_from_advancing_timing_wheel, expired_timer_handles);
+}
+
 /* Main function. */
 int
 vlib_main (vlib_main_t * volatile vm, unformat_input_t * input)
 {
+  vlib_global_main_t *vgm = vlib_get_global_main ();
   clib_error_t *volatile error;
   vlib_node_main_t *nm = &vm->node_main;
 
   vm->queue_signal_callback = placeholder_queue_signal_callback;
 
   /* Reconfigure event log which is enabled very early */
-  if (vm->configured_elog_ring_size &&
-      vm->configured_elog_ring_size != vm->elog_main.event_ring_size)
-    elog_resize (&vm->elog_main, vm->configured_elog_ring_size);
-  vl_api_set_elog_main (&vm->elog_main);
+  if (vgm->configured_elog_ring_size &&
+      vgm->configured_elog_ring_size != vgm->elog_main.event_ring_size)
+    elog_resize (&vgm->elog_main, vgm->configured_elog_ring_size);
+  vl_api_set_elog_main (vlib_get_elog_main ());
   (void) vl_api_set_elog_trace_api_messages (1);
 
   /* Default name. */
-  if (!vm->name)
-    vm->name = "VLIB";
+  if (!vgm->name)
+    vgm->name = "VLIB";
 
   if ((error = vlib_physmem_init (vm)))
     {
@@ -2124,7 +1890,13 @@ vlib_main (vlib_main_t * volatile vm, unformat_input_t * input)
       goto done;
     }
 
-  if ((error = vlib_map_stat_segment_init (vm)))
+  if ((error = vlib_log_init (vm)))
+    {
+      clib_error_report (error);
+      goto done;
+    }
+
+  if ((error = vlib_stats_init (vm)))
     {
       clib_error_report (error);
       goto done;
@@ -2141,6 +1913,9 @@ vlib_main (vlib_main_t * volatile vm, unformat_input_t * input)
       clib_error_report (error);
       goto done;
     }
+
+  /* Register node ifunction variants */
+  vlib_register_all_node_march_variants (vm);
 
   /* Register static nodes so that init functions may use them. */
   vlib_register_all_static_nodes (vm);
@@ -2181,8 +1956,8 @@ vlib_main (vlib_main_t * volatile vm, unformat_input_t * input)
     }
 
   /* See unix/main.c; most likely already set up */
-  if (vm->init_functions_called == 0)
-    vm->init_functions_called = hash_create (0, /* value bytes */ 0);
+  if (vgm->init_functions_called == 0)
+    vgm->init_functions_called = hash_create (0, /* value bytes */ 0);
   if ((error = vlib_call_all_init_functions (vm)))
     goto done;
 
@@ -2190,18 +1965,18 @@ vlib_main (vlib_main_t * volatile vm, unformat_input_t * input)
 					     CLIB_CACHE_LINE_BYTES);
 
   vec_validate (nm->data_from_advancing_timing_wheel, 10);
-  _vec_len (nm->data_from_advancing_timing_wheel) = 0;
+  vec_set_len (nm->data_from_advancing_timing_wheel, 0);
 
   /* Create the process timing wheel */
-  TW (tw_timer_wheel_init) ((TWT (tw_timer_wheel) *) nm->timing_wheel,
-			    0 /* no callback */ ,
-			    10e-6 /* timer period 10us */ ,
-			    ~0 /* max expirations per call */ );
+  TW (tw_timer_wheel_init)
+  ((TWT (tw_timer_wheel) *) nm->timing_wheel,
+   process_expired_timer_cb /* callback */, 10e-6 /* timer period 10us */,
+   ~0 /* max expirations per call */);
 
   vec_validate (vm->pending_rpc_requests, 0);
-  _vec_len (vm->pending_rpc_requests) = 0;
+  vec_set_len (vm->pending_rpc_requests, 0);
   vec_validate (vm->processing_rpc_requests, 0);
-  _vec_len (vm->processing_rpc_requests) = 0;
+  vec_set_len (vm->processing_rpc_requests, 0);
 
   /* Default params for the buffer allocator fault injector, if configured */
   if (VLIB_BUFFER_ALLOC_FAULT_INJECTOR > 0)
@@ -2224,7 +1999,7 @@ vlib_main (vlib_main_t * volatile vm, unformat_input_t * input)
   vm->damping_constant = exp (-1.0 / 20.0);
 
   /* Sort per-thread init functions before we start threads */
-  vlib_sort_init_exit_functions (&vm->worker_init_function_registrations);
+  vlib_sort_init_exit_functions (&vgm->worker_init_function_registrations);
 
   /* Call all main loop enter functions. */
   {
@@ -2251,7 +2026,9 @@ vlib_main (vlib_main_t * volatile vm, unformat_input_t * input)
   vlib_main_loop (vm);
 
 done:
+  /* Stop worker threads, barrier will not be released */
   vlib_worker_thread_barrier_sync (vm);
+
   /* Call all exit functions. */
   {
     clib_error_t *sub_error;
@@ -2259,299 +2036,12 @@ done:
     if (sub_error)
       clib_error_report (sub_error);
   }
-  vlib_worker_thread_barrier_release (vm);
 
   if (error)
     clib_error_report (error);
 
-  return 0;
+  return vm->main_loop_exit_status;
 }
-
-int
-vlib_pcap_dispatch_trace_configure (vlib_pcap_dispatch_trace_args_t * a)
-{
-  vlib_main_t *vm = vlib_get_main ();
-  pcap_main_t *pm = &vm->dispatch_pcap_main;
-  vlib_trace_main_t *tm;
-  vlib_trace_node_t *tn;
-
-  if (a->status)
-    {
-      if (vm->dispatch_pcap_enable)
-	{
-	  int i;
-	  vlib_cli_output
-	    (vm, "pcap dispatch capture enabled: %d of %d pkts...",
-	     pm->n_packets_captured, pm->n_packets_to_capture);
-	  vlib_cli_output (vm, "capture to file %s", pm->file_name);
-
-	  for (i = 0; i < vec_len (vm->dispatch_buffer_trace_nodes); i++)
-	    {
-	      vlib_cli_output (vm,
-			       "Buffer trace of %d pkts from %U enabled...",
-			       a->buffer_traces_to_capture,
-			       format_vlib_node_name, vm,
-			       vm->dispatch_buffer_trace_nodes[i]);
-	    }
-	}
-      else
-	vlib_cli_output (vm, "pcap dispatch capture disabled");
-      return 0;
-    }
-
-  /* Consistency checks */
-
-  /* Enable w/ capture already enabled not allowed */
-  if (vm->dispatch_pcap_enable && a->enable)
-    return -7;			/* VNET_API_ERROR_INVALID_VALUE */
-
-  /* Disable capture with capture already disabled, not interesting */
-  if (vm->dispatch_pcap_enable == 0 && a->enable == 0)
-    return -81;			/* VNET_API_ERROR_VALUE_EXIST */
-
-  /* Change number of packets to capture while capturing */
-  if (vm->dispatch_pcap_enable && a->enable
-      && (pm->n_packets_to_capture != a->packets_to_capture))
-    return -8;			/* VNET_API_ERROR_INVALID_VALUE_2 */
-
-  /* Independent of enable/disable, to allow buffer trace multi nodes */
-  if (a->buffer_trace_node_index != ~0)
-    {
-      /* *INDENT-OFF* */
-      foreach_vlib_main ((
-        {
-          tm = &this_vlib_main->trace_main;
-          tm->verbose = 0;  /* not sure this ever did anything... */
-          vec_validate (tm->nodes, a->buffer_trace_node_index);
-          tn = tm->nodes + a->buffer_trace_node_index;
-          tn->limit += a->buffer_traces_to_capture;
-          if (a->post_mortem)
-            {
-              tm->filter_flag = FILTER_FLAG_POST_MORTEM;
-              tm->filter_count = ~0;
-            }
-          tm->trace_enable = 1;
-        }));
-      /* *INDENT-ON* */
-      vec_add1 (vm->dispatch_buffer_trace_nodes, a->buffer_trace_node_index);
-    }
-
-  if (a->enable)
-    {
-      /* Clean up from previous run, if any */
-      vec_free (pm->file_name);
-      vec_free (pm->pcap_data);
-      memset (pm, 0, sizeof (*pm));
-
-      vec_validate_aligned (vnet_trace_placeholder, 2048,
-			    CLIB_CACHE_LINE_BYTES);
-      if (pm->lock == 0)
-	clib_spinlock_init (&(pm->lock));
-
-      if (a->filename == 0)
-	a->filename = format (0, "/tmp/dispatch.pcap%c", 0);
-
-      pm->file_name = (char *) a->filename;
-      pm->n_packets_captured = 0;
-      pm->packet_type = PCAP_PACKET_TYPE_vpp;
-      pm->n_packets_to_capture = a->packets_to_capture;
-      vm->dispatch_pcap_postmortem = a->post_mortem;
-      /* *INDENT-OFF* */
-      foreach_vlib_main (({ this_vlib_main->dispatch_pcap_enable = 1;}));
-      /* *INDENT-ON* */
-    }
-  else
-    {
-      /* *INDENT-OFF* */
-      foreach_vlib_main ((
-        {
-          this_vlib_main->dispatch_pcap_enable = 0;
-          this_vlib_main->dispatch_pcap_postmortem = 0;
-          tm = &this_vlib_main->trace_main;
-          tm->filter_flag = 0;
-          tm->filter_count = 0;
-          tm->trace_enable = 0;
-        }));
-      /* *INDENT-ON* */
-      vec_reset_length (vm->dispatch_buffer_trace_nodes);
-      if (pm->n_packets_captured)
-	{
-	  clib_error_t *error;
-	  pm->n_packets_to_capture = pm->n_packets_captured;
-	  vlib_cli_output (vm, "Write %d packets to %s, and stop capture...",
-			   pm->n_packets_captured, pm->file_name);
-	  error = pcap_write (pm);
-	  if (pm->flags & PCAP_MAIN_INIT_DONE)
-	    pcap_close (pm);
-	  /* Report I/O errors... */
-	  if (error)
-	    {
-	      clib_error_report (error);
-	      return -11;	/* VNET_API_ERROR_SYSCALL_ERROR_1 */
-	    }
-	  return 0;
-	}
-      else
-	return -6;		/* VNET_API_ERROR_NO_SUCH_ENTRY */
-    }
-
-  return 0;
-}
-
-static clib_error_t *
-dispatch_trace_command_fn (vlib_main_t * vm,
-			   unformat_input_t * input, vlib_cli_command_t * cmd)
-{
-  unformat_input_t _line_input, *line_input = &_line_input;
-  vlib_pcap_dispatch_trace_args_t _a, *a = &_a;
-  u8 *filename = 0;
-  u32 max = 1000;
-  int rv;
-  int enable = 0;
-  int status = 0;
-  int post_mortem = 0;
-  u32 node_index = ~0, buffer_traces_to_capture = 100;
-
-  /* Get a line of input. */
-  if (!unformat_user (input, unformat_line_input, line_input))
-    return 0;
-
-  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
-    {
-      if (unformat (line_input, "on %=", &enable, 1))
-	;
-      else if (unformat (line_input, "enable %=", &enable, 1))
-	;
-      else if (unformat (line_input, "off %=", &enable, 0))
-	;
-      else if (unformat (line_input, "disable %=", &enable, 0))
-	;
-      else if (unformat (line_input, "max %d", &max))
-	;
-      else if (unformat (line_input, "packets-to-capture %d", &max))
-	;
-      else if (unformat (line_input, "file %U", unformat_vlib_tmpfile,
-			 &filename))
-	;
-      else if (unformat (line_input, "status %=", &status, 1))
-	;
-      else if (unformat (line_input, "buffer-trace %U %d",
-			 unformat_vlib_node, vm, &node_index,
-			 &buffer_traces_to_capture))
-	;
-      else if (unformat (line_input, "post-mortem %=", &post_mortem, 1))
-	;
-      else
-	{
-	  return clib_error_return (0, "unknown input `%U'",
-				    format_unformat_error, line_input);
-	}
-    }
-
-  unformat_free (line_input);
-
-  /* no need for memset (a, 0, sizeof (*a)), set all fields here. */
-  a->filename = filename;
-  a->enable = enable;
-  a->status = status;
-  a->packets_to_capture = max;
-  a->buffer_trace_node_index = node_index;
-  a->buffer_traces_to_capture = buffer_traces_to_capture;
-  a->post_mortem = post_mortem;
-
-  rv = vlib_pcap_dispatch_trace_configure (a);
-
-  switch (rv)
-    {
-    case 0:
-      break;
-
-    case -7:
-      return clib_error_return (0, "dispatch trace already enabled...");
-
-    case -81:
-      return clib_error_return (0, "dispatch trace already disabled...");
-
-    case -8:
-      return clib_error_return
-	(0, "can't change number of records to capture while tracing...");
-
-    case -11:
-      return clib_error_return (0, "I/O writing trace capture...");
-
-    case -6:
-      return clib_error_return (0, "No packets captured...");
-
-    default:
-      vlib_cli_output (vm, "WARNING: trace configure returned %d", rv);
-      break;
-    }
-  return 0;
-}
-
-/*?
- * This command is used to start or stop pcap dispatch trace capture, or show
- * the capture status.
- *
- * This command has the following optional parameters:
- *
- * - <b>on|off</b> - Used to start or stop capture.
- *
- * - <b>max <nn></b> - Depth of local buffer. Once '<em>nn</em>' number
- *   of packets have been received, buffer is flushed to file. Once another
- *   '<em>nn</em>' number of packets have been received, buffer is flushed
- *   to file, overwriting previous write. If not entered, value defaults
- *   to 100. Can only be updated if packet capture is off.
- *
- * - <b>file <name></b> - Used to specify the output filename. The file will
- *   be placed in the '<em>/tmp</em>' directory, so only the filename is
- *   supported. Directory should not be entered. If file already exists, file
- *   will be overwritten. If no filename is provided, '<em>/tmp/vpe.pcap</em>'
- *   will be used. Can only be updated if packet capture is off.
- *
- * - <b>status</b> - Displays the current status and configured attributes
- *   associated with a packet capture. If packet capture is in progress,
- *   '<em>status</em>' also will return the number of packets currently in
- *   the local buffer. All additional attributes entered on command line
- *   with '<em>status</em>' will be ignored and not applied.
- *
- * @cliexpar
- * Example of how to display the status of capture when off:
- * @cliexstart{pcap dispatch trace status}
- * max is 100, for any interface to file /tmp/vpe.pcap
- * pcap dispatch capture is off...
- * @cliexend
- * Example of how to start a dispatch trace capture:
- * @cliexstart{pcap dispatch trace on max 35 file dispatchTrace.pcap}
- * pcap dispatch capture on...
- * @cliexend
- * Example of how to start a dispatch trace capture with buffer tracing
- * @cliexstart{pcap dispatch trace on max 10000 file dispatchTrace.pcap buffer-trace dpdk-input 1000}
- * pcap dispatch capture on...
- * @cliexend
- * Example of how to display the status of a tx packet capture in progress:
- * @cliexstart{pcap tx trace status}
- * max is 35, dispatch trace to file /tmp/vppTest.pcap
- * pcap tx capture is on: 20 of 35 pkts...
- * @cliexend
- * Example of how to stop a tx packet capture:
- * @cliexstart{vppctl pcap dispatch trace off}
- * captured 21 pkts...
- * saved to /tmp/dispatchTrace.pcap...
- * Example of how to start a post-mortem dispatch trace:
- * pcap dispatch trace on max 20000 buffer-trace
- *     dpdk-input 3000000000 post-mortem
- * @cliexend
-?*/
-/* *INDENT-OFF* */
-VLIB_CLI_COMMAND (pcap_dispatch_trace_command, static) = {
-    .path = "pcap dispatch trace",
-    .short_help =
-    "pcap dispatch trace [on|off] [max <nn>] [file <name>] [status]\n"
-    "              [buffer-trace <input-node-name> <nn>][post-mortem]",
-    .function = dispatch_trace_command_fn,
-};
-/* *INDENT-ON* */
 
 vlib_main_t *
 vlib_get_main_not_inline (void)
@@ -2563,6 +2053,13 @@ elog_main_t *
 vlib_get_elog_main_not_inline ()
 {
   return &vlib_global_main.elog_main;
+}
+
+void
+vlib_exit_with_status (vlib_main_t *vm, int status)
+{
+  vm->main_loop_exit_status = status;
+  __atomic_store_n (&vm->main_loop_exit_now, 1, __ATOMIC_RELEASE);
 }
 
 /*

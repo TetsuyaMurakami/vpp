@@ -102,9 +102,9 @@ ip_classify_inline (vlib_main_t * vm,
 	p2 = vlib_get_buffer (vm, from[2]);
 
 	vlib_prefetch_buffer_header (p1, STORE);
-	CLIB_PREFETCH (p1->data, CLIB_CACHE_LINE_BYTES, STORE);
+	clib_prefetch_store (p1->data);
 	vlib_prefetch_buffer_header (p2, STORE);
-	CLIB_PREFETCH (p2->data, CLIB_CACHE_LINE_BYTES, STORE);
+	clib_prefetch_store (p2->data);
       }
 
       bi0 = from[0];
@@ -190,7 +190,7 @@ ip_classify_inline (vlib_main_t * vm,
 	  u32 table_index0;
 	  vnet_classify_table_t *t0;
 	  vnet_classify_entry_t *e0;
-	  u64 hash0;
+	  u32 hash0;
 	  u8 *h0;
 
 	  /* Stride 3 seems to work best */
@@ -199,7 +199,7 @@ ip_classify_inline (vlib_main_t * vm,
 	      vlib_buffer_t *p1 = vlib_get_buffer (vm, from[3]);
 	      vnet_classify_table_t *tp1;
 	      u32 table_index1;
-	      u64 phash1;
+	      u32 phash1;
 
 	      table_index1 = vnet_buffer (p1)->l2_classify.table_index;
 

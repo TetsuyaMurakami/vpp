@@ -65,9 +65,9 @@ elf_get_section_by_start_address_no_check (elf_main_t * em,
   return p ? vec_elt_at_index (em->sections, p[0]) : 0;
 }
 
-clib_error_t *
-elf_get_section_by_start_address (elf_main_t * em, uword start_address,
-				  elf_section_t ** result)
+__clib_export clib_error_t *
+elf_get_section_by_start_address (elf_main_t *em, uword start_address,
+				  elf_section_t **result)
 {
   elf_section_t *s =
     elf_get_section_by_start_address_no_check (em, start_address);
@@ -541,8 +541,8 @@ elf_segment_va_compare (void *a1, void *a2)
 	  (i64) s2->header.virtual_address);
 }
 
-u8 *
-format_elf_main (u8 * s, va_list * args)
+__clib_export u8 *
+format_elf_main (u8 *s, va_list *args)
 {
   elf_main_t *em = va_arg (*args, elf_main_t *);
   u32 verbose = va_arg (*args, u32);
@@ -895,8 +895,8 @@ elf_parse_symbols (elf_main_t * em)
   }
 }
 
-void
-elf_set_dynamic_entries (elf_main_t * em)
+__clib_export void
+elf_set_dynamic_entries (elf_main_t *em)
 {
   uword i;
 
@@ -1357,7 +1357,7 @@ elf_read_file (elf_main_t * em, char *file_name)
       goto done;
     }
 
-  CLIB_MEM_UNPOISON (data, mmap_length);
+  clib_mem_unpoison (data, mmap_length);
 
   em->file_name = file_name;
 
@@ -1455,7 +1455,6 @@ static void
 layout_sections (elf_main_t * em)
 {
   elf_section_t *s;
-  u32 n_sections_with_changed_exec_address = 0;
   u32 *deferred_symbol_and_string_sections = 0;
   u32 n_deleted_sections = 0;
   /* note: rebuild is always zero. Intent lost in the sands of time */
@@ -1614,7 +1613,6 @@ layout_sections (elf_main_t * em)
       if (s->header.flags & ELF_SECTION_FLAG_ALLOC)
 	{
 	  s->exec_address_change = exec_address - s->header.exec_address;
-	  n_sections_with_changed_exec_address += s->exec_address_change != 0;
 	  s->header.exec_address = exec_address;
 	}
 
@@ -1750,8 +1748,8 @@ layout_sections (elf_main_t * em)
   }
 }
 
-clib_error_t *
-elf_write_file (elf_main_t * em, char *file_name)
+__clib_export clib_error_t *
+elf_write_file (elf_main_t *em, char *file_name)
 {
   int fd;
   FILE *f;
@@ -1977,7 +1975,7 @@ elf_create_section_with_contents (elf_main_t * em,
   if ((p = hash_get_mem (em->section_by_name, section_name)))
     {
       s = vec_elt_at_index (em->sections, p[0]);
-      _vec_len (s->contents) = 0;
+      vec_set_len (s->contents, 0);
       c = s->contents;
     }
   else

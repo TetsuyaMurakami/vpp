@@ -121,8 +121,8 @@ typedef struct noise_local
   {
     void *u_arg;
     noise_remote_t *(*u_remote_get) (const uint8_t[NOISE_PUBLIC_KEY_LEN]);
-      uint32_t (*u_index_set) (noise_remote_t *);
-    void (*u_index_drop) (uint32_t);
+    uint32_t (*u_index_set) (vlib_main_t *, noise_remote_t *);
+    void (*u_index_drop) (vlib_main_t *, uint32_t);
   } l_upcall;
 } noise_local_t;
 
@@ -136,15 +136,23 @@ noise_local_get (uint32_t locali)
   return (pool_elt_at_index (noise_local_pool, locali));
 }
 
+static_always_inline uint64_t
+noise_counter_send (noise_counter_t *ctr)
+{
+  uint64_t ret;
+  ret = ctr->c_send++;
+  return ret;
+}
+
 void noise_local_init (noise_local_t *, struct noise_upcall *);
 bool noise_local_set_private (noise_local_t *,
 			      const uint8_t[NOISE_PUBLIC_KEY_LEN]);
 
-void noise_remote_init (noise_remote_t *, uint32_t,
+void noise_remote_init (vlib_main_t *, noise_remote_t *, uint32_t,
 			const uint8_t[NOISE_PUBLIC_KEY_LEN], uint32_t);
 
 /* Should be called anytime noise_local_set_private is called */
-void noise_remote_precompute (noise_remote_t *);
+void noise_remote_precompute (vlib_main_t *, noise_remote_t *);
 
 /* Cryptographic functions */
 bool noise_create_initiation (vlib_main_t * vm, noise_remote_t *,
@@ -187,12 +195,83 @@ noise_remote_encrypt (vlib_main_t * vm, noise_remote_t *,
 		      uint32_t * r_idx,
 		      uint64_t * nonce,
 		      uint8_t * src, size_t srclen, uint8_t * dst);
-enum noise_state_crypt
-noise_remote_decrypt (vlib_main_t * vm, noise_remote_t *,
-		      uint32_t r_idx,
-		      uint64_t nonce,
-		      uint8_t * src, size_t srclen, uint8_t * dst);
 
+static_always_inline noise_keypair_t *
+wg_get_active_keypair (noise_remote_t *r, uint32_t r_idx)
+{
+  if (r->r_current != NULL && r->r_current->kp_local_index == r_idx)
+    {
+      return r->r_current;
+    }
+  else if (r->r_previous != NULL && r->r_previous->kp_local_index == r_idx)
+    {
+      return r->r_previous;
+    }
+  else if (r->r_next != NULL && r->r_next->kp_local_index == r_idx)
+    {
+      return r->r_next;
+    }
+  else
+    {
+      return NULL;
+    }
+}
+
+inline bool
+noise_counter_recv (noise_counter_t *ctr, uint64_t recv)
+{
+  uint64_t i, top, index_recv, index_ctr;
+  unsigned long bit;
+  bool ret = false;
+
+  /* Check that the recv counter is valid */
+  if (ctr->c_recv >= REJECT_AFTER_MESSAGES || recv >= REJECT_AFTER_MESSAGES)
+    goto error;
+
+  /* If the packet is out of the window, invalid */
+  if (recv + COUNTER_WINDOW_SIZE < ctr->c_recv)
+    goto error;
+
+  /* If the new counter is ahead of the current counter, we'll need to
+   * zero out the bitmap that has previously been used */
+  index_recv = recv / COUNTER_BITS;
+  index_ctr = ctr->c_recv / COUNTER_BITS;
+
+  if (recv > ctr->c_recv)
+    {
+      top = clib_min (index_recv - index_ctr, COUNTER_NUM);
+      for (i = 1; i <= top; i++)
+	ctr->c_backtrack[(i + index_ctr) & (COUNTER_NUM - 1)] = 0;
+      ctr->c_recv = recv;
+    }
+
+  index_recv %= COUNTER_NUM;
+  bit = 1ul << (recv % COUNTER_BITS);
+
+  if (ctr->c_backtrack[index_recv] & bit)
+    goto error;
+
+  ctr->c_backtrack[index_recv] |= bit;
+
+  ret = true;
+error:
+  return ret;
+}
+
+static_always_inline void
+noise_remote_keypair_free (vlib_main_t *vm, noise_remote_t *r,
+			   noise_keypair_t **kp)
+{
+  noise_local_t *local = noise_local_get (r->r_local_idx);
+  struct noise_upcall *u = &local->l_upcall;
+  if (*kp)
+    {
+      u->u_index_drop (vm, (*kp)->kp_local_index);
+      vnet_crypto_key_del (vm, (*kp)->kp_send_index);
+      vnet_crypto_key_del (vm, (*kp)->kp_recv_index);
+      clib_mem_free (*kp);
+    }
+}
 
 #endif /* __included_wg_noise_h__ */
 

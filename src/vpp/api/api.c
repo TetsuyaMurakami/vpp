@@ -58,36 +58,14 @@
 
 #include <vnet/ip/format.h>
 
-#include <vpp/api/vpe_msg_enum.h>
 #include <vpp/api/types.h>
 
-#define vl_typedefs		/* define message structures */
-#include <vpp/api/vpe_all_api_h.h>
-#undef vl_typedefs
-#define vl_endianfun		/* define message structures */
-#include <vpp/api/vpe_all_api_h.h>
-#undef vl_endianfun
-/* instantiate all the print functions we know about */
-#define vl_print(handle, ...) vlib_cli_output (handle, __VA_ARGS__)
-#define vl_printfun
-#include <vpp/api/vpe_all_api_h.h>
-#undef vl_printfun
-#include <vlibapi/api_helper_macros.h>
+#include <vpp/api/vpe.api_enum.h>
+#include <vpp/api/vpe.api_types.h>
 
-#define foreach_vpe_api_msg                                             \
-_(CONTROL_PING, control_ping)                                           \
-_(CLI, cli)                                                             \
-_(CLI_INBAND, cli_inband)						                        \
-_(GET_NODE_INDEX, get_node_index)                                       \
-_(ADD_NODE_NEXT, add_node_next)						                    \
-_(SHOW_VERSION, show_version)						                    \
-_(SHOW_THREADS, show_threads)						                    \
-_(GET_NODE_GRAPH, get_node_graph)                                       \
-_(GET_NEXT_INDEX, get_next_index)                                       \
-_(LOG_DUMP, log_dump)                                                   \
-_(SHOW_VPE_SYSTEM_TIME, show_vpe_system_time)				\
-_(GET_F64_ENDIAN_VALUE, get_f64_endian_value)							\
-_(GET_F64_INCREMENT_BY_ONE, get_f64_increment_by_one)					\
+static u16 msg_id_base;
+#define REPLY_MSG_ID_BASE msg_id_base
+#include <vlibapi/api_helper_macros.h>
 
 #define QUOTE_(x) #x
 #define QUOTE(x) QUOTE_(x)
@@ -123,121 +101,6 @@ memclnt_delete_callback (u32 client_index)
 VL_MSG_API_REAPER_FUNCTION (memclnt_delete_callback);
 
 static void
-vl_api_control_ping_t_handler (vl_api_control_ping_t * mp)
-{
-  vl_api_control_ping_reply_t *rmp;
-  int rv = 0;
-
-  /* *INDENT-OFF* */
-  REPLY_MACRO2(VL_API_CONTROL_PING_REPLY,
-  ({
-    rmp->vpe_pid = ntohl (getpid());
-  }));
-  /* *INDENT-ON* */
-}
-
-static void
-shmem_cli_output (uword arg, u8 * buffer, uword buffer_bytes)
-{
-  u8 **shmem_vecp = (u8 **) arg;
-  u8 *shmem_vec;
-  void *oldheap;
-  u32 offset;
-
-  shmem_vec = *shmem_vecp;
-
-  offset = vec_len (shmem_vec);
-
-  oldheap = vl_msg_push_heap ();
-
-  vec_validate (shmem_vec, offset + buffer_bytes - 1);
-
-  clib_memcpy (shmem_vec + offset, buffer, buffer_bytes);
-
-  vl_msg_pop_heap (oldheap);
-
-  *shmem_vecp = shmem_vec;
-}
-
-
-static void
-vl_api_cli_t_handler (vl_api_cli_t * mp)
-{
-  vl_api_cli_reply_t *rp;
-  vl_api_registration_t *reg;
-  vlib_main_t *vm = vlib_get_main ();
-  unformat_input_t input;
-  u8 *shmem_vec = 0;
-  void *oldheap;
-
-  reg = vl_api_client_index_to_registration (mp->client_index);
-  if (!reg)
-    return;;
-
-  rp = vl_msg_api_alloc (sizeof (*rp));
-  rp->_vl_msg_id = ntohs (VL_API_CLI_REPLY);
-  rp->context = mp->context;
-
-  unformat_init_vector (&input, (u8 *) (uword) mp->cmd_in_shmem);
-
-  vlib_cli_input (vm, &input, shmem_cli_output, (uword) & shmem_vec);
-
-  oldheap = vl_msg_push_heap ();
-  vec_add1 (shmem_vec, 0);
-  vl_msg_pop_heap (oldheap);
-
-  rp->reply_in_shmem = (uword) shmem_vec;
-
-  vl_api_send_msg (reg, (u8 *) rp);
-}
-
-static void
-inband_cli_output (uword arg, u8 * buffer, uword buffer_bytes)
-{
-  u8 **mem_vecp = (u8 **) arg;
-  u8 *mem_vec = *mem_vecp;
-  u32 offset = vec_len (mem_vec);
-
-  vec_validate (mem_vec, offset + buffer_bytes - 1);
-  clib_memcpy (mem_vec + offset, buffer, buffer_bytes);
-  *mem_vecp = mem_vec;
-}
-
-static void
-vl_api_cli_inband_t_handler (vl_api_cli_inband_t * mp)
-{
-  vl_api_cli_inband_reply_t *rmp;
-  int rv = 0;
-  vlib_main_t *vm = vlib_get_main ();
-  unformat_input_t input;
-  u8 *out_vec = 0;
-  u8 *cmd_vec = 0;
-
-  if (vl_msg_api_get_msg_length (mp) <
-      vl_api_string_len (&mp->cmd) + sizeof (*mp))
-    {
-      rv = -1;
-      goto error;
-    }
-
-  cmd_vec = vl_api_from_api_to_new_vec (mp, &mp->cmd);
-
-  unformat_init_string (&input, (char *) cmd_vec,
-			vl_api_string_len (&mp->cmd));
-  rv = vlib_cli_input (vm, &input, inband_cli_output, (uword) & out_vec);
-
-error:
-  /* *INDENT-OFF* */
-  REPLY_MACRO3(VL_API_CLI_INBAND_REPLY, vec_len (out_vec),
-  ({
-    vl_api_vec_to_api_string(out_vec, &rmp->reply);
-  }));
-  /* *INDENT-ON* */
-  vec_free (out_vec);
-  vec_free (cmd_vec);
-}
-
-static void
 vl_api_show_version_t_handler (vl_api_show_version_t * mp)
 {
   vl_api_show_version_reply_t *rmp;
@@ -261,204 +124,14 @@ vl_api_show_version_t_handler (vl_api_show_version_t * mp)
 }
 
 static void
-get_thread_data (vl_api_thread_data_t * td, int index)
-{
-  vlib_worker_thread_t *w = vlib_worker_threads + index;
-  td->id = htonl (index);
-  if (w->name)
-    strncpy ((char *) td->name, (char *) w->name, ARRAY_LEN (td->name) - 1);
-  if (w->registration)
-    strncpy ((char *) td->type, (char *) w->registration->name,
-	     ARRAY_LEN (td->type) - 1);
-  td->pid = htonl (w->lwp);
-  td->cpu_id = htonl (w->cpu_id);
-  td->core = htonl (w->core_id);
-  td->cpu_socket = htonl (w->numa_id);
-}
-
-static void
-vl_api_show_threads_t_handler (vl_api_show_threads_t * mp)
-{
-  int count = 0;
-
-#if !defined(__powerpc64__)
-  vl_api_registration_t *reg;
-  vl_api_show_threads_reply_t *rmp;
-  vl_api_thread_data_t *td;
-  int i, msg_size = 0;
-  count = vec_len (vlib_worker_threads);
-  if (!count)
-    return;
-
-  msg_size = sizeof (*rmp) + sizeof (rmp->thread_data[0]) * count;
-  reg = vl_api_client_index_to_registration (mp->client_index);
-  if (!reg)
-    return;
-
-  rmp = vl_msg_api_alloc (msg_size);
-  clib_memset (rmp, 0, msg_size);
-  rmp->_vl_msg_id = htons (VL_API_SHOW_THREADS_REPLY);
-  rmp->context = mp->context;
-  rmp->count = htonl (count);
-  td = rmp->thread_data;
-
-  for (i = 0; i < count; i++)
-    {
-      get_thread_data (&td[i], i);
-    }
-
-  vl_api_send_msg (reg, (u8 *) rmp);
-#else
-
-  /* unimplemented support */
-  rv = -9;
-  clib_warning ("power pc does not support show threads api");
-  /* *INDENT-OFF* */
-  REPLY_MACRO2(VL_API_SHOW_THREADS_REPLY,
-  ({
-    rmp->count = htonl(count);
-  }));
-  /* *INDENT-ON* */
-#endif
-}
-
-static void
-vl_api_get_node_index_t_handler (vl_api_get_node_index_t * mp)
-{
-  vlib_main_t *vm = vlib_get_main ();
-  vl_api_get_node_index_reply_t *rmp;
-  vlib_node_t *n;
-  int rv = 0;
-  u32 node_index = ~0;
-
-  n = vlib_get_node_by_name (vm, mp->node_name);
-
-  if (n == 0)
-    rv = VNET_API_ERROR_NO_SUCH_NODE;
-  else
-    node_index = n->index;
-
-  /* *INDENT-OFF* */
-  REPLY_MACRO2(VL_API_GET_NODE_INDEX_REPLY,
-  ({
-    rmp->node_index = htonl(node_index);
-  }));
-  /* *INDENT-ON* */
-}
-
-static void
-vl_api_get_next_index_t_handler (vl_api_get_next_index_t * mp)
-{
-  vlib_main_t *vm = vlib_get_main ();
-  vl_api_get_next_index_reply_t *rmp;
-  vlib_node_t *node, *next_node;
-  int rv = 0;
-  u32 next_node_index = ~0, next_index = ~0;
-  uword *p;
-
-  node = vlib_get_node_by_name (vm, mp->node_name);
-
-  if (node == 0)
-    {
-      rv = VNET_API_ERROR_NO_SUCH_NODE;
-      goto out;
-    }
-
-  next_node = vlib_get_node_by_name (vm, mp->next_name);
-
-  if (next_node == 0)
-    {
-      rv = VNET_API_ERROR_NO_SUCH_NODE2;
-      goto out;
-    }
-  else
-    next_node_index = next_node->index;
-
-  p = hash_get (node->next_slot_by_node, next_node_index);
-
-  if (p == 0)
-    {
-      rv = VNET_API_ERROR_NO_SUCH_ENTRY;
-      goto out;
-    }
-  else
-    next_index = p[0];
-
-out:
-  /* *INDENT-OFF* */
-  REPLY_MACRO2(VL_API_GET_NEXT_INDEX_REPLY,
-  ({
-    rmp->next_index = htonl(next_index);
-  }));
-  /* *INDENT-ON* */
-}
-
-static void
-vl_api_add_node_next_t_handler (vl_api_add_node_next_t * mp)
-{
-  vlib_main_t *vm = vlib_get_main ();
-  vl_api_add_node_next_reply_t *rmp;
-  vlib_node_t *n, *next;
-  int rv = 0;
-  u32 next_index = ~0;
-
-  n = vlib_get_node_by_name (vm, mp->node_name);
-
-  if (n == 0)
-    {
-      rv = VNET_API_ERROR_NO_SUCH_NODE;
-      goto out;
-    }
-
-  next = vlib_get_node_by_name (vm, mp->next_name);
-
-  if (next == 0)
-    rv = VNET_API_ERROR_NO_SUCH_NODE2;
-  else
-    next_index = vlib_node_add_next (vm, n->index, next->index);
-
-out:
-  /* *INDENT-OFF* */
-  REPLY_MACRO2(VL_API_ADD_NODE_NEXT_REPLY,
-  ({
-    rmp->next_index = htonl(next_index);
-  }));
-  /* *INDENT-ON* */
-}
-
-static void
-vl_api_get_node_graph_t_handler (vl_api_get_node_graph_t * mp)
+vl_api_show_vpe_system_time_t_handler (vl_api_show_vpe_system_time_t *mp)
 {
   int rv = 0;
-  u8 *vector = 0;
-  vlib_main_t *vm = vlib_get_main ();
-  void *oldheap;
-  vl_api_get_node_graph_reply_t *rmp;
-  static vlib_node_t ***node_dups;
-  static vlib_main_t **stat_vms;
-
-  oldheap = vl_msg_push_heap ();
-
-  /*
-   * Keep the number of memcpy ops to a minimum (e.g. 1).
-   */
-  vec_validate (vector, 16384);
-  vec_reset_length (vector);
-
-  vlib_node_get_nodes (vm, 0 /* main threads */ ,
-		       0 /* include stats */ ,
-		       1 /* barrier sync */ ,
-		       &node_dups, &stat_vms);
-  vector = vlib_node_serialize (vm, node_dups, vector, 1 /* include nexts */ ,
-				1 /* include stats */ );
-
-  vl_msg_pop_heap (oldheap);
-
+  vl_api_show_vpe_system_time_reply_t *rmp;
   /* *INDENT-OFF* */
-  REPLY_MACRO2(VL_API_GET_NODE_GRAPH_REPLY,
-  ({
-    rmp->reply_in_shmem = (uword) vector;
-  }));
+  REPLY_MACRO2 (
+    VL_API_SHOW_VPE_SYSTEM_TIME_REPLY,
+    ({ rmp->vpe_system_time = clib_host_to_net_f64 (unix_time_now ()); }));
   /* *INDENT-ON* */
 }
 
@@ -478,7 +151,7 @@ show_log_details (vl_api_registration_t * reg, u32 context,
 
   rmp = vl_msg_api_alloc (msg_size);
   clib_memset (rmp, 0, msg_size);
-  rmp->_vl_msg_id = ntohs (VL_API_LOG_DETAILS);
+  rmp->_vl_msg_id = ntohs (VL_API_LOG_DETAILS + msg_id_base);
 
   rmp->context = context;
   rmp->timestamp = clib_host_to_net_f64 (timestamp);
@@ -527,51 +200,6 @@ vl_api_log_dump_t_handler (vl_api_log_dump_t * mp)
 
 }
 
-static void
-vl_api_show_vpe_system_time_t_handler (vl_api_show_vpe_system_time_t * mp)
-{
-  int rv = 0;
-  vl_api_show_vpe_system_time_reply_t *rmp;
-  /* *INDENT-OFF* */
-  REPLY_MACRO2(VL_API_SHOW_VPE_SYSTEM_TIME_REPLY,
-  ({
-    rmp->vpe_system_time = clib_host_to_net_f64 (unix_time_now ());
-  }));
-  /* *INDENT-ON* */
-}
-
-static void
-vl_api_get_f64_endian_value_t_handler (vl_api_get_f64_endian_value_t * mp)
-{
-  int rv = 0;
-  f64 one = 1.0;
-  vl_api_get_f64_endian_value_reply_t *rmp;
-  if (1.0 != clib_net_to_host_f64 (mp->f64_one))
-    rv = VNET_API_ERROR_API_ENDIAN_FAILED;
-
-  /* *INDENT-OFF* */
-  REPLY_MACRO2(VL_API_GET_F64_ENDIAN_VALUE_REPLY,
-  ({
-    rmp->f64_one_result = clib_host_to_net_f64 (one);
-  }));
-  /* *INDENT-ON* */
-}
-
-static void
-vl_api_get_f64_increment_by_one_t_handler (vl_api_get_f64_increment_by_one_t *
-					   mp)
-{
-  int rv = 0;
-  vl_api_get_f64_increment_by_one_reply_t *rmp;
-
-  /* *INDENT-OFF* */
-  REPLY_MACRO2(VL_API_GET_F64_INCREMENT_BY_ONE_REPLY,
-  ({
-    rmp->f64_value = clib_host_to_net_f64 (clib_net_to_host_f64(mp->f64_value) + 1.0);
-  }));
-  /* *INDENT-ON* */
-}
-
 #define BOUNCE_HANDLER(nn)                                              \
 static void vl_api_##nn##_t_handler (                                   \
     vl_api_##nn##_t *mp)                                                \
@@ -602,8 +230,6 @@ static void vl_api_##nn##_t_handler (                                   \
     vl_msg_api_free (mp);                                               \
 }
 
-static void setup_message_id_table (api_main_t * am);
-
 /*
  * vpe_api_hookup
  * Add vpe's API message handlers to the table.
@@ -611,40 +237,14 @@ static void setup_message_id_table (api_main_t * am);
  * added the client registration handlers.
  * See .../open-repo/vlib/memclnt_vlib.c:memclnt_process()
  */
+#include <vpp/api/vpe.api.c>
 static clib_error_t *
 vpe_api_hookup (vlib_main_t * vm)
 {
-  api_main_t *am = vlibapi_get_main ();
-
-#define _(N,n)                                                  \
-    vl_msg_api_set_handlers(VL_API_##N, #n,                     \
-                           vl_api_##n##_t_handler,              \
-                           vl_noop_handler,                     \
-                           vl_api_##n##_t_endian,               \
-                           vl_api_##n##_t_print,                \
-                           sizeof(vl_api_##n##_t), 1);
-  foreach_vpe_api_msg;
-#undef _
-
-  /*
-   * Trace space for classifier mask+match
-   */
-  am->api_trace_cfg[VL_API_CLASSIFY_ADD_DEL_TABLE].size += 5 * sizeof (u32x4);
-  am->api_trace_cfg[VL_API_CLASSIFY_ADD_DEL_SESSION].size +=
-    5 * sizeof (u32x4);
-
-  /*
-   * Thread-safe API messages
-   */
-  am->is_mp_safe[VL_API_CONTROL_PING] = 1;
-  am->is_mp_safe[VL_API_CONTROL_PING_REPLY] = 1;
-  am->is_mp_safe[VL_API_IP_ROUTE_ADD_DEL] = 1;
-  am->is_mp_safe[VL_API_GET_NODE_GRAPH] = 1;
-
   /*
    * Set up the (msg_name, crc, message-id) table
    */
-  setup_message_id_table (am);
+  msg_id_base = setup_message_id_table ();
 
   return 0;
 }
@@ -793,25 +393,6 @@ get_unformat_vnet_sw_interface (void)
 {
   return (void *) &unformat_vnet_sw_interface;
 }
-
-#define vl_msg_name_crc_list
-#include <vpp/api/vpe_all_api_h.h>
-#undef vl_msg_name_crc_list
-
-static void
-setup_message_id_table (api_main_t * am)
-{
-#define _(id,n,crc) vl_msg_api_add_msg_name_crc (am, #n "_" #crc, id);
-  foreach_vl_msg_name_crc_memclnt;
-  foreach_vl_msg_name_crc_vpe;
-#undef _
-
-#define vl_api_version_tuple(n,mj, mi, p) \
-  vl_msg_api_add_version (am, #n, mj, mi, p);
-#include <vpp/api/vpe_all_api_h.h>
-#undef vl_api_version_tuple
-}
-
 
 /*
  * fd.io coding-style-patch-verification: ON

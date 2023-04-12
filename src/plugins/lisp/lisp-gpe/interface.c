@@ -88,12 +88,10 @@ format_lisp_gpe_tx_trace (u8 * s, va_list * args)
  *
  * @return number of vectors in frame.
  */
-static uword
-lisp_gpe_interface_tx (vlib_main_t * vm, vlib_node_runtime_t * node,
-		       vlib_frame_t * from_frame)
+VLIB_NODE_FN (lisp_tunnel_output)
+(vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *from_frame)
 {
   u32 n_left_from, next_index, *from, *to_next;
-  lisp_gpe_main_t *lgm = &lisp_gpe_main;
 
   from = vlib_frame_vector_args (from_frame);
   n_left_from = from_frame->n_vectors;
@@ -112,7 +110,6 @@ lisp_gpe_interface_tx (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  const ip_adjacency_t *adj0;
 	  const dpo_id_t *dpo0;
 	  vlib_buffer_t *b0;
-	  u8 is_v4_0;
 
 	  bi0 = from[0];
 	  to_next[0] = bi0;
@@ -122,11 +119,7 @@ lisp_gpe_interface_tx (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  n_left_to_next -= 1;
 
 	  b0 = vlib_get_buffer (vm, bi0);
-
-	  /* Fixup the checksum and len fields in the LISP tunnel encap
-	   * that was applied at the midchain node */
-	  is_v4_0 = is_v4_packet (vlib_buffer_get_current (b0));
-	  ip_udp_fixup_one (lgm->vlib_main, b0, is_v4_0);
+	  b0->flags |= VNET_BUFFER_F_LOCALLY_ORIGINATED;
 
 	  /* Follow the DPO on which the midchain is stacked */
 	  adj_index0 = vnet_buffer (b0)->ip.adj_index[VLIB_TX];
@@ -151,6 +144,13 @@ lisp_gpe_interface_tx (vlib_main_t * vm, vlib_node_runtime_t * node,
   return from_frame->n_vectors;
 }
 
+VLIB_REGISTER_NODE (lisp_tunnel_output) = {
+  .name = "lisp-tunnel-output",
+  .vector_size = sizeof (u32),
+  .format_trace = format_lisp_gpe_tx_trace,
+  .sibling_of = "tunnel-output",
+};
+
 static u8 *
 format_lisp_gpe_name (u8 * s, va_list * args)
 {
@@ -162,8 +162,6 @@ format_lisp_gpe_name (u8 * s, va_list * args)
 VNET_DEVICE_CLASS (lisp_gpe_device_class) = {
   .name = "LISP_GPE",
   .format_device_name = format_lisp_gpe_name,
-  .format_tx_trace = format_lisp_gpe_tx_trace,
-  .tx_function = lisp_gpe_interface_tx,
 };
 /* *INDENT-ON* */
 
@@ -431,7 +429,7 @@ lisp_gpe_create_iface (lisp_gpe_main_t * lgm, u32 vni, u32 dp_table,
   if (flen > 0)
     {
       hw_if_index = lgm->free_tunnel_hw_if_indices[flen - 1];
-      _vec_len (lgm->free_tunnel_hw_if_indices) -= 1;
+      vec_dec_len (lgm->free_tunnel_hw_if_indices, 1);
 
       hi = vnet_get_hw_interface (vnm, hw_if_index);
 
@@ -507,13 +505,11 @@ lisp_gpe_iface_set_table (u32 sw_if_index, u32 table_id)
 
   fib_index = fib_table_find_or_create_and_lock (FIB_PROTOCOL_IP4, table_id,
 						 FIB_SOURCE_LISP);
-  vec_validate (ip4_main.fib_index_by_sw_if_index, sw_if_index);
   ip4_main.fib_index_by_sw_if_index[sw_if_index] = fib_index;
   ip4_sw_interface_enable_disable (sw_if_index, 1);
 
   fib_index = fib_table_find_or_create_and_lock (FIB_PROTOCOL_IP6, table_id,
 						 FIB_SOURCE_LISP);
-  vec_validate (ip6_main.fib_index_by_sw_if_index, sw_if_index);
   ip6_main.fib_index_by_sw_if_index[sw_if_index] = fib_index;
   ip6_sw_interface_enable_disable (sw_if_index, 1);
 }

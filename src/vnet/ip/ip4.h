@@ -111,9 +111,6 @@ typedef struct ip4_main_t
   /** Vector of FIBs. */
   struct fib_table_t_ *fibs;
 
-  /** Vector of MTries. */
-  struct ip4_fib_t_ *v4_fibs;
-
   /** Vector of MFIBs. */
   struct mfib_table_t_ *mfibs;
 
@@ -164,13 +161,14 @@ typedef struct ip4_main_t
 
     u8 pad[2];
   } host_config;
+
+  u16 msg_id_base;
 } ip4_main_t;
 
 #define ARP_THROTTLE_BITS	(512)
 
 /** Global ip4 main structure. */
 extern ip4_main_t ip4_main;
-extern char *ip4_error_strings[];
 
 /** Global ip4 input node.  Errors get attached to ip4 input node. */
 extern vlib_node_registration_t ip4_input_node;
@@ -262,10 +260,8 @@ int vnet_set_ip4_classify_intfc (vlib_main_t * vm, u32 sw_if_index,
 
 void ip4_punt_policer_add_del (u8 is_add, u32 policer_index);
 
-void ip4_punt_redirect_add (u32 rx_sw_if_index,
-			    u32 tx_sw_if_index, ip46_address_t * nh);
 void ip4_punt_redirect_add_paths (u32 rx_sw_if_index,
-				  fib_route_path_t * paths);
+				  const fib_route_path_t *paths);
 
 void ip4_punt_redirect_del (u32 rx_sw_if_index);
 

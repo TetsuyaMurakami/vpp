@@ -248,12 +248,8 @@ typedef struct fib_entry_src_vft_t_ {
     }                                                          \
 }
 
-#define FIB_ENTRY_SRC_VFT_EXISTS(esrc, func)        \
-{                                                   \
-    const fib_entry_src_vft_t *_vft;                \
-    _vft = fib_entry_src_get_vft(esrc);             \
-    (_vft->func);                                   \
-}
+#define FIB_ENTRY_SRC_VFT_EXISTS(esrc, func) \
+    (fib_entry_src_get_vft(esrc)->func != 0)
 
 extern const fib_entry_src_vft_t*fib_entry_src_get_vft(
     const fib_entry_src_t *esrc);
@@ -329,9 +325,6 @@ extern fib_entry_flag_t fib_entry_get_flags_i(const fib_entry_t *fib_entry);
 
 extern fib_path_list_flags_t fib_entry_src_flags_2_path_list_flags(
     fib_entry_flag_t eflags);
-
-extern fib_forward_chain_type_t fib_entry_chain_type_fixup(const fib_entry_t *entry,
-                                                           fib_forward_chain_type_t fct);
 
 extern void fib_entry_src_mk_lb (fib_entry_t *fib_entry,
 				 fib_source_t source,

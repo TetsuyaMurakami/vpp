@@ -339,6 +339,7 @@ lcp_xc_inline (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame,
 	  const lcp_itf_pair_t *lip;
 	  u32 next0, bi0, lipi, ai;
 	  vlib_buffer_t *b0;
+	  const ip_adjacency_t *adj;
 
 	  bi0 = to_next[0] = from[0];
 
@@ -357,30 +358,24 @@ lcp_xc_inline (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame,
 	  vlib_buffer_advance (b0, -lip->lip_rewrite_len);
 	  eth = vlib_buffer_get_current (b0);
 
-	  if (ethernet_address_cast (eth->dst_address))
-	    ai = lip->lip_phy_adjs.adj_index[af];
-	  else
+	  ai = ADJ_INDEX_INVALID;
+	  if (!ethernet_address_cast (eth->dst_address))
 	    ai = lcp_adj_lkup ((u8 *) eth, lip->lip_rewrite_len,
 			       vnet_buffer (b0)->sw_if_index[VLIB_TX]);
+	  if (ai == ADJ_INDEX_INVALID)
+	    ai = lip->lip_phy_adjs.adj_index[af];
 
-	  if (ADJ_INDEX_INVALID != ai)
-	    {
-	      const ip_adjacency_t *adj;
+	  adj = adj_get (ai);
+	  vnet_buffer (b0)->ip.adj_index[VLIB_TX] = ai;
+	  next0 = adj->rewrite_header.next_index;
+	  vnet_buffer (b0)->ip.save_rewrite_length = lip->lip_rewrite_len;
 
-	      adj = adj_get (ai);
-	      vnet_buffer (b0)->ip.adj_index[VLIB_TX] = ai;
-	      next0 = adj->rewrite_header.next_index;
-	      vnet_buffer (b0)->ip.save_rewrite_length = lip->lip_rewrite_len;
-
-	      if (PREDICT_FALSE (adj->rewrite_header.flags &
-				 VNET_REWRITE_HAS_FEATURES))
-		vnet_feature_arc_start_w_cfg_index (
-		  lm->output_feature_arc_index,
-		  vnet_buffer (b0)->sw_if_index[VLIB_TX], &next0, b0,
-		  adj->ia_cfg_index);
-	    }
-	  else
-	    next0 = LCP_XC_NEXT_DROP;
+	  if (PREDICT_FALSE (adj->rewrite_header.flags &
+			     VNET_REWRITE_HAS_FEATURES))
+	    vnet_feature_arc_start_w_cfg_index (
+	      lm->output_feature_arc_index,
+	      vnet_buffer (b0)->sw_if_index[VLIB_TX], &next0, b0,
+	      adj->ia_cfg_index);
 
 	  if (PREDICT_FALSE ((b0->flags & VLIB_BUFFER_IS_TRACED)))
 	    {
@@ -444,6 +439,7 @@ VNET_FEATURE_INIT (lcp_xc_ip6_mcast_node, static) = {
 typedef enum
 {
   LCP_XC_L3_NEXT_XC,
+  LCP_XC_L3_NEXT_LOOKUP,
   LCP_XC_L3_N_NEXT,
 } lcp_xc_l3_next_t;
 
@@ -458,6 +454,7 @@ lcp_xc_l3_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 {
   u32 n_left_from, *from, *to_next, n_left_to_next;
   lcp_xc_next_t next_index;
+  vnet_main_t *vnm = vnet_get_main ();
 
   next_index = 0;
   n_left_from = frame->n_vectors;
@@ -493,10 +490,24 @@ lcp_xc_l3_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	    lcp_itf_pair_find_by_host (vnet_buffer (b0)->sw_if_index[VLIB_RX]);
 	  lip = lcp_itf_pair_get (lipi);
 
-	  vnet_buffer (b0)->sw_if_index[VLIB_TX] = lip->lip_phy_sw_if_index;
-	  next0 = LCP_XC_L3_NEXT_XC;
-	  vnet_buffer (b0)->ip.adj_index[VLIB_TX] =
-	    lip->lip_phy_adjs.adj_index[af];
+	  /* P2P tunnels can use generic adjacency */
+	  if (PREDICT_TRUE (
+		vnet_sw_interface_is_p2p (vnm, lip->lip_phy_sw_if_index)))
+	    {
+	      vnet_buffer (b0)->sw_if_index[VLIB_TX] =
+		lip->lip_phy_sw_if_index;
+	      vnet_buffer (b0)->ip.adj_index[VLIB_TX] =
+		lip->lip_phy_adjs.adj_index[af];
+	      next0 = LCP_XC_L3_NEXT_XC;
+	    }
+	  /* P2MP tunnels require a fib lookup to find the right adjacency */
+	  else
+	    {
+	      /* lookup should use FIB table associated with phy interface */
+	      vnet_buffer (b0)->sw_if_index[VLIB_RX] =
+		lip->lip_phy_sw_if_index;
+	      next0 = LCP_XC_L3_NEXT_LOOKUP;
+	    }
 
 	  if (PREDICT_FALSE ((b0->flags & VLIB_BUFFER_IS_TRACED)))
 	    {
@@ -539,6 +550,7 @@ VLIB_REGISTER_NODE (lcp_xc_l3_ip4_node) = {
   .n_next_nodes = LCP_XC_L3_N_NEXT,
   .next_nodes = {
     [LCP_XC_L3_NEXT_XC] = "ip4-midchain",
+    [LCP_XC_L3_NEXT_LOOKUP] = "ip4-lookup",
   },
 };
 
@@ -561,6 +573,7 @@ VLIB_REGISTER_NODE (lcp_xc_l3_ip6_node) = {
   .n_next_nodes = LCP_XC_L3_N_NEXT,
   .next_nodes = {
     [LCP_XC_L3_NEXT_XC] = "ip6-midchain",
+    [LCP_XC_L3_NEXT_LOOKUP] = "ip6-lookup",
   },
 };
 
@@ -676,10 +689,14 @@ VLIB_NODE_FN (lcp_arp_phy_node)
 		  c0 = vlib_buffer_copy (vm, b0);
 		  vlib_buffer_advance (b0, len0);
 
-		  /* Send to the host */
-		  vnet_buffer (c0)->sw_if_index[VLIB_TX] =
-		    lip0->lip_host_sw_if_index;
-		  reply_copies[n_copies++] = vlib_get_buffer_index (vm, c0);
+		  if (c0)
+		    {
+		      /* Send to the host */
+		      vnet_buffer (c0)->sw_if_index[VLIB_TX] =
+			lip0->lip_host_sw_if_index;
+		      reply_copies[n_copies++] =
+			vlib_get_buffer_index (vm, c0);
+		    }
 		}
 	    }
 	  if (arp1->opcode == clib_host_to_net_u16 (ETHERNET_ARP_OPCODE_reply))
@@ -704,10 +721,14 @@ VLIB_NODE_FN (lcp_arp_phy_node)
 		  c1 = vlib_buffer_copy (vm, b1);
 		  vlib_buffer_advance (b1, len1);
 
-		  /* Send to the host */
-		  vnet_buffer (c1)->sw_if_index[VLIB_TX] =
-		    lip1->lip_host_sw_if_index;
-		  reply_copies[n_copies++] = vlib_get_buffer_index (vm, c1);
+		  if (c1)
+		    {
+		      /* Send to the host */
+		      vnet_buffer (c1)->sw_if_index[VLIB_TX] =
+			lip1->lip_host_sw_if_index;
+		      reply_copies[n_copies++] =
+			vlib_get_buffer_index (vm, c1);
+		    }
 		}
 	    }
 
@@ -776,10 +797,14 @@ VLIB_NODE_FN (lcp_arp_phy_node)
 		  c0 = vlib_buffer_copy (vm, b0);
 		  vlib_buffer_advance (b0, len0);
 
-		  /* Send to the host */
-		  vnet_buffer (c0)->sw_if_index[VLIB_TX] =
-		    lip0->lip_host_sw_if_index;
-		  reply_copies[n_copies++] = vlib_get_buffer_index (vm, c0);
+		  if (c0)
+		    {
+		      /* Send to the host */
+		      vnet_buffer (c0)->sw_if_index[VLIB_TX] =
+			lip0->lip_host_sw_if_index;
+		      reply_copies[n_copies++] =
+			vlib_get_buffer_index (vm, c0);
+		    }
 		}
 	    }
 

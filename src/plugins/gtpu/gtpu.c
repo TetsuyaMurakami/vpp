@@ -292,7 +292,7 @@ ip_udp_gtpu_rewrite (gtpu_tunnel_t * t, bool is_ip6)
 
   t->rewrite = r.rw;
   /* Now only support 8-byte gtpu header. TBD */
-  _vec_len (t->rewrite) = sizeof (ip4_gtpu_header_t) - 4;
+  vec_set_len (t->rewrite, sizeof (ip4_gtpu_header_t) - 4);
 
   return;
 }
@@ -419,7 +419,7 @@ int vnet_gtpu_add_mod_del_tunnel
 	  vnet_interface_main_t *im = &vnm->interface_main;
 	  hw_if_index = gtm->free_gtpu_tunnel_hw_if_indices
 	    [vec_len (gtm->free_gtpu_tunnel_hw_if_indices) - 1];
-	  _vec_len (gtm->free_gtpu_tunnel_hw_if_indices) -= 1;
+	  vec_dec_len (gtm->free_gtpu_tunnel_hw_if_indices, 1);
 
 	  hi = vnet_get_hw_interface (vnm, hw_if_index);
 	  hi->dev_instance = t - gtm->tunnels;
@@ -473,7 +473,8 @@ int vnet_gtpu_add_mod_del_tunnel
       fib_prefix_t tun_dst_pfx;
       vnet_flood_class_t flood_class = VNET_FLOOD_CLASS_TUNNEL_NORMAL;
 
-      fib_prefix_from_ip46_addr (&t->dst, &tun_dst_pfx);
+      fib_protocol_t fp = fib_ip_proto (is_ip6);
+      fib_prefix_from_ip46_addr (fp, &t->dst, &tun_dst_pfx);
       if (!ip46_address_is_multicast (&t->dst))
 	{
 	  /* Unicast tunnel -
@@ -497,8 +498,6 @@ int vnet_gtpu_add_mod_del_tunnel
 	   * with different VNIs, create the output adjacency only if
 	   * it does not already exist
 	   */
-	  fib_protocol_t fp = fib_ip_proto (is_ip6);
-
 	  if (vtep_addr_ref (&gtm->vtep_table,
 			     t->encap_fib_index, &t->dst) == 1)
 	    {
@@ -524,15 +523,16 @@ int vnet_gtpu_add_mod_del_tunnel
 	       *  - the forwarding interface is for-us
 	       *  - the accepting interface is that from the API
 	       */
-	      mfib_table_entry_path_update (t->encap_fib_index,
-					    &mpfx, MFIB_SOURCE_GTPU, &path);
+	      mfib_table_entry_path_update (t->encap_fib_index, &mpfx,
+					    MFIB_SOURCE_GTPU,
+					    MFIB_ENTRY_FLAG_NONE, &path);
 
 	      path.frp_sw_if_index = a->mcast_sw_if_index;
 	      path.frp_flags = FIB_ROUTE_PATH_FLAG_NONE;
 	      path.frp_mitf_flags = MFIB_ITF_FLAG_ACCEPT;
-	      mfei = mfib_table_entry_path_update (t->encap_fib_index,
-						   &mpfx,
-						   MFIB_SOURCE_GTPU, &path);
+	      mfei = mfib_table_entry_path_update (
+		t->encap_fib_index, &mpfx, MFIB_SOURCE_GTPU,
+		MFIB_ENTRY_FLAG_NONE, &path);
 
 	      /*
 	       * Create the mcast adjacency to send traffic to the group
@@ -577,6 +577,7 @@ int vnet_gtpu_add_mod_del_tunnel
 	  if (a->tteid == 0)
 	    return VNET_API_ERROR_INVALID_VALUE;
 	  t->tteid = a->tteid;
+	  vec_free (t->rewrite);
 	  ip_udp_gtpu_rewrite (t, is_ip6);
 	  return 0;
 	}
@@ -879,17 +880,20 @@ done:
  * to span multiple servers. This is done by building an L2 overlay on
  * top of an L3 network underlay using GTPU tunnels.
  *
- * GTPU can also be used to transport IP packetes as its PDU type to
+ * GTPU can also be used to transport IP packets as its PDU type to
  * allow IP forwarding over underlay network, e.g. between RAN and UPF
- * for mobility deplyments.
+ * for mobility deployments.
  *
  * @cliexpar
  * Example of how to create a GTPU Tunnel:
- * @cliexcmd{create gtpu tunnel src 10.0.3.1 dst 10.0.3.3 teid 13 tteid 55 encap-vrf-id 7}
+ * @cliexcmd{create gtpu tunnel src 10.0.3.1 dst 10.0.3.3 teid 13 tteid 55
+ * encap-vrf-id 7}
  * Example of how to delete a GTPU Tunnel:
- * @cliexcmd{create gtpu tunnel src 10.0.3.1 dst 10.0.3.3 teid 13 encap-vrf-id 7 del}
+ * @cliexcmd{create gtpu tunnel src 10.0.3.1 dst 10.0.3.3 teid 13 encap-vrf-id
+ * 7 del}
  * Example of how to update tx TEID of a GTPU Tunnel:
- * @cliexcmd{create gtpu tunnel src 10.0.3.1 dst 10.0.3.3 encap-vrf-id 7 upd-tteid 55}
+ * @cliexcmd{create gtpu tunnel src 10.0.3.1 dst 10.0.3.3 encap-vrf-id 7
+ * upd-tteid 55}
  ?*/
 /* *INDENT-OFF* */
 VLIB_CLI_COMMAND (create_gtpu_tunnel_command, static) = {
@@ -1004,7 +1008,7 @@ set_ip4_gtpu_bypass (vlib_main_t * vm,
 /*?
  * This command adds the 'ip4-gtpu-bypass' graph node for a given interface.
  * By adding the IPv4 gtpu-bypass graph node to an interface, the node checks
- *  for and validate input gtpu packet and bypass ip4-lookup, ip4-local,
+ * for and validate input gtpu packet and bypass ip4-lookup, ip4-local,
  * ip4-udp-lookup nodes to speedup gtpu packet forwarding. This node will
  * cause extra overhead to for non-gtpu packets which is kept at a minimum.
  *
@@ -1061,7 +1065,7 @@ set_ip6_gtpu_bypass (vlib_main_t * vm,
 /*?
  * This command adds the 'ip6-gtpu-bypass' graph node for a given interface.
  * By adding the IPv6 gtpu-bypass graph node to an interface, the node checks
- *  for and validate input gtpu packet and bypass ip6-lookup, ip6-local,
+ * for and validate input gtpu packet and bypass ip6-lookup, ip6-local,
  * ip6-udp-lookup nodes to speedup gtpu packet forwarding. This node will
  * cause extra overhead to for non-gtpu packets which is kept at a minimum.
  *
@@ -1258,7 +1262,7 @@ gtpu_init (vlib_main_t * vm)
 				       sizeof (ip46_address_t),
 				       sizeof (mcast_shared_t));
 
-  gtm->fib_node_type = fib_node_register_new_type (&gtpu_vft);
+  gtm->fib_node_type = fib_node_register_new_type ("gtpu", &gtpu_vft);
 
   return 0;
 }

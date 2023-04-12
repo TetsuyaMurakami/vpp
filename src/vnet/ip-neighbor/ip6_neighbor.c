@@ -16,26 +16,36 @@
  */
 
 #include <vnet/ip-neighbor/ip6_neighbor.h>
+#include <vnet/ip-neighbor/ip_neighbor.api_enum.h>
 #include <vnet/util/throttle.h>
 #include <vnet/fib/fib_sas.h>
+#include <vnet/ip/ip_sas.h>
 
 /** ND throttling */
 static throttle_t nd_throttle;
 
+VLIB_REGISTER_LOG_CLASS (ip6_neighbor_log, static) = {
+  .class_name = "ip6",
+  .subclass_name = "neighbor",
+};
+
+#define log_debug(fmt, ...)                                                   \
+  vlib_log_debug (ip6_neighbor_log.class, fmt, __VA_ARGS__)
 void
-ip6_neighbor_probe_dst (u32 sw_if_index, const ip6_address_t * dst)
+ip6_neighbor_probe_dst (u32 sw_if_index, u32 thread_index,
+			const ip6_address_t *dst)
 {
   ip6_address_t src;
 
-  if (fib_sas6_get (sw_if_index, dst, &src))
-    ip6_neighbor_probe (vlib_get_main (), vnet_get_main (),
-			sw_if_index, &src, dst);
+  if (fib_sas6_get (sw_if_index, dst, &src) ||
+      ip6_sas_by_sw_if_index (sw_if_index, dst, &src))
+    ip6_neighbor_probe (vlib_get_main (), vnet_get_main (), sw_if_index,
+			thread_index, &src, dst);
 }
 
 void
-ip6_neighbor_advertise (vlib_main_t * vm,
-			vnet_main_t * vnm,
-			u32 sw_if_index, const ip6_address_t * addr)
+ip6_neighbor_advertise (vlib_main_t *vm, vnet_main_t *vnm, u32 sw_if_index,
+			u32 thread_index, const ip6_address_t *addr)
 {
   vnet_hw_interface_t *hi = vnet_get_sup_hw_interface (vnm, sw_if_index);
   ip6_main_t *i6m = &ip6_main;
@@ -47,9 +57,8 @@ ip6_neighbor_advertise (vlib_main_t * vm,
 
   if (addr)
     {
-      clib_warning
-	("Sending unsolicitated NA IP6 address %U on sw_if_idex %d",
-	 format_ip6_address, addr, sw_if_index);
+      log_debug ("Sending unsolicitated NA IP6 address %U on sw_if_idex %d",
+		 format_ip6_address, addr, sw_if_index);
 
       /* Form unsolicited neighbor advertisement packet from NS pkt template */
       int bogus_length;
@@ -97,6 +106,10 @@ ip6_neighbor_advertise (vlib_main_t * vm,
       to_next[0] = bi;
       f->n_vectors = 1;
       vlib_put_frame_to_node (vm, hi->output_node_index, f);
+
+      vlib_increment_simple_counter (
+	&ip_neighbor_counters[AF_IP6].ipnc[VLIB_TX][IP_NEIGHBOR_CTR_GRAT],
+	thread_index, sw_if_index, 1);
     }
 }
 
@@ -106,14 +119,6 @@ typedef enum
   IP6_NBR_NEXT_REPLY_TX,
   IP6_NBR_N_NEXT,
 } ip6_discover_neighbor_next_t;
-
-typedef enum
-{
-  IP6_NBR_ERROR_DROP,
-  IP6_NBR_ERROR_REQUEST_SENT,
-  IP6_NBR_ERROR_NO_SOURCE_ADDRESS,
-  IP6_NBR_ERROR_NO_BUFFERS,
-} ip6_discover_neighbor_error_t;
 
 static uword
 ip6_discover_neighbor_inline (vlib_main_t * vm,
@@ -180,6 +185,12 @@ ip6_discover_neighbor_inline (vlib_main_t * vm,
 	  to_next_drop += 1;
 	  n_left_to_next_drop -= 1;
 
+	  if (drop0)
+	    {
+	      p0->error = node->errors[IP6_NEIGHBOR_ERROR_THROTTLED];
+	      continue;
+	    }
+
 	  hw_if0 = vnet_get_sup_hw_interface (vnm, sw_if_index0);
 
 	  /* If the interface is link-down, drop the pkt */
@@ -198,7 +209,7 @@ ip6_discover_neighbor_inline (vlib_main_t * vm,
 
 	  if (drop0)
 	    {
-	      p0->error = node->errors[IP6_NBR_ERROR_DROP];
+	      p0->error = node->errors[IP6_NEIGHBOR_ERROR_DROP];
 	      continue;
 	    }
 
@@ -206,15 +217,16 @@ ip6_discover_neighbor_inline (vlib_main_t * vm,
 	   * Choose source address based on destination lookup
 	   * adjacency.
 	   */
-	  if (!fib_sas6_get (sw_if_index0, &ip0->dst_address, &src))
+	  if (!fib_sas6_get (sw_if_index0, &ip0->dst_address, &src) ||
+	      !ip6_sas_by_sw_if_index (sw_if_index0, &ip0->dst_address, &src))
 	    {
 	      /* There is no address on the interface */
-	      p0->error = node->errors[IP6_NBR_ERROR_NO_SOURCE_ADDRESS];
+	      p0->error = node->errors[IP6_NEIGHBOR_ERROR_NO_SOURCE_ADDRESS];
 	      continue;
 	    }
 
-	  b0 = ip6_neighbor_probe (vm, vnm, sw_if_index0,
-				   &src, &ip0->dst_address);
+	  b0 = ip6_neighbor_probe (vm, vnm, sw_if_index0, thread_index, &src,
+				   &ip0->dst_address);
 
 	  if (PREDICT_TRUE (NULL != b0))
 	    {
@@ -222,12 +234,12 @@ ip6_discover_neighbor_inline (vlib_main_t * vm,
 				sizeof (p0->opaque2));
 	      b0->flags |= p0->flags & VLIB_BUFFER_IS_TRACED;
 	      b0->trace_handle = p0->trace_handle;
-	      p0->error = node->errors[IP6_NBR_ERROR_REQUEST_SENT];
+	      p0->error = node->errors[IP6_NEIGHBOR_ERROR_REQUEST_SENT];
 	    }
 	  else
 	    {
 	      /* There is no address on the interface */
-	      p0->error = node->errors[IP6_NBR_ERROR_NO_BUFFERS];
+	      p0->error = node->errors[IP6_NEIGHBOR_ERROR_NO_BUFFERS];
 	      continue;
 	    }
 	}
@@ -251,13 +263,6 @@ ip6_glean (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
   return (ip6_discover_neighbor_inline (vm, node, frame, 1));
 }
 
-static char *ip6_discover_neighbor_error_strings[] = {
-  [IP6_NBR_ERROR_DROP] = "address overflow drops",
-  [IP6_NBR_ERROR_REQUEST_SENT] = "neighbor solicitations sent",
-  [IP6_NBR_ERROR_NO_SOURCE_ADDRESS] = "no source address for ND solicitation",
-  [IP6_NBR_ERROR_NO_BUFFERS] = "no buffers",
-};
-
 /* *INDENT-OFF* */
 VLIB_REGISTER_NODE (ip6_glean_node) =
 {
@@ -265,8 +270,8 @@ VLIB_REGISTER_NODE (ip6_glean_node) =
   .name = "ip6-glean",
   .vector_size = sizeof (u32),
   .format_trace = format_ip6_forward_next_trace,
-  .n_errors = ARRAY_LEN (ip6_discover_neighbor_error_strings),
-  .error_strings = ip6_discover_neighbor_error_strings,
+  .n_errors = IP6_NEIGHBOR_N_ERROR,
+  .error_counters = ip6_neighbor_error_counters,
   .n_next_nodes = IP6_NBR_N_NEXT,
   .next_nodes =
   {
@@ -280,8 +285,8 @@ VLIB_REGISTER_NODE (ip6_discover_neighbor_node) =
   .name = "ip6-discover-neighbor",
   .vector_size = sizeof (u32),
   .format_trace = format_ip6_forward_next_trace,
-  .n_errors = ARRAY_LEN (ip6_discover_neighbor_error_strings),
-  .error_strings = ip6_discover_neighbor_error_strings,
+  .n_errors = IP6_NEIGHBOR_N_ERROR,
+  .error_counters = ip6_neighbor_error_counters,
   .n_next_nodes = IP6_NBR_N_NEXT,
   .next_nodes =
   {
@@ -333,7 +338,7 @@ ip6_nd_main_loop_enter (vlib_main_t * vm)
 {
   vlib_thread_main_t *tm = &vlib_thread_main;
 
-  throttle_init (&nd_throttle, tm->n_vlib_mains, 1e-3);
+  throttle_init (&nd_throttle, tm->n_vlib_mains, THROTTLE_BITS, 1e-3);
 
   return 0;
 }

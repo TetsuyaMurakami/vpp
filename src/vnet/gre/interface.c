@@ -156,12 +156,58 @@ gre_tunnel_stack (adj_index_t ai)
 }
 
 /**
+ * mgre_tunnel_stack
+ *
+ * 'stack' (resolve the recursion for) the tunnel's midchain adjacency
+ */
+static void
+mgre_tunnel_stack (adj_index_t ai)
+{
+  gre_main_t *gm = &gre_main;
+  const ip_adjacency_t *adj;
+  const gre_tunnel_t *gt;
+  u32 sw_if_index;
+
+  adj = adj_get (ai);
+  sw_if_index = adj->rewrite_header.sw_if_index;
+
+  if ((vec_len (gm->tunnel_index_by_sw_if_index) <= sw_if_index) ||
+      (~0 == gm->tunnel_index_by_sw_if_index[sw_if_index]))
+    return;
+
+  gt = pool_elt_at_index (gm->tunnels,
+			  gm->tunnel_index_by_sw_if_index[sw_if_index]);
+
+  if ((vnet_hw_interface_get_flags (vnet_get_main (), gt->hw_if_index) &
+       VNET_HW_INTERFACE_FLAG_LINK_UP) == 0)
+    {
+      adj_midchain_delegate_unstack (ai);
+    }
+  else
+    {
+      const teib_entry_t *ne;
+
+      ne = teib_entry_find_46 (sw_if_index, adj->ia_nh_proto,
+			       &adj->sub_type.nbr.next_hop);
+      if (NULL != ne)
+	teib_entry_adj_stack (ne, ai);
+    }
+}
+
+/**
  * @brief Call back when restacking all adjacencies on a GRE interface
  */
 static adj_walk_rc_t
 gre_adj_walk_cb (adj_index_t ai, void *ctx)
 {
   gre_tunnel_stack (ai);
+
+  return (ADJ_WALK_RC_CONTINUE);
+}
+static adj_walk_rc_t
+mgre_adj_walk_cb (adj_index_t ai, void *ctx)
+{
+  mgre_tunnel_stack (ai);
 
   return (ADJ_WALK_RC_CONTINUE);
 }
@@ -176,7 +222,15 @@ gre_tunnel_restack (gre_tunnel_t * gt)
    */
   FOR_EACH_FIB_IP_PROTOCOL (proto)
   {
-    adj_nbr_walk (gt->sw_if_index, proto, gre_adj_walk_cb, NULL);
+    switch (gt->mode)
+      {
+      case TUNNEL_MODE_P2P:
+	adj_nbr_walk (gt->sw_if_index, proto, gre_adj_walk_cb, NULL);
+	break;
+      case TUNNEL_MODE_MP:
+	adj_nbr_walk (gt->sw_if_index, proto, mgre_adj_walk_cb, NULL);
+	break;
+      }
   }
 }
 
@@ -299,7 +353,7 @@ static walk_rc_t
 gre_tunnel_add_teib_walk (index_t nei, void *ctx)
 {
   gre_tunnel_t *t = ctx;
-  gre_tunnel_key_t key;
+  gre_tunnel_key_t key = {};
 
   gre_teib_mk_key (t, teib_entry_get (nei), &key);
   gre_tunnel_db_add (t, &key);
@@ -313,12 +367,9 @@ vnet_gre_tunnel_add (vnet_gre_tunnel_add_del_args_t * a,
 {
   gre_main_t *gm = &gre_main;
   vnet_main_t *vnm = gm->vnet_main;
-  ip4_main_t *im4 = &ip4_main;
-  ip6_main_t *im6 = &ip6_main;
   gre_tunnel_t *t;
   vnet_hw_interface_t *hi;
   u32 hw_if_index, sw_if_index;
-  clib_error_t *error;
   u8 is_ipv6 = a->is_ipv6;
   gre_tunnel_key_t key;
 
@@ -363,17 +414,16 @@ vnet_gre_tunnel_add (vnet_gre_tunnel_add_del_args_t * a,
     }
   else
     {
+      vnet_eth_interface_registration_t eir = {};
+
       /* Default MAC address (d00b:eed0:0000 + sw_if_index) */
       u8 address[6] =
 	{ 0xd0, 0x0b, 0xee, 0xd0, (u8) (t_idx >> 8), (u8) t_idx };
-      error =
-	ethernet_register_interface (vnm, gre_device_class.index, t_idx,
-				     address, &hw_if_index, 0);
-      if (error)
-	{
-	  clib_error_report (error);
-	  return VNET_API_ERROR_INVALID_REGISTRATION;
-	}
+
+      eir.dev_class_index = gre_device_class.index;
+      eir.dev_instance = t_idx;
+      eir.address = address;
+      hw_if_index = vnet_eth_register_interface (vnm, &eir);
     }
 
   /* Set GRE tunnel interface output node (not used for L3 payload) */
@@ -397,15 +447,13 @@ vnet_gre_tunnel_add (vnet_gre_tunnel_add_del_args_t * a,
 
   if (!is_ipv6)
     {
-      vec_validate (im4->fib_index_by_sw_if_index, sw_if_index);
-      hi->min_packet_bytes =
-	64 + sizeof (gre_header_t) + sizeof (ip4_header_t);
+      hi->frame_overhead = sizeof (gre_header_t) + sizeof (ip4_header_t);
+      hi->min_frame_size = hi->frame_overhead + 64;
     }
   else
     {
-      vec_validate (im6->fib_index_by_sw_if_index, sw_if_index);
-      hi->min_packet_bytes =
-	64 + sizeof (gre_header_t) + sizeof (ip6_header_t);
+      hi->frame_overhead = sizeof (gre_header_t) + sizeof (ip6_header_t);
+      hi->min_frame_size = hi->frame_overhead + 64;
     }
 
   /* Standard default gre MTU. */
@@ -454,9 +502,15 @@ vnet_gre_tunnel_add (vnet_gre_tunnel_add_del_args_t * a,
     {
       t->l2_adj_index = adj_nbr_add_or_lock
 	(t->tunnel_dst.fp_proto, VNET_LINK_ETHERNET, &zero_addr, sw_if_index);
+      vnet_set_interface_l3_output_node (gm->vlib_main, sw_if_index,
+					 (u8 *) "tunnel-output-no-count");
       gre_update_adj (vnm, t->sw_if_index, t->l2_adj_index);
     }
-
+  else
+    {
+      vnet_set_interface_l3_output_node (gm->vlib_main, sw_if_index,
+					 (u8 *) "tunnel-output");
+    }
   if (sw_if_indexp)
     *sw_if_indexp = sw_if_index;
 
@@ -512,6 +566,7 @@ vnet_gre_tunnel_delete (vnet_gre_tunnel_add_del_args_t * a,
       clib_mem_free (t->gre_sn);
     }
 
+  vnet_reset_interface_l3_output_node (gm->vlib_main, sw_if_index);
   hash_unset (gm->instance_used, t->user_instance);
   gre_tunnel_db_remove (t, &key);
   pool_put (gm->tunnels, t);

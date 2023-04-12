@@ -17,10 +17,11 @@
 
 #include <vnet/ipsec/ipsec.h>
 
-#define foreach_ipsec_protect_flags \
-  _(L2, 1, "l2")                    \
-  _(ENCAPED, 2, "encapped")         \
-  _(ITF, 4, "itf")                  \
+#define foreach_ipsec_protect_flags                                           \
+  _ (L2, 1, "l2")                                                             \
+  _ (ENCAPED, 2, "encapped")                                                  \
+  _ (ITF, 4, "itf")                                                           \
+  _ (FEAT, 8, "feat")
 
 typedef enum ipsec_protect_flags_t_
 {
@@ -162,6 +163,9 @@ extern u8 *format_ipsec_tun_protect_index (u8 * s, va_list * args);
 extern void ipsec_tun_register_nodes (ip_address_family_t af);
 extern void ipsec_tun_unregister_nodes (ip_address_family_t af);
 
+extern void ipsec_tun_table_init (ip_address_family_t af, uword table_size,
+				  u32 n_buckets);
+
 /*
  * DP API
  */
@@ -178,7 +182,6 @@ always_inline index_t
 ipsec_tun_protect_get_sa_out (adj_index_t ai)
 {
   ASSERT (vec_len (ipsec_tun_protect_sa_by_adj_index) > ai);
-  ASSERT (INDEX_INVALID != ipsec_tun_protect_sa_by_adj_index[ai]);
 
   return (ipsec_tun_protect_sa_by_adj_index[ai]);
 }

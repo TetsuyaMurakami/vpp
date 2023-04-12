@@ -31,7 +31,7 @@
  * Type exposure is to allow the DP fast/inlined access
  */
 #define MPLS_FIB_KEY_SIZE 21
-#define MPLS_FIB_DB_SIZE (1 << (MPLS_FIB_KEY_SIZE-1))
+#define MPLS_FIB_DB_SIZE (1 << MPLS_FIB_KEY_SIZE)
 
 /**
  * There are no options for controlling the MPLS flow hash,
@@ -54,7 +54,7 @@ typedef struct mpls_fib_t_
 
   /**
    * The load-balance indices keyed by 21 bit label+eos bit.
-   * A flat array for maximum lookup performace.
+   * A flat array for maximum lookup performance.
    */
   index_t mf_lbs[MPLS_FIB_DB_SIZE];
 } mpls_fib_t;

@@ -9,7 +9,7 @@ import multiprocessing
 import queue
 import logging
 
-logger = logging.getLogger('vpp_papi.transport')
+logger = logging.getLogger("vpp_papi.transport")
 logger.addHandler(logging.NullHandler())
 
 
@@ -23,10 +23,10 @@ class VppTransport:
 
     def __init__(self, parent, read_timeout, server_address):
         self.connected = False
-        self.read_timeout = read_timeout if read_timeout > 0 else 1
+        self.read_timeout = read_timeout if read_timeout > 0 else None
         self.parent = parent
         self.server_address = server_address
-        self.header = struct.Struct('>QII')
+        self.header = struct.Struct(">QII")
         self.message_table = {}
         # These queues can be accessed async.
         # They are always up, but replaced on connect.
@@ -41,11 +41,10 @@ class VppTransport:
     def msg_thread_func(self):
         while True:
             try:
-                rlist, _, _ = select.select([self.socket,
-                                             self.sque._reader], [], [])
-            except socket.error:
+                rlist, _, _ = select.select([self.socket, self.sque._reader], [], [])
+            except (socket.error, ValueError):
                 # Terminate thread
-                logging.error('select failed')
+                logging.error("select failed")
                 self.q.put(None)
                 return
 
@@ -66,21 +65,21 @@ class VppTransport:
                         return
                     # Put either to local queue or if context == 0
                     # callback queue
-                    if self.parent.has_context(msg):
+                    if not self.do_async and self.parent.has_context(msg):
                         self.q.put(msg)
                     else:
                         self.parent.msg_handler_async(msg)
                 else:
-                    raise VppTransportSocketIOError(
-                        2, 'Unknown response from select')
+                    raise VppTransportSocketIOError(2, "Unknown response from select")
 
-    def connect(self, name, pfx, msg_handler, rx_qlen):
+    def connect(self, name, pfx, msg_handler, rx_qlen, do_async=False):
         # TODO: Reorder the actions and add "roll-backs",
         # to restore clean disconnect state when failure happens durng connect.
 
         if self.message_thread is not None:
             raise VppTransportSocketIOError(
-                1, "PAPI socket transport connect: Need to disconnect first.")
+                1, "PAPI socket transport connect: Need to disconnect first."
+            )
 
         # Create a UDS socket
         self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -90,8 +89,8 @@ class VppTransport:
         try:
             self.socket.connect(self.server_address)
         except socket.error as msg:
-            logging.error("{} on socket {}".format(msg, self.server_address))
-            raise
+            # logging.error("{} on socket {}".format(msg, self.server_address))
+            raise msg
 
         self.connected = True
 
@@ -107,19 +106,17 @@ class VppTransport:
         self.message_thread = threading.Thread(target=self.msg_thread_func)
 
         # Initialise sockclnt_create
-        sockclnt_create = self.parent.messages['sockclnt_create']
-        sockclnt_create_reply = self.parent.messages['sockclnt_create_reply']
+        sockclnt_create = self.parent.messages["sockclnt_create"]
+        sockclnt_create_reply = self.parent.messages["sockclnt_create_reply"]
 
-        args = {'_vl_msg_id': 15,
-                'name': name,
-                'context': 124}
+        args = {"_vl_msg_id": 15, "name": name, "context": 124}
         b = sockclnt_create.pack(args)
         self.write(b)
         msg = self._read()
         hdr, length = self.parent.header.unpack(msg, 0)
         if hdr.msgid != 16:
             # TODO: Add first numeric argument.
-            raise VppTransportSocketIOError('Invalid reply message')
+            raise VppTransportSocketIOError("Invalid reply message")
 
         r, length = sockclnt_create_reply.unpack(msg)
         self.socket_index = r.index
@@ -128,6 +125,7 @@ class VppTransport:
             self.message_table[n] = m.index
 
         self.message_thread.daemon = True
+        self.do_async = do_async
         self.message_thread.start()
 
         return 0
@@ -184,7 +182,7 @@ class VppTransport:
     def write(self, buf):
         """Send a binary-packed message to VPP."""
         if not self.connected:
-            raise VppTransportSocketIOError(1, 'Not connected')
+            raise VppTransportSocketIOError(1, "Not connected")
 
         # Send header
         header = self.header.pack(0, len(buf), 0)
@@ -192,8 +190,7 @@ class VppTransport:
             self.socket.sendall(header)
             self.socket.sendall(buf)
         except socket.error as err:
-            raise VppTransportSocketIOError(1, 'Sendall error: {err!r}'.format(
-                err=err))
+            raise VppTransportSocketIOError(1, "Sendall error: {err!r}".format(err=err))
 
     def _read_fixed(self, size):
         """Repeat receive until fixed size is read. Return empty on error."""
@@ -223,11 +220,11 @@ class VppTransport:
         msg = self._read_fixed(hdrlen)
         if hdrlen == len(msg):
             return msg
-        raise VppTransportSocketIOError(1, 'Unknown socket read error')
+        raise VppTransportSocketIOError(1, "Unknown socket read error")
 
     def read(self, timeout=None):
         if not self.connected:
-            raise VppTransportSocketIOError(1, 'Not connected')
+            raise VppTransportSocketIOError(1, "Not connected")
         if timeout is None:
             timeout = self.read_timeout
         try:

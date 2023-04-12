@@ -23,10 +23,10 @@
 #include <dpdk/device/dpdk.h>
 #include <vnet/classify/vnet_classify.h>
 #include <vnet/mpls/packet.h>
-#include <vnet/handoff.h>
 #include <vnet/devices/devices.h>
 #include <vnet/interface/rx_queue_funcs.h>
 #include <vnet/feature/feature.h>
+#include <vnet/tcp/tcp_packet.h>
 
 #include <dpdk/device/dpdk_priv.h>
 
@@ -36,9 +36,13 @@ static char *dpdk_error_strings[] = {
 #undef _
 };
 
-/* make sure all flags we need are stored in lower 8 bits */
-STATIC_ASSERT ((PKT_RX_IP_CKSUM_BAD | PKT_RX_FDIR) <
-	       256, "dpdk flags not un lower byte, fix needed");
+/* make sure all flags we need are stored in lower 32 bits */
+STATIC_ASSERT ((u64) (RTE_MBUF_F_RX_IP_CKSUM_BAD | RTE_MBUF_F_RX_L4_CKSUM_BAD |
+		      RTE_MBUF_F_RX_FDIR | RTE_MBUF_F_RX_LRO) < (1ULL << 32),
+	       "dpdk flags not in lower word, fix needed");
+
+STATIC_ASSERT (RTE_MBUF_F_RX_L4_CKSUM_BAD == (1ULL << 3),
+	       "bit number of RTE_MBUF_F_RX_L4_CKSUM_BAD is no longer 3!");
 
 static_always_inline uword
 dpdk_process_subseq_segs (vlib_main_t * vm, vlib_buffer_t * b,
@@ -86,10 +90,10 @@ dpdk_process_subseq_segs (vlib_main_t * vm, vlib_buffer_t * b,
 static_always_inline void
 dpdk_prefetch_mbuf_x4 (struct rte_mbuf *mb[])
 {
-  CLIB_PREFETCH (mb[0], CLIB_CACHE_LINE_BYTES, LOAD);
-  CLIB_PREFETCH (mb[1], CLIB_CACHE_LINE_BYTES, LOAD);
-  CLIB_PREFETCH (mb[2], CLIB_CACHE_LINE_BYTES, LOAD);
-  CLIB_PREFETCH (mb[3], CLIB_CACHE_LINE_BYTES, LOAD);
+  clib_prefetch_load (mb[0]);
+  clib_prefetch_load (mb[1]);
+  clib_prefetch_load (mb[2]);
+  clib_prefetch_load (mb[3]);
 }
 
 static_always_inline void
@@ -97,13 +101,13 @@ dpdk_prefetch_buffer_x4 (struct rte_mbuf *mb[])
 {
   vlib_buffer_t *b;
   b = vlib_buffer_from_rte_mbuf (mb[0]);
-  CLIB_PREFETCH (b, CLIB_CACHE_LINE_BYTES, LOAD);
+  clib_prefetch_store (b);
   b = vlib_buffer_from_rte_mbuf (mb[1]);
-  CLIB_PREFETCH (b, CLIB_CACHE_LINE_BYTES, LOAD);
+  clib_prefetch_store (b);
   b = vlib_buffer_from_rte_mbuf (mb[2]);
-  CLIB_PREFETCH (b, CLIB_CACHE_LINE_BYTES, LOAD);
+  clib_prefetch_store (b);
   b = vlib_buffer_from_rte_mbuf (mb[3]);
-  CLIB_PREFETCH (b, CLIB_CACHE_LINE_BYTES, LOAD);
+  clib_prefetch_store (b);
 }
 
 /** \brief Main DPDK input node
@@ -125,18 +129,18 @@ dpdk_prefetch_buffer_x4 (struct rte_mbuf *mb[])
 
     @em Uses:
     - <code>struct rte_mbuf mb->ol_flags</code>
-        - PKT_RX_IP_CKSUM_BAD
+	- RTE_MBUF_F_RX_IP_CKSUM_BAD
 
     @em Sets:
     - <code>b->error</code> if the packet is to be dropped immediately
     - <code>b->current_data, b->current_length</code>
-        - adjusted as needed to skip the L2 header in  direct-dispatch cases
+	- adjusted as needed to skip the L2 header in  direct-dispatch cases
     - <code>vnet_buffer(b)->sw_if_index[VLIB_RX]</code>
-        - rx interface sw_if_index
+	- rx interface sw_if_index
     - <code>vnet_buffer(b)->sw_if_index[VLIB_TX] = ~0</code>
-        - required by ipX-lookup
+	- required by ipX-lookup
     - <code>b->flags</code>
-        - to indicate multi-segment pkts (VLIB_BUFFER_NEXT_PRESENT), etc.
+	- to indicate multi-segment pkts (VLIB_BUFFER_NEXT_PRESENT), etc.
 
     <em>Next Nodes:</em>
     - Static arcs to: error-drop, ethernet-input,
@@ -145,31 +149,30 @@ dpdk_prefetch_buffer_x4 (struct rte_mbuf *mb[])
       <code>xd->per_interface_next_index</code>
 */
 
-static_always_inline u16
-dpdk_ol_flags_extract (struct rte_mbuf **mb, u16 * flags, int count)
+static_always_inline u32
+dpdk_ol_flags_extract (struct rte_mbuf **mb, u32 *flags, int count)
 {
-  u16 rv = 0;
+  u32 rv = 0;
   int i;
   for (i = 0; i < count; i++)
     {
       /* all flags we are interested in are in lower 8 bits but
          that might change */
-      flags[i] = (u16) mb[i]->ol_flags;
+      flags[i] = (u32) mb[i]->ol_flags;
       rv |= flags[i];
     }
   return rv;
 }
 
 static_always_inline uword
-dpdk_process_rx_burst (vlib_main_t * vm, dpdk_per_thread_data_t * ptd,
-		       uword n_rx_packets, int maybe_multiseg,
-		       u16 * or_flagsp)
+dpdk_process_rx_burst (vlib_main_t *vm, dpdk_per_thread_data_t *ptd,
+		       uword n_rx_packets, int maybe_multiseg, u32 *or_flagsp)
 {
   u32 n_left = n_rx_packets;
   vlib_buffer_t *b[4];
   struct rte_mbuf **mb = ptd->mbufs;
   uword n_bytes = 0;
-  u16 *flags, or_flags = 0;
+  u32 *flags, or_flags = 0;
   vlib_buffer_t bt;
 
   mb = ptd->mbufs;
@@ -216,11 +219,6 @@ dpdk_process_rx_burst (vlib_main_t * vm, dpdk_per_thread_data_t * ptd,
 	  n_bytes += dpdk_process_subseq_segs (vm, b[3], mb[3], &bt);
 	}
 
-      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[0]);
-      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[1]);
-      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[2]);
-      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[3]);
-
       /* next */
       mb += 4;
       n_left -= 4;
@@ -238,7 +236,6 @@ dpdk_process_rx_burst (vlib_main_t * vm, dpdk_per_thread_data_t * ptd,
 
       if (maybe_multiseg)
 	n_bytes += dpdk_process_subseq_segs (vm, b[0], mb[0], &bt);
-      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[0]);
 
       /* next */
       mb += 1;
@@ -260,7 +257,7 @@ dpdk_process_flow_offload (dpdk_device_t * xd, dpdk_per_thread_data_t * ptd,
   /* TODO prefetch and quad-loop */
   for (n = 0; n < n_rx_packets; n++)
     {
-      if ((ptd->flags[n] & PKT_RX_FDIR_ID) == 0)
+      if ((ptd->flags[n] & RTE_MBUF_F_RX_FDIR_ID) == 0)
 	continue;
 
       fle = pool_elt_at_index (xd->flow_lookup_entries,
@@ -283,6 +280,65 @@ dpdk_process_flow_offload (dpdk_device_t * xd, dpdk_per_thread_data_t * ptd,
     }
 }
 
+static_always_inline u16
+dpdk_lro_find_l4_hdr_sz (vlib_buffer_t *b)
+{
+  u16 l4_hdr_sz = 0;
+  u16 current_offset = 0;
+  ethernet_header_t *e;
+  tcp_header_t *tcp;
+  u8 *data = vlib_buffer_get_current (b);
+  u16 ethertype;
+  e = (void *) data;
+  current_offset += sizeof (e[0]);
+  ethertype = clib_net_to_host_u16 (e->type);
+  if (ethernet_frame_is_tagged (ethertype))
+    {
+      ethernet_vlan_header_t *vlan = (ethernet_vlan_header_t *) (e + 1);
+      ethertype = clib_net_to_host_u16 (vlan->type);
+      current_offset += sizeof (*vlan);
+      if (ethertype == ETHERNET_TYPE_VLAN)
+	{
+	  vlan++;
+	  current_offset += sizeof (*vlan);
+	  ethertype = clib_net_to_host_u16 (vlan->type);
+	}
+    }
+  data += current_offset;
+  if (ethertype == ETHERNET_TYPE_IP4)
+    {
+      data += sizeof (ip4_header_t);
+      tcp = (void *) data;
+      l4_hdr_sz = tcp_header_bytes (tcp);
+    }
+  else
+    {
+      /* FIXME: extension headers...*/
+      data += sizeof (ip6_header_t);
+      tcp = (void *) data;
+      l4_hdr_sz = tcp_header_bytes (tcp);
+    }
+  return l4_hdr_sz;
+}
+
+static_always_inline void
+dpdk_process_lro_offload (dpdk_device_t *xd, dpdk_per_thread_data_t *ptd,
+			  uword n_rx_packets)
+{
+  uword n;
+  vlib_buffer_t *b0;
+  for (n = 0; n < n_rx_packets; n++)
+    {
+      b0 = vlib_buffer_from_rte_mbuf (ptd->mbufs[n]);
+      if (ptd->flags[n] & RTE_MBUF_F_RX_LRO)
+	{
+	  b0->flags |= VNET_BUFFER_F_GSO;
+	  vnet_buffer2 (b0)->gso_size = ptd->mbufs[n]->tso_segsz;
+	  vnet_buffer2 (b0)->gso_l4_hdr_sz = dpdk_lro_find_l4_hdr_sz (b0);
+	}
+    }
+}
+
 static_always_inline u32
 dpdk_device_input (vlib_main_t * vm, dpdk_main_t * dm, dpdk_device_t * xd,
 		   vlib_node_runtime_t * node, u32 thread_index, u16 queue_id)
@@ -295,7 +351,7 @@ dpdk_device_input (vlib_main_t * vm, dpdk_main_t * dm, dpdk_device_t * xd,
   struct rte_mbuf **mb;
   vlib_buffer_t *b0;
   u16 *next;
-  u16 or_flags;
+  u32 or_flags;
   u32 n;
   int single_next = 0;
 
@@ -309,12 +365,13 @@ dpdk_device_input (vlib_main_t * vm, dpdk_main_t * dm, dpdk_device_t * xd,
   /* get up to DPDK_RX_BURST_SZ buffers from PMD */
   while (n_rx_packets < DPDK_RX_BURST_SZ)
     {
-      n = rte_eth_rx_burst (xd->port_id, queue_id,
-			    ptd->mbufs + n_rx_packets,
-			    DPDK_RX_BURST_SZ - n_rx_packets);
+      u32 n_to_rx = clib_min (DPDK_RX_BURST_SZ - n_rx_packets, 32);
+
+      n = rte_eth_rx_burst (xd->port_id, queue_id, ptd->mbufs + n_rx_packets,
+			    n_to_rx);
       n_rx_packets += n;
 
-      if (n < 32)
+      if (n < n_to_rx)
 	break;
     }
 
@@ -324,6 +381,7 @@ dpdk_device_input (vlib_main_t * vm, dpdk_main_t * dm, dpdk_device_t * xd,
   /* Update buffer template */
   vnet_buffer (bt)->sw_if_index[VLIB_RX] = xd->sw_if_index;
   bt->error = node->errors[DPDK_ERROR_NONE];
+  bt->flags = xd->buffer_flags;
   /* as DPDK is allocating empty buffers from mempool provided before interface
      start for each queue, it is safe to store this in the template */
   bt->buffer_pool_index = rxq->buffer_pool_index;
@@ -345,7 +403,27 @@ dpdk_device_input (vlib_main_t * vm, dpdk_main_t * dm, dpdk_device_t * xd,
   else
     n_rx_bytes = dpdk_process_rx_burst (vm, ptd, n_rx_packets, 0, &or_flags);
 
-  if (PREDICT_FALSE (or_flags & PKT_RX_FDIR))
+  if (PREDICT_FALSE ((or_flags & RTE_MBUF_F_RX_LRO)))
+    dpdk_process_lro_offload (xd, ptd, n_rx_packets);
+
+  if (PREDICT_FALSE ((or_flags & RTE_MBUF_F_RX_L4_CKSUM_BAD) &&
+		     (xd->buffer_flags & VNET_BUFFER_F_L4_CHECKSUM_CORRECT)))
+    {
+      for (n = 0; n < n_rx_packets; n++)
+	{
+	  /* Check and reset VNET_BUFFER_F_L4_CHECKSUM_CORRECT flag
+	     if RTE_MBUF_F_RX_L4_CKSUM_BAD is set.
+	     The magic num 3 is the bit number of RTE_MBUF_F_RX_L4_CKSUM_BAD
+	     which is defined in DPDK.
+	     Have made a STATIC_ASSERT in this file to ensure this.
+	   */
+	  b0 = vlib_buffer_from_rte_mbuf (ptd->mbufs[n]);
+	  b0->flags ^= (ptd->flags[n] & RTE_MBUF_F_RX_L4_CKSUM_BAD)
+		       << (VNET_BUFFER_F_LOG2_L4_CHECKSUM_CORRECT - 3);
+	}
+    }
+
+  if (PREDICT_FALSE (or_flags & RTE_MBUF_F_RX_FDIR))
     {
       /* some packets will need to go to different next nodes */
       for (n = 0; n < n_rx_packets; n++)
@@ -354,7 +432,7 @@ dpdk_device_input (vlib_main_t * vm, dpdk_main_t * dm, dpdk_device_t * xd,
       /* flow offload - process if rx flow offload enabled and at least one
          packet is marked */
       if (PREDICT_FALSE ((xd->flags & DPDK_DEVICE_FLAG_RX_FLOW_OFFLOAD) &&
-			 (or_flags & PKT_RX_FDIR)))
+			 (or_flags & RTE_MBUF_F_RX_FDIR)))
 	dpdk_process_flow_offload (xd, ptd, n_rx_packets);
 
       /* enqueue buffers to the next node */
@@ -391,7 +469,7 @@ dpdk_device_input (vlib_main_t * vm, dpdk_main_t * dm, dpdk_device_t * xd,
 	     marked as ip4 checksum bad we can notify ethernet input so it
 	     can send pacets to ip4-input-no-checksum node */
 	  if (xd->flags & DPDK_DEVICE_FLAG_RX_IP4_CKSUM &&
-	      (or_flags & PKT_RX_IP_CKSUM_BAD) == 0)
+	      (or_flags & RTE_MBUF_F_RX_IP_CKSUM_BAD) == 0)
 	    f->flags |= ETH_INPUT_FRAME_F_IP4_CKSUM_OK;
 	  vlib_frame_no_append (f);
 	}
@@ -465,7 +543,7 @@ VLIB_NODE_FN (dpdk_input_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
   dpdk_device_t *xd;
   uword n_rx_packets = 0;
   vnet_hw_if_rxq_poll_vector_t *pv;
-  u32 thread_index = node->thread_index;
+  u32 thread_index = vm->thread_index;
 
   /*
    * Poll all devices on this cpu for input/interrupts.

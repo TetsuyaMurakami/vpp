@@ -57,6 +57,7 @@ typedef struct transport_send_params_
     struct
     {
       u32 max_burst_size;
+      u32 bytes_dequeued;
     };
   };
   transport_snd_flags_t flags;
@@ -71,9 +72,10 @@ typedef struct _transport_proto_vft
   /*
    * Setup
    */
-  u32 (*start_listen) (u32 session_index, transport_endpoint_t * lcl);
+  u32 (*start_listen) (u32 session_index, transport_endpoint_cfg_t *lcl);
   u32 (*stop_listen) (u32 conn_index);
   int (*connect) (transport_endpoint_cfg_t * rmt);
+  void (*half_close) (u32 conn_index, u32 thread_index);
   void (*close) (u32 conn_index, u32 thread_index);
   void (*reset) (u32 conn_index, u32 thread_index);
   void (*cleanup) (u32 conn_index, u32 thread_index);
@@ -84,7 +86,8 @@ typedef struct _transport_proto_vft
    * Transmission
    */
 
-  u32 (*push_header) (transport_connection_t * tconn, vlib_buffer_t * b);
+  u32 (*push_header) (transport_connection_t *tconn, vlib_buffer_t **b,
+		      u32 n_bufs);
   int (*send_params) (transport_connection_t * tconn,
 		      transport_send_params_t *sp);
   void (*update_time) (f64 time_now, u8 thread_index);
@@ -107,13 +110,15 @@ typedef struct _transport_proto_vft
   u8 *(*format_half_open) (u8 * s, va_list * args);
 
   /*
-   *  Properties retrieval
+   *  Properties retrieval/setting
    */
   void (*get_transport_endpoint) (u32 conn_index, u32 thread_index,
 				  transport_endpoint_t *tep, u8 is_lcl);
   void (*get_transport_listener_endpoint) (u32 conn_index,
 					   transport_endpoint_t *tep,
 					   u8 is_lcl);
+  int (*attribute) (u32 conn_index, u32 thread_index, u8 is_get,
+		    transport_endpt_attr_t *attr);
 
   /*
    * Properties
@@ -124,18 +129,18 @@ typedef struct _transport_proto_vft
 
 extern transport_proto_vft_t *tp_vfts;
 
-#define transport_proto_foreach(VAR, BODY)			\
-do {								\
-    for (VAR = 0; VAR < vec_len (tp_vfts); VAR++)		\
-      if (tp_vfts[VAR].push_header != 0)			\
-	do { BODY; } while (0);					\
-} while (0)
+#define transport_proto_foreach(VAR, VAR_ALLOW_BM)                            \
+  for (VAR = 0; VAR < vec_len (tp_vfts); VAR++)                               \
+    if (tp_vfts[VAR].push_header != 0)                                        \
+      if (VAR_ALLOW_BM & (1 << VAR))
 
 int transport_connect (transport_proto_t tp, transport_endpoint_cfg_t * tep);
+void transport_half_close (transport_proto_t tp, u32 conn_index,
+			   u8 thread_index);
 void transport_close (transport_proto_t tp, u32 conn_index, u8 thread_index);
 void transport_reset (transport_proto_t tp, u32 conn_index, u8 thread_index);
 u32 transport_start_listen (transport_proto_t tp, u32 session_index,
-			    transport_endpoint_t * tep);
+			    transport_endpoint_cfg_t *tep);
 u32 transport_stop_listen (transport_proto_t tp, u32 conn_index);
 void transport_cleanup (transport_proto_t tp, u32 conn_index,
 			u8 thread_index);
@@ -145,6 +150,9 @@ void transport_get_endpoint (transport_proto_t tp, u32 conn_index,
 			     u8 is_lcl);
 void transport_get_listener_endpoint (transport_proto_t tp, u32 conn_index,
 				      transport_endpoint_t * tep, u8 is_lcl);
+int transport_connection_attribute (transport_proto_t tp, u32 conn_index,
+				    u8 thread_index, u8 is_get,
+				    transport_endpt_attr_t *attr);
 
 static inline transport_connection_t *
 transport_get_connection (transport_proto_t tp, u32 conn_index,
@@ -238,13 +246,14 @@ transport_register_new_protocol (const transport_proto_vft_t * vft,
 transport_proto_vft_t *transport_protocol_get_vft (transport_proto_t tp);
 void transport_update_time (clib_time_type_t time_now, u8 thread_index);
 
-int transport_alloc_local_port (u8 proto, ip46_address_t * ip);
-int transport_alloc_local_endpoint (u8 proto, transport_endpoint_cfg_t * rmt,
-				    ip46_address_t * lcl_addr,
-				    u16 * lcl_port);
+int transport_alloc_local_port (u8 proto, ip46_address_t *ip,
+				transport_endpoint_cfg_t *rmt);
+int transport_alloc_local_endpoint (u8 proto, transport_endpoint_cfg_t *rmt,
+				    ip46_address_t *lcl_addr, u16 *lcl_port);
 void transport_share_local_endpoint (u8 proto, ip46_address_t * lcl_ip,
 				     u16 port);
-void transport_endpoint_cleanup (u8 proto, ip46_address_t * lcl_ip, u16 port);
+int transport_release_local_endpoint (u8 proto, ip46_address_t *lcl_ip,
+				      u16 port);
 void transport_enable_disable (vlib_main_t * vm, u8 is_en);
 void transport_init (void);
 
@@ -321,6 +330,19 @@ transport_connection_is_tx_paced (transport_connection_t * tc)
   return (tc->flags & TRANSPORT_CONNECTION_F_IS_TX_PACED);
 }
 
+/**
+ * Clear descheduled flag and update pacer if needed
+ *
+ * To add session to scheduler use @ref transport_connection_reschedule
+ */
+always_inline void
+transport_connection_clear_descheduled (transport_connection_t *tc)
+{
+  tc->flags &= ~TRANSPORT_CONNECTION_F_DESCHED;
+  if (transport_connection_is_tx_paced (tc))
+    transport_connection_tx_pacer_reset_bucket (tc, 0 /* bucket */);
+}
+
 u8 *format_transport_pacer (u8 * s, va_list * args);
 
 /**
@@ -338,6 +360,14 @@ void transport_connection_update_tx_bytes (transport_connection_t * tc,
 void
 transport_connection_tx_pacer_update_bytes (transport_connection_t * tc,
 					    u32 bytes);
+
+/**
+ * Request pacer time update
+ *
+ * @param thread_index	thread for which time is updated
+ * @param now		time now
+ */
+void transport_update_pacer_time (u32 thread_index, clib_time_type_t now);
 
 #endif /* SRC_VNET_SESSION_TRANSPORT_H_ */
 

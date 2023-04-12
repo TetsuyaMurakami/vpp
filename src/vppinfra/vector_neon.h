@@ -17,9 +17,6 @@
 #define included_vector_neon_h
 #include <arm_neon.h>
 
-/* Arithmetic */
-#define u16x8_sub_saturate(a,b) vsubq_u16(a,b)
-#define i16x8_sub_saturate(a,b) vsubq_s16(a,b)
 /* Dummy. Aid making uniform macros */
 #define vreinterpretq_u8_u8(a)  a
 /* Implement the missing intrinsics to make uniform macros */
@@ -54,43 +51,60 @@ u8x16_compare_byte_mask (u8x16 v)
 #define foreach_neon_vec128f \
   _(f,32,4,f32) _(f,64,2,f64)
 
-#define _(t, s, c, i) \
-static_always_inline t##s##x##c						\
-t##s##x##c##_splat (t##s x)						\
-{ return (t##s##x##c) vdupq_n_##i (x); }				\
-\
-static_always_inline t##s##x##c						\
-t##s##x##c##_load_unaligned (void *p)					\
-{ return (t##s##x##c) vld1q_##i (p); }					\
-\
-static_always_inline void						\
-t##s##x##c##_store_unaligned (t##s##x##c v, void *p)			\
-{ vst1q_##i (p, v); }							\
-\
-static_always_inline int						\
-t##s##x##c##_is_all_zero (t##s##x##c x)					\
-{ return !!(vminvq_u##s (vceqq_##i (vdupq_n_##i(0), x))); }						\
-\
-static_always_inline int						\
-t##s##x##c##_is_equal (t##s##x##c a, t##s##x##c b)			\
-{ return !!(vminvq_u##s (vceqq_##i (a, b))); }				\
-\
-static_always_inline int						\
-t##s##x##c##_is_all_equal (t##s##x##c v, t##s x)			\
-{ return t##s##x##c##_is_equal (v, t##s##x##c##_splat (x)); };		\
-\
-static_always_inline u32						\
-t##s##x##c##_zero_byte_mask (t##s##x##c x)			\
-{ uint8x16_t v = vreinterpretq_u8_u##s (vceqq_##i (vdupq_n_##i(0), x));  \
-  return u8x16_compare_byte_mask (v); } \
-\
-static_always_inline u##s##x##c						\
-t##s##x##c##_is_greater (t##s##x##c a, t##s##x##c b)			\
-{ return (u##s##x##c) vcgtq_##i (a, b); }				\
-\
-static_always_inline t##s##x##c						\
-t##s##x##c##_blend (t##s##x##c dst, t##s##x##c src, u##s##x##c mask)	\
-{ return (t##s##x##c) vbslq_##i (mask, src, dst); }
+#define _(t, s, c, i)                                                         \
+  static_always_inline t##s##x##c t##s##x##c##_splat (t##s x)                 \
+  {                                                                           \
+    return (t##s##x##c) vdupq_n_##i (x);                                      \
+  }                                                                           \
+                                                                              \
+  static_always_inline t##s##x##c t##s##x##c##_load_unaligned (void *p)       \
+  {                                                                           \
+    return (t##s##x##c) vld1q_##i (p);                                        \
+  }                                                                           \
+                                                                              \
+  static_always_inline void t##s##x##c##_store_unaligned (t##s##x##c v,       \
+							  void *p)            \
+  {                                                                           \
+    vst1q_##i (p, v);                                                         \
+  }                                                                           \
+                                                                              \
+  static_always_inline int t##s##x##c##_is_all_zero (t##s##x##c x)            \
+  {                                                                           \
+    return !!(vminvq_u##s (vceqq_##i (vdupq_n_##i (0), x)));                  \
+  }                                                                           \
+                                                                              \
+  static_always_inline int t##s##x##c##_is_equal (t##s##x##c a, t##s##x##c b) \
+  {                                                                           \
+    return !!(vminvq_u##s (vceqq_##i (a, b)));                                \
+  }                                                                           \
+  static_always_inline int t##s##x##c##_is_all_equal (t##s##x##c v, t##s x)   \
+  {                                                                           \
+    return t##s##x##c##_is_equal (v, t##s##x##c##_splat (x));                 \
+  };                                                                          \
+                                                                              \
+  static_always_inline u32 t##s##x##c##_zero_byte_mask (t##s##x##c x)         \
+  {                                                                           \
+    uint8x16_t v = vreinterpretq_u8_u##s (vceqq_##i (vdupq_n_##i (0), x));    \
+    return u8x16_compare_byte_mask (v);                                       \
+  }                                                                           \
+                                                                              \
+  static_always_inline t##s##x##c t##s##x##c##_add_saturate (t##s##x##c a,    \
+							     t##s##x##c b)    \
+  {                                                                           \
+    return (t##s##x##c) vqaddq_##i (a, b);                                    \
+  }                                                                           \
+                                                                              \
+  static_always_inline t##s##x##c t##s##x##c##_sub_saturate (t##s##x##c a,    \
+							     t##s##x##c b)    \
+  {                                                                           \
+    return (t##s##x##c) vqsubq_##i (a, b);                                    \
+  }                                                                           \
+                                                                              \
+  static_always_inline t##s##x##c t##s##x##c##_blend (                        \
+    t##s##x##c dst, t##s##x##c src, u##s##x##c mask)                          \
+  {                                                                           \
+    return (t##s##x##c) vbslq_##i (mask, src, dst);                           \
+  }
 
 foreach_neon_vec128i foreach_neon_vec128u
 
@@ -107,12 +121,6 @@ static_always_inline u32x4
 u32x4_byte_swap (u32x4 v)
 {
   return (u32x4) vrev32q_u8 ((u8x16) v);
-}
-
-static_always_inline u8x16
-u8x16_shuffle (u8x16 v, u8x16 m)
-{
-  return (u8x16) vqtbl1q_u8 (v, m);
 }
 
 static_always_inline u32x4
@@ -191,6 +199,18 @@ u32x4_min_scalar (u32x4 v)
 #define u8x16_word_shift_left(x,n)  vextq_u8(u8x16_splat (0), x, 16 - n)
 #define u8x16_word_shift_right(x,n) vextq_u8(x, u8x16_splat (0), n)
 
+always_inline u32x4
+u32x4_interleave_hi (u32x4 a, u32x4 b)
+{
+  return (u32x4) vzip2q_u32 (a, b);
+}
+
+always_inline u32x4
+u32x4_interleave_lo (u32x4 a, u32x4 b)
+{
+  return (u32x4) vzip1q_u32 (a, b);
+}
+
 static_always_inline u8x16
 u8x16_reflect (u8x16 v)
 {
@@ -209,6 +229,61 @@ __asm__ ("eor3 %0.16b,%1.16b,%2.16b,%3.16b": "=w" (r): "0" (a), "w" (b), "w" (c)
   return r;
 #endif
   return a ^ b ^ c;
+}
+
+static_always_inline u8x16
+u8x16_load_partial (u8 *data, uword n)
+{
+  u8x16 r = {};
+  if (n > 7)
+    {
+      u64x2 r;
+      r[1] = *(u64u *) (data + n - 8);
+      r >>= (16 - n) * 8;
+      r[0] = *(u64u *) data;
+      return (u8x16) r;
+    }
+  else if (n > 3)
+    {
+      u32x4 r = {};
+      r[1] = *(u32u *) (data + n - 4);
+      r >>= (8 - n) * 8;
+      r[0] = *(u32u *) data;
+      return (u8x16) r;
+    }
+  else if (n > 1)
+    {
+      u16x8 r = {};
+      r[1] = *(u16u *) (data + n - 2);
+      r >>= (4 - n) * 8;
+      r[0] = *(u16u *) data;
+      return (u8x16) r;
+    }
+  else if (n > 0)
+    r[0] = *data;
+  return r;
+}
+
+static_always_inline void
+u8x16_store_partial (u8x16 r, u8 *data, uword n)
+{
+  if (n > 7)
+    {
+      *(u64u *) (data + n - 8) = ((u64x2) r)[1] << ((16 - n) * 8);
+      *(u64u *) data = ((u64x2) r)[0];
+    }
+  else if (n > 3)
+    {
+      *(u32u *) (data + n - 4) = ((u32x4) r)[1] << ((8 - n) * 8);
+      *(u32u *) data = ((u32x4) r)[0];
+    }
+  else if (n > 1)
+    {
+      *(u16u *) (data + n - 2) = ((u16x8) r)[1] << ((4 - n) * 8);
+      *(u16u *) data = ((u16x8) r)[0];
+    }
+  else if (n > 0)
+    data[0] = r[0];
 }
 
 #define CLIB_HAVE_VEC128_MSB_MASK

@@ -38,18 +38,41 @@
 #ifndef included_clib_bitops_h
 #define included_clib_bitops_h
 
-#include <vppinfra/clib.h>
+#define SET_BIT(i)    (1 << i)
+#define GET_BIT(n, i) (n >> i) & 1U
+
+static_always_inline uword
+clear_lowest_set_bit (uword x)
+{
+#ifdef __BMI__
+  return uword_bits > 32 ? _blsr_u64 (x) : _blsr_u32 (x);
+#else
+  return x & (x - 1);
+#endif
+}
+
+static_always_inline uword
+get_lowest_set_bit (uword x)
+{
+#ifdef __BMI__
+  return uword_bits > 32 ? _blsi_u64 (x) : _blsi_u32 (x);
+#else
+  return x & -x;
+#endif
+}
+
+static_always_inline u8
+get_lowest_set_bit_index (uword x)
+{
+  return uword_bits > 32 ? __builtin_ctzll (x) : __builtin_ctz (x);
+}
 
 /* Population count from Hacker's Delight. */
 always_inline uword
 count_set_bits (uword x)
 {
 #ifdef __POPCNT__
-#if uword_bits == 64
-  return __builtin_popcountll (x);
-#else
-  return __builtin_popcount (x);
-#endif
+  return uword_bits > 32 ? __builtin_popcountll (x) : __builtin_popcount (x);
 #else
 #if uword_bits == 64
   const uword c1 = 0x5555555555555555;
@@ -80,6 +103,15 @@ count_set_bits (uword x)
   return x & (2 * BITS (uword) - 1);
 #endif
 }
+
+#if uword_bits == 64
+#define count_leading_zeros(x) __builtin_clzll (x)
+#else
+#define count_leading_zeros(x) __builtin_clzll (x)
+#endif
+
+#define count_trailing_zeros(x) get_lowest_set_bit_index (x)
+#define log2_first_set(x)	get_lowest_set_bit_index (x)
 
 /* Based on "Hacker's Delight" code from GLS. */
 typedef struct
@@ -163,19 +195,86 @@ next_with_same_number_of_set_bits (uword x)
   return ripple | ones;
 }
 
-#define foreach_set_bit(var,mask,body)					\
-do {									\
-  uword _foreach_set_bit_m_##var = (mask);				\
-  uword _foreach_set_bit_f_##var;					\
-  while (_foreach_set_bit_m_##var != 0)					\
-    {									\
-      _foreach_set_bit_f_##var = first_set (_foreach_set_bit_m_##var);	\
-      _foreach_set_bit_m_##var ^= _foreach_set_bit_f_##var;		\
-      (var) = min_log2 (_foreach_set_bit_f_##var);			\
-      do { body; } while (0);						\
-    }									\
-} while (0)
+#define foreach_set_bit_index(i, v)                                           \
+  for (uword _tmp = (v) + 0 * (uword) (i = get_lowest_set_bit_index (v));     \
+       _tmp;                                                                  \
+       i = get_lowest_set_bit_index (_tmp = clear_lowest_set_bit (_tmp)))
 
+static_always_inline uword
+uword_bitmap_count_set_bits (uword *bmp, uword n_uwords)
+{
+  uword count = 0;
+  while (n_uwords--)
+    count += count_set_bits (bmp++[0]);
+  return count;
+}
+
+static_always_inline uword
+uword_bitmap_is_bit_set (uword *bmp, uword bit_index)
+{
+  bmp += bit_index / uword_bits;
+  bit_index %= uword_bits;
+  return (bmp[0] >> bit_index) & 1;
+}
+
+static_always_inline void
+uword_bitmap_set_bits_at_index (uword *bmp, uword bit_index, uword n_bits)
+{
+  bmp += bit_index / uword_bits;
+  bit_index %= uword_bits;
+  uword max_bits = uword_bits - bit_index;
+
+  if (n_bits < max_bits)
+    {
+      bmp[0] |= pow2_mask (n_bits) << bit_index;
+      return;
+    }
+
+  bmp++[0] |= pow2_mask (max_bits) << bit_index;
+  n_bits -= max_bits;
+
+  for (; n_bits >= uword_bits; bmp++, n_bits -= uword_bits)
+    bmp[0] = ~0ULL;
+
+  if (n_bits)
+    bmp[0] |= pow2_mask (n_bits);
+}
+
+static_always_inline void
+uword_bitmap_clear_bits_at_index (uword *bmp, uword bit_index, uword n_bits)
+{
+  bmp += bit_index / uword_bits;
+  bit_index %= uword_bits;
+  uword max_bits = uword_bits - bit_index;
+
+  if (n_bits < max_bits)
+    {
+      bmp[0] &= ~(pow2_mask (n_bits) << bit_index);
+      return;
+    }
+
+  bmp++[0] &= ~(pow2_mask (max_bits) << bit_index);
+  n_bits -= max_bits;
+
+  for (; n_bits >= uword_bits; bmp++, n_bits -= uword_bits)
+    bmp[0] = 0ULL;
+
+  if (n_bits)
+    bmp[0] &= ~pow2_mask (n_bits);
+}
+
+static_always_inline int
+uword_bitmap_find_first_set (uword *bmp)
+{
+  uword *b = bmp;
+  while (b[0] == 0)
+    b++;
+
+  return (b - bmp) * uword_bits + get_lowest_set_bit_index (b[0]);
+}
+
+#else
+#warning "already included"
 #endif /* included_clib_bitops_h */
 
 /*

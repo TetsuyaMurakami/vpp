@@ -28,7 +28,6 @@
 #include <mactime/mactime.api_enum.h>
 #include <mactime/mactime.api_types.h>
 
-#define vl_print(handle, ...) vlib_cli_output (handle, __VA_ARGS__)
 
 #define REPLY_MSG_ID_BASE mm->msg_id_base
 #include <vlibapi/api_helper_macros.h>
@@ -472,11 +471,10 @@ VNET_FEATURE_INIT (mactime, static) =
 /* *INDENT-ON */
 
 /* *INDENT-OFF* */
-VNET_FEATURE_INIT (mactime_tx, static) =
-{
+VNET_FEATURE_INIT (mactime_tx, static) = {
   .arc_name = "interface-output",
   .node_name = "mactime-tx",
-  .runs_before = VNET_FEATURES ("interface-tx"),
+  .runs_before = VNET_FEATURES ("interface-output-arc-end"),
 };
 /* *INDENT-ON */
 
@@ -638,7 +636,8 @@ show_mactime_command_fn (vlib_main_t * vm,
 
     print:
       vec_reset_length (macstring);
-      macstring = format (0, "%U", format_mac_address, dp->mac_address);
+      macstring =
+	format (macstring, "%U", format_mac_address, dp->mac_address);
       switch (current_status)
 	{
 	case 0:

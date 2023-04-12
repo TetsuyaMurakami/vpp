@@ -16,30 +16,37 @@
 import argparse
 import pathlib
 import subprocess
-BASE_DIR = subprocess.check_output('git rev-parse --show-toplevel',
-                                   shell=True).strip().decode()
-vppapigen_bin = pathlib.Path(
-    '%s/src/tools/vppapigen/vppapigen.py' % BASE_DIR).as_posix()
+import vppapigen
+import os
+from multiprocessing import Pool
+
+BASE_DIR = (
+    subprocess.check_output("git rev-parse --show-toplevel", shell=True)
+    .strip()
+    .decode()
+)
 
 src_dir_depth = 3
 output_path = pathlib.Path(
-    '%s/build-root/install-vpp-native/vpp/share/vpp/api/' % BASE_DIR)
+    "%s/build-root/install-vpp-native/vpp/share/vpp/api/" % BASE_DIR
+)
 output_path_debug = pathlib.Path(
-    '%s/build-root/install-vpp_debug-native/vpp/share/vpp/api/' % BASE_DIR)
+    "%s/build-root/install-vpp_debug-native/vpp/share/vpp/api/" % BASE_DIR
+)
 
 output_dir_map = {
-    'plugins': 'plugins',
-    'vlibmemory': 'core',
-    'vnet': 'core',
-    'vlib': 'core',
-    'vpp': 'core',
+    "plugins": "plugins",
+    "vlibmemory": "core",
+    "vnet": "core",
+    "vlib": "core",
+    "vpp": "core",
 }
 
 
 def api_search_globs(src_dir):
     globs = []
     for g in output_dir_map:
-        globs.extend(list(src_dir.glob('%s/**/*.api' % g)))
+        globs.extend(list(src_dir.glob("%s/**/*.api" % g)))
     return globs
 
 
@@ -48,31 +55,30 @@ def api_files(src_dir):
     return [x for x in api_search_globs(src_dir)]
 
 
-def vppapigen(vppapigen_bin, output_path, src_dir, src_file):
-    try:
-        subprocess.check_output(
-            [vppapigen_bin, '--includedir', src_dir.as_posix(),
-             '--input', src_file.as_posix(), 'JSON',
-             '--output', '%s/%s/%s.json' % (
-                 output_path,
-                 output_dir_map[src_file.as_posix().split('/')[
-                     src_dir_depth + BASE_DIR.count('/') - 1]],
-                 src_file.name)])
-    except KeyError:
-        print('src_file: %s' % src_file)
-        raise
+def get_n_parallel(n_parallel):
+    if n_parallel == 0:
+        n_parallel = os.environ.get("MAKE_PARALLEL_JOBS", os.cpu_count())
+        try:
+            n_parallel = int(n_parallel)
+        except ValueError:
+            return os.cpu_count()
+    return n_parallel or os.cpu_count()
 
 
 def main():
-    cliparser = argparse.ArgumentParser(
-        description='VPP API JSON definition generator')
-    cliparser.add_argument('--srcdir', action='store',
-                           default='%s/src' % BASE_DIR),
-    cliparser.add_argument('--output', action='store',
-                           help='directory to store files'),
-    cliparser.add_argument('--debug-target', action='store_true',
-                           default=False,
-                           help="'True' if -debug target"),
+    cliparser = argparse.ArgumentParser(description="VPP API JSON definition generator")
+    cliparser.add_argument("--srcdir", action="store", default="%s/src" % BASE_DIR),
+    cliparser.add_argument("--output", action="store", help="directory to store files"),
+    cliparser.add_argument(
+        "--parallel", type=int, default=0, help="Number of parallel processes"
+    ),
+    cliparser.add_argument(
+        "--debug-target",
+        action="store_true",
+        default=False,
+        help="'True' if -debug target",
+    ),
+
     args = cliparser.parse_args()
 
     src_dir = pathlib.Path(args.srcdir)
@@ -86,13 +92,34 @@ def main():
     for d in output_dir_map.values():
         output_dir.joinpath(d).mkdir(exist_ok=True, parents=True)
 
-    for f in output_dir.glob('**/*.api.json'):
+    for f in output_dir.glob("**/*.api.json"):
         f.unlink()
 
-    for f in api_files(src_dir):
-        vppapigen(vppapigen_bin, output_dir, src_dir, f)
-    print('json files written to: %s/.' % output_dir)
+    with Pool(get_n_parallel(args.parallel)) as p:
+        p.map(
+            vppapigen.run_kw_vppapigen,
+            [
+                {
+                    "output": "%s/%s/%s.json"
+                    % (
+                        output_path,
+                        output_dir_map[
+                            f.as_posix().split("/")[
+                                src_dir_depth + BASE_DIR.count("/") - 1
+                            ]
+                        ],
+                        f.name,
+                    ),
+                    "input_file": f.as_posix(),
+                    "includedir": [src_dir.as_posix()],
+                    "output_module": "JSON",
+                }
+                for f in api_files(src_dir)
+            ],
+        )
+
+    print("json files written to: %s/." % output_dir)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

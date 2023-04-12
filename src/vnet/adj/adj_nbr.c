@@ -105,6 +105,46 @@ adj_nbr_remove (adj_index_t ai,
     }
 }
 
+typedef struct adj_nbr_get_n_adjs_walk_ctx_t_
+{
+    vnet_link_t linkt;
+    u32 count;
+} adj_nbr_get_n_adjs_walk_ctx_t;
+
+static adj_walk_rc_t
+adj_nbr_get_n_adjs_walk (adj_index_t ai,
+                         void *data)
+{
+    adj_nbr_get_n_adjs_walk_ctx_t *ctx = data;
+    const ip_adjacency_t *adj;
+
+    adj = adj_get(ai);
+
+    if (ctx->linkt == adj->ia_link)
+        ctx->count++;
+
+    return (ADJ_WALK_RC_CONTINUE);
+}
+
+u32
+adj_nbr_get_n_adjs (vnet_link_t link_type, u32 sw_if_index)
+{
+    adj_nbr_get_n_adjs_walk_ctx_t ctx = {
+        .linkt = link_type,
+    };
+    fib_protocol_t fproto;
+
+    FOR_EACH_FIB_IP_PROTOCOL(fproto)
+    {
+        adj_nbr_walk (sw_if_index,
+                      fproto,
+                      adj_nbr_get_n_adjs_walk,
+                      &ctx);
+    }
+
+    return (ctx.count);
+}
+
 adj_index_t
 adj_nbr_find (fib_protocol_t nh_proto,
 	      vnet_link_t link_type,
@@ -492,7 +532,7 @@ adj_nbr_update_rewrite_internal (ip_adjacency_t *adj,
 
 	fib_walk_sync(FIB_NODE_TYPE_ADJ, walk_ai, &bw_ctx);
 	/*
-	 * fib_walk_sync may allocate a new adjacency and potentially cuase a
+	 * fib_walk_sync may allocate a new adjacency and potentially cause a
 	 * realloc for adj_pool. When that happens, adj pointer is no longer
 	 * valid here. We refresh the adj pointer accordingly.
 	 */
@@ -560,7 +600,7 @@ adj_nbr_update_rewrite_internal (ip_adjacency_t *adj,
         walk_adj->ia_flags &= ~ADJ_FLAG_SYNC_WALK_ACTIVE;
     }
 
-    adj_delegate_adj_modified(adj);
+    adj_delegate_adj_modified(adj_get(ai));
     adj_unlock(ai);
     adj_unlock(walk_ai);
 }
@@ -750,12 +790,21 @@ adj_nbr_interface_state_change_one (adj_index_t ai,
     };
     ip_adjacency_t *adj;
 
-    adj = adj_get(ai);
+    adj_lock (ai);
 
+    adj = adj_get(ai);
     adj->ia_flags |= ADJ_FLAG_SYNC_WALK_ACTIVE;
     fib_walk_sync(FIB_NODE_TYPE_ADJ, ai, &bw_ctx);
+
+    /*
+     * fib_walk_sync may allocate a new adjacency and potentially cause a
+     * realloc for adj_pool. When that happens, adj pointer is no longer
+     * valid here. We refresh the adj pointer accordingly.
+     */
+    adj = adj_get(ai);
     adj->ia_flags &= ~ADJ_FLAG_SYNC_WALK_ACTIVE;
 
+    adj_unlock (ai);
     return (ADJ_WALK_RC_CONTINUE);
 }
 
@@ -860,9 +909,15 @@ adj_nbr_interface_delete_one (adj_index_t ai,
     adj_lock(ai);
 
     adj = adj_get(ai);
-
     adj->ia_flags |= ADJ_FLAG_SYNC_WALK_ACTIVE;
     fib_walk_sync(FIB_NODE_TYPE_ADJ, ai, &bw_ctx);
+
+    /*
+     * fib_walk_sync may allocate a new adjacency and potentially cause a
+     * realloc for adj_pool. When that happens, adj pointer is no longer
+     * valid here. We refresh the adj pointer accordingly.
+     */
+    adj = adj_get(ai);
     adj->ia_flags &= ~ADJ_FLAG_SYNC_WALK_ACTIVE;
 
     adj_unlock(ai);
@@ -907,11 +962,38 @@ adj_nbr_interface_add_del (vnet_main_t * vnm,
     }
 
     return (NULL);
-   
 }
 
 VNET_SW_INTERFACE_ADD_DEL_FUNCTION(adj_nbr_interface_add_del);
 
+
+static adj_walk_rc_t
+adj_nbr_ethernet_mac_change_one (adj_index_t ai,
+                                 void *arg)
+{
+    vnet_update_adjacency_for_sw_interface(vnet_get_main(),
+                                           adj_get_sw_if_index(ai),
+                                           ai);
+
+    return (ADJ_WALK_RC_CONTINUE);
+}
+
+/**
+ * Callback function invoked when an interface's MAC Address changes
+ */
+static void
+adj_nbr_ethernet_change_mac (ethernet_main_t * em,
+                             u32 sw_if_index, uword opaque)
+{
+    fib_protocol_t proto;
+
+    FOR_EACH_FIB_IP_PROTOCOL(proto)
+    {
+	adj_nbr_walk(sw_if_index, proto,
+		     adj_nbr_ethernet_mac_change_one,
+		     NULL);
+    }
+}
 
 static adj_walk_rc_t
 adj_nbr_show_one (adj_index_t ai,
@@ -1153,4 +1235,10 @@ adj_nbr_module_init (void)
     dpo_register(DPO_ADJACENCY_INCOMPLETE,
                  &adj_nbr_incompl_dpo_vft,
                  nbr_incomplete_nodes);
+
+    ethernet_address_change_ctx_t ctx = {
+        .function = adj_nbr_ethernet_change_mac,
+        .function_opaque = 0,
+    };
+    vec_add1 (ethernet_main.address_change_callbacks, ctx);
 }

@@ -114,7 +114,7 @@ justify (u8 * s, format_info_t * fi, uword s_len_orig)
     l0 = l1;
 
   if (l1 > l0)
-    _vec_len (s) = l0;
+    vec_set_len (s, l0);
   else if (l0 > l1)
     {
       uword n = l0 - l1;
@@ -278,6 +278,7 @@ do_percent (u8 ** _s, const u8 * fmt, va_list * va)
 	case 'x':
 	case 'X':
 	case 'u':
+	case 'o':
 	case 'd':
 	  {
 	    u64 number;
@@ -310,6 +311,9 @@ do_percent (u8 ** _s, const u8 * fmt, va_list * va)
 		o.n_bits = BITS (int);
 		break;
 	      }
+
+	    if (c == 'o')
+	      o.base = 8;
 
 	    s = format_integer (s, number, &o);
 	  }

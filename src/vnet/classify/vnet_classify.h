@@ -89,14 +89,16 @@ typedef struct _vnet_classify_entry
   /* last heard time */
   f64 last_heard;
 
+  u32 metadata;
+
+  /* Graph node next index */
+  u16 next_index;
+
+  vnet_classify_action_t action;
+
   /* Really only need 1 bit */
   u8 flags;
 #define VNET_CLASSIFY_ENTRY_FREE	(1<<0)
-
-  vnet_classify_action_t action;
-  u16 metadata;
-  /* Graph node next index */
-  u32 next_index;
 
   /* Must be aligned to a 16-octet boundary */
   u32x4 key[0];
@@ -147,9 +149,6 @@ typedef struct
 typedef struct
 {
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
-  /* Mask to apply after skipping N vectors */
-  u32x4 *mask;
-
   /* hash Buckets */
   vnet_classify_bucket_t *buckets;
 
@@ -165,6 +164,7 @@ typedef struct
   u32 entries_per_page;
   u32 skip_n_vectors;
   u32 match_n_vectors;
+  u16 load_mask;
 
   /* Index of next table to try */
   u32 next_table_index;
@@ -195,6 +195,14 @@ typedef struct
 
   /* Writer (only) lock for this table */
   clib_spinlock_t writer_lock;
+
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline2);
+  /* Mask to apply after skipping N vectors */
+  union
+  {
+    u32x4 mask[8];
+    u32 mask_u32[32];
+  };
 
 } vnet_classify_table_t;
 
@@ -233,10 +241,11 @@ struct _vnet_classify_main
 
 extern vnet_classify_main_t vnet_classify_main;
 
+u8 *format_classify_entry (u8 *s, va_list *args);
 u8 *format_classify_table (u8 * s, va_list * args);
 u8 *format_vnet_classify_table (u8 *s, va_list *args);
 
-u64 vnet_classify_hash_packet (vnet_classify_table_t * t, u8 * h);
+u32 vnet_classify_hash_packet (const vnet_classify_table_t *t, u8 *h);
 
 static_always_inline vnet_classify_table_t *
 vnet_classify_table_get (u32 table_index)
@@ -246,63 +255,85 @@ vnet_classify_table_get (u32 table_index)
   return (pool_elt_at_index (vcm->tables, table_index));
 }
 
-static inline u64
-vnet_classify_hash_packet_inline (vnet_classify_table_t *t, const u8 *h)
+static inline u32
+vnet_classify_hash_packet_inline (const vnet_classify_table_t *t, const u8 *h)
 {
-  u32x4 *mask;
-
-  union
-  {
-    u32x4 as_u32x4;
-    u64 as_u64[2];
-  } xor_sum __attribute__ ((aligned (sizeof (u32x4))));
-
+  u64 xor_sum;
   ASSERT (t);
-  mask = t->mask;
-#ifdef CLIB_HAVE_VEC128
-  u32x4u *data = (u32x4u *) h;
-  xor_sum.as_u32x4 = data[0 + t->skip_n_vectors] & mask[0];
+  h += t->skip_n_vectors * 16;
+
+#if defined(CLIB_HAVE_VEC512) && defined(CLIB_HAVE_VEC512_MASK_LOAD_STORE)
+  u64x8 xor_sum_x8, *mask = (u64x8 *) t->mask;
+  u16 load_mask = t->load_mask;
+  u64x8u *data = (u64x8u *) h;
+
+  xor_sum_x8 = u64x8_mask_load_zero (data, load_mask) & mask[0];
+
+  if (PREDICT_FALSE (load_mask >> 8))
+    xor_sum_x8 ^= u64x8_mask_load_zero (data + 1, load_mask >> 8) & mask[1];
+
+  xor_sum_x8 ^= u64x8_align_right (xor_sum_x8, xor_sum_x8, 4);
+  xor_sum_x8 ^= u64x8_align_right (xor_sum_x8, xor_sum_x8, 2);
+  xor_sum = xor_sum_x8[0] ^ xor_sum_x8[1];
+#elif defined(CLIB_HAVE_VEC256) && defined(CLIB_HAVE_VEC256_MASK_LOAD_STORE)
+  u64x4 xor_sum_x4, *mask = (u64x4 *) t->mask;
+  u16 load_mask = t->load_mask;
+  u64x4u *data = (u64x4u *) h;
+
+  xor_sum_x4 = u64x4_mask_load_zero (data, load_mask) & mask[0];
+  xor_sum_x4 ^= u64x4_mask_load_zero (data + 1, load_mask >> 4) & mask[1];
+
+  if (PREDICT_FALSE (load_mask >> 8))
+    xor_sum_x4 ^= u64x4_mask_load_zero (data + 2, load_mask >> 8) & mask[2];
+
+  xor_sum_x4 ^= u64x4_align_right (xor_sum_x4, xor_sum_x4, 2);
+  xor_sum = xor_sum_x4[0] ^ xor_sum_x4[1];
+#elif defined(CLIB_HAVE_VEC128)
+  u64x2 *mask = (u64x2 *) t->mask;
+  u64x2u *data = (u64x2u *) h;
+  u64x2 xor_sum_x2;
+
+  xor_sum_x2 = data[0] & mask[0];
+
   switch (t->match_n_vectors)
     {
     case 5:
-      xor_sum.as_u32x4 ^= data[4 + t->skip_n_vectors] & mask[4];
+      xor_sum_x2 ^= data[4] & mask[4];
       /* FALLTHROUGH */
     case 4:
-      xor_sum.as_u32x4 ^= data[3 + t->skip_n_vectors] & mask[3];
+      xor_sum_x2 ^= data[3] & mask[3];
       /* FALLTHROUGH */
     case 3:
-      xor_sum.as_u32x4 ^= data[2 + t->skip_n_vectors] & mask[2];
+      xor_sum_x2 ^= data[2] & mask[2];
       /* FALLTHROUGH */
     case 2:
-      xor_sum.as_u32x4 ^= data[1 + t->skip_n_vectors] & mask[1];
+      xor_sum_x2 ^= data[1] & mask[1];
       /* FALLTHROUGH */
     case 1:
       break;
     default:
       abort ();
     }
+  xor_sum = xor_sum_x2[0] ^ xor_sum_x2[1];
 #else
-  u32 skip_u64 = t->skip_n_vectors * 2;
-  u64 *data64 = (u64 *) h;
-  xor_sum.as_u64[0] = data64[0 + skip_u64] & ((u64 *) mask)[0];
-  xor_sum.as_u64[1] = data64[1 + skip_u64] & ((u64 *) mask)[1];
+  u64 *data = (u64 *) h;
+  u64 *mask = (u64 *) t->mask;
+
+  xor_sum = (data[0] & mask[0]) ^ (data[1] & mask[1]);
+
   switch (t->match_n_vectors)
     {
     case 5:
-      xor_sum.as_u64[0] ^= data64[8 + skip_u64] & ((u64 *) mask)[8];
-      xor_sum.as_u64[1] ^= data64[9 + skip_u64] & ((u64 *) mask)[9];
+      xor_sum ^= (data[8] & mask[8]) ^ (data[9] & mask[9]);
       /* FALLTHROUGH */
     case 4:
-      xor_sum.as_u64[0] ^= data64[6 + skip_u64] & ((u64 *) mask)[6];
-      xor_sum.as_u64[1] ^= data64[7 + skip_u64] & ((u64 *) mask)[7];
+      xor_sum ^= (data[6] & mask[6]) ^ (data[7] & mask[7]);
       /* FALLTHROUGH */
     case 3:
-      xor_sum.as_u64[0] ^= data64[4 + skip_u64] & ((u64 *) mask)[4];
-      xor_sum.as_u64[1] ^= data64[5 + skip_u64] & ((u64 *) mask)[5];
+      xor_sum ^= (data[4] & mask[4]) ^ (data[5] & mask[5]);
       /* FALLTHROUGH */
     case 2:
-      xor_sum.as_u64[0] ^= data64[2 + skip_u64] & ((u64 *) mask)[2];
-      xor_sum.as_u64[1] ^= data64[3 + skip_u64] & ((u64 *) mask)[3];
+      xor_sum ^= (data[2] & mask[2]) ^ (data[3] & mask[3]);
       /* FALLTHROUGH */
     case 1:
       break;
@@ -315,7 +346,7 @@ vnet_classify_hash_packet_inline (vnet_classify_table_t *t, const u8 *h)
 #ifdef clib_crc32c_uses_intrinsics
   return clib_crc32c ((u8 *) & xor_sum, sizeof (xor_sum));
 #else
-  return clib_xxhash (xor_sum.as_u64[0] ^ xor_sum.as_u64[1]);
+  return clib_xxhash (xor_sum);
 #endif
 }
 
@@ -328,11 +359,11 @@ vnet_classify_prefetch_bucket (vnet_classify_table_t * t, u64 hash)
 
   bucket_index = hash & (t->nbuckets - 1);
 
-  CLIB_PREFETCH (&t->buckets[bucket_index], CLIB_CACHE_LINE_BYTES, LOAD);
+  clib_prefetch_load (&t->buckets[bucket_index]);
 }
 
 static inline vnet_classify_entry_t *
-vnet_classify_get_entry (vnet_classify_table_t * t, uword offset)
+vnet_classify_get_entry (const vnet_classify_table_t *t, uword offset)
 {
   u8 *hp = clib_mem_get_heap_base (t->mheap);
   u8 *vp = hp + offset;
@@ -354,8 +385,8 @@ vnet_classify_get_offset (vnet_classify_table_t * t,
 }
 
 static inline vnet_classify_entry_t *
-vnet_classify_entry_at_index (vnet_classify_table_t * t,
-			      vnet_classify_entry_t * e, u32 index)
+vnet_classify_entry_at_index (const vnet_classify_table_t *t,
+			      vnet_classify_entry_t *e, u32 index)
 {
   u8 *eu8;
 
@@ -389,76 +420,154 @@ vnet_classify_prefetch_entry (vnet_classify_table_t * t, u64 hash)
 
   e = vnet_classify_entry_at_index (t, e, value_index);
 
-  CLIB_PREFETCH (e, CLIB_CACHE_LINE_BYTES, LOAD);
+  clib_prefetch_load (e);
 }
 
-vnet_classify_entry_t *vnet_classify_find_entry (vnet_classify_table_t * t,
-						 u8 * h, u64 hash, f64 now);
+vnet_classify_entry_t *
+vnet_classify_find_entry (const vnet_classify_table_t *t, u8 *h, u32 hash,
+			  f64 now);
+
+static_always_inline int
+vnet_classify_entry_is_equal (vnet_classify_entry_t *v, const u8 *d, u8 *m,
+			      u32 match_n_vectors, u16 load_mask)
+{
+#if defined(CLIB_HAVE_VEC512) && defined(CLIB_HAVE_VEC512_MASK_LOAD_STORE)
+  u64x8 r, *mask = (u64x8 *) m;
+  u64x8u *data = (u64x8u *) d;
+  u64x8 *key = (u64x8 *) v->key;
+
+  r = (u64x8_mask_load_zero (data, load_mask) & mask[0]) ^
+      u64x8_mask_load_zero (key, load_mask);
+  load_mask >>= 8;
+
+  if (PREDICT_FALSE (load_mask))
+    r |= (u64x8_mask_load_zero (data + 1, load_mask) & mask[1]) ^
+	 u64x8_mask_load_zero (key + 1, load_mask);
+
+  if (u64x8_is_all_zero (r))
+    return 1;
+
+#elif defined(CLIB_HAVE_VEC256) && defined(CLIB_HAVE_VEC256_MASK_LOAD_STORE)
+  u64x4 r, *mask = (u64x4 *) m;
+  u64x4u *data = (u64x4u *) d;
+  u64x4 *key = (u64x4 *) v->key;
+
+  r = (u64x4_mask_load_zero (data, load_mask) & mask[0]) ^
+      u64x4_mask_load_zero (key, load_mask);
+  load_mask >>= 4;
+
+  r |= (u64x4_mask_load_zero (data + 1, load_mask) & mask[1]) ^
+       u64x4_mask_load_zero (key + 1, load_mask);
+  load_mask >>= 4;
+
+  if (PREDICT_FALSE (load_mask))
+    r |= (u64x4_mask_load_zero (data + 2, load_mask) & mask[2]) ^
+	 u64x4_mask_load_zero (key + 2, load_mask);
+
+  if (u64x4_is_all_zero (r))
+    return 1;
+
+#elif defined(CLIB_HAVE_VEC128)
+  u64x2u *data = (u64x2 *) d;
+  u64x2 *key = (u64x2 *) v->key;
+  u64x2 *mask = (u64x2 *) m;
+  u64x2 r;
+
+  r = (data[0] & mask[0]) ^ key[0];
+  switch (match_n_vectors)
+    {
+    case 5:
+      r |= (data[4] & mask[4]) ^ key[4];
+      /* fall through */
+    case 4:
+      r |= (data[3] & mask[3]) ^ key[3];
+      /* fall through */
+    case 3:
+      r |= (data[2] & mask[2]) ^ key[2];
+      /* fall through */
+    case 2:
+      r |= (data[1] & mask[1]) ^ key[1];
+      /* fall through */
+    case 1:
+      break;
+    default:
+      abort ();
+    }
+
+  if (u64x2_is_all_zero (r))
+    return 1;
+
+#else
+  u64 *data = (u64 *) d;
+  u64 *key = (u64 *) v->key;
+  u64 *mask = (u64 *) m;
+  u64 r;
+
+  r = ((data[0] & mask[0]) ^ key[0]) | ((data[1] & mask[1]) ^ key[1]);
+  switch (match_n_vectors)
+    {
+    case 5:
+      r |= ((data[8] & mask[8]) ^ key[8]) | ((data[9] & mask[9]) ^ key[9]);
+      /* fall through */
+    case 4:
+      r |= ((data[6] & mask[6]) ^ key[6]) | ((data[7] & mask[7]) ^ key[7]);
+      /* fall through */
+    case 3:
+      r |= ((data[4] & mask[4]) ^ key[4]) | ((data[5] & mask[5]) ^ key[5]);
+      /* fall through */
+    case 2:
+      r |= ((data[2] & mask[2]) ^ key[2]) | ((data[3] & mask[3]) ^ key[3]);
+      /* fall through */
+    case 1:
+      break;
+    default:
+      abort ();
+    }
+
+  if (r == 0)
+    return 1;
+
+#endif /* CLIB_HAVE_VEC128 */
+  return 0;
+}
 
 static inline vnet_classify_entry_t *
-vnet_classify_find_entry_inline (vnet_classify_table_t *t, const u8 *h,
-				 u64 hash, f64 now)
+vnet_classify_find_entry_inline (const vnet_classify_table_t *t, const u8 *h,
+				 u32 hash, f64 now)
 {
   vnet_classify_entry_t *v;
-  u32x4 *mask, *key;
-  union
-  {
-    u32x4 as_u32x4;
-    u64 as_u64[2];
-  } result __attribute__ ((aligned (sizeof (u32x4))));
   vnet_classify_bucket_t *b;
-  u32 value_index;
-  u32 bucket_index;
-  u32 limit;
+  u32 bucket_index, limit, pages, match_n_vectors = t->match_n_vectors;
+  u16 load_mask = t->load_mask;
+  u8 *mask = (u8 *) t->mask;
   int i;
 
   bucket_index = hash & (t->nbuckets - 1);
   b = &t->buckets[bucket_index];
-  mask = t->mask;
 
   if (b->offset == 0)
     return 0;
 
-  hash >>= t->log2_nbuckets;
-
+  pages = 1 << b->log2_pages;
   v = vnet_classify_get_entry (t, b->offset);
-  value_index = hash & ((1 << b->log2_pages) - 1);
   limit = t->entries_per_page;
   if (PREDICT_FALSE (b->linear_search))
     {
-      value_index = 0;
-      limit *= (1 << b->log2_pages);
+      limit *= pages;
+      v = vnet_classify_entry_at_index (t, v, 0);
+    }
+  else
+    {
+      hash >>= t->log2_nbuckets;
+      v = vnet_classify_entry_at_index (t, v, hash & (pages - 1));
     }
 
-  v = vnet_classify_entry_at_index (t, v, value_index);
+  h += t->skip_n_vectors * 16;
 
-#ifdef CLIB_HAVE_VEC128
-  const u32x4u *data = (const u32x4u *) h;
   for (i = 0; i < limit; i++)
     {
-      key = v->key;
-      result.as_u32x4 = (data[0 + t->skip_n_vectors] & mask[0]) ^ key[0];
-      switch (t->match_n_vectors)
-	{
-	case 5:
-	  result.as_u32x4 |= (data[4 + t->skip_n_vectors] & mask[4]) ^ key[4];
-	  /* FALLTHROUGH */
-	case 4:
-	  result.as_u32x4 |= (data[3 + t->skip_n_vectors] & mask[3]) ^ key[3];
-	  /* FALLTHROUGH */
-	case 3:
-	  result.as_u32x4 |= (data[2 + t->skip_n_vectors] & mask[2]) ^ key[2];
-	  /* FALLTHROUGH */
-	case 2:
-	  result.as_u32x4 |= (data[1 + t->skip_n_vectors] & mask[1]) ^ key[1];
-	  /* FALLTHROUGH */
-	case 1:
-	  break;
-	default:
-	  abort ();
-	}
-
-      if (u32x4_zero_byte_mask (result.as_u32x4) == 0xffff)
+      if (vnet_classify_entry_is_equal (v, h, mask, match_n_vectors,
+					load_mask))
 	{
 	  if (PREDICT_TRUE (now))
 	    {
@@ -469,62 +578,6 @@ vnet_classify_find_entry_inline (vnet_classify_table_t *t, const u8 *h,
 	}
       v = vnet_classify_entry_at_index (t, v, 1);
     }
-#else
-  u32 skip_u64 = t->skip_n_vectors * 2;
-  const u64 *data64 = (const u64 *) h;
-  for (i = 0; i < limit; i++)
-    {
-      key = v->key;
-
-      result.as_u64[0] =
-	(data64[0 + skip_u64] & ((u64 *) mask)[0]) ^ ((u64 *) key)[0];
-      result.as_u64[1] =
-	(data64[1 + skip_u64] & ((u64 *) mask)[1]) ^ ((u64 *) key)[1];
-      switch (t->match_n_vectors)
-	{
-	case 5:
-	  result.as_u64[0] |=
-	    (data64[8 + skip_u64] & ((u64 *) mask)[8]) ^ ((u64 *) key)[8];
-	  result.as_u64[1] |=
-	    (data64[9 + skip_u64] & ((u64 *) mask)[9]) ^ ((u64 *) key)[9];
-	  /* FALLTHROUGH */
-	case 4:
-	  result.as_u64[0] |=
-	    (data64[6 + skip_u64] & ((u64 *) mask)[6]) ^ ((u64 *) key)[6];
-	  result.as_u64[1] |=
-	    (data64[7 + skip_u64] & ((u64 *) mask)[7]) ^ ((u64 *) key)[7];
-	  /* FALLTHROUGH */
-	case 3:
-	  result.as_u64[0] |=
-	    (data64[4 + skip_u64] & ((u64 *) mask)[4]) ^ ((u64 *) key)[4];
-	  result.as_u64[1] |=
-	    (data64[5 + skip_u64] & ((u64 *) mask)[5]) ^ ((u64 *) key)[5];
-	  /* FALLTHROUGH */
-	case 2:
-	  result.as_u64[0] |=
-	    (data64[2 + skip_u64] & ((u64 *) mask)[2]) ^ ((u64 *) key)[2];
-	  result.as_u64[1] |=
-	    (data64[3 + skip_u64] & ((u64 *) mask)[3]) ^ ((u64 *) key)[3];
-	  /* FALLTHROUGH */
-	case 1:
-	  break;
-	default:
-	  abort ();
-	}
-
-      if (result.as_u64[0] == 0 && result.as_u64[1] == 0)
-	{
-	  if (PREDICT_TRUE (now))
-	    {
-	      v->hits++;
-	      v->last_heard = now;
-	    }
-	  return (v);
-	}
-
-      v = vnet_classify_entry_at_index (t, v, 1);
-    }
-#endif /* CLIB_HAVE_VEC128 */
   return 0;
 }
 
@@ -535,9 +588,9 @@ vnet_classify_table_t *vnet_classify_new_table (vnet_classify_main_t *cm,
 						u32 match_n_vectors);
 
 int vnet_classify_add_del_session (vnet_classify_main_t *cm, u32 table_index,
-				   const u8 *match, u32 hit_next_index,
+				   const u8 *match, u16 hit_next_index,
 				   u32 opaque_index, i32 advance, u8 action,
-				   u16 metadata, int is_add);
+				   u32 metadata, int is_add);
 
 int vnet_classify_add_del_table (vnet_classify_main_t *cm, const u8 *mask,
 				 u32 nbuckets, u32 memory_size, u32 skip,

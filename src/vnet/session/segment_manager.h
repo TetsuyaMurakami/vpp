@@ -40,6 +40,7 @@ typedef struct _segment_manager_props
   u8 high_watermark;			/**< memory usage high watermark % */
   u8 low_watermark;			/**< memory usage low watermark % */
   u8 pct_first_alloc;			/**< pct of fifo size to alloc */
+  u8 huge_page;				/**< use hugepage */
 } segment_manager_props_t;
 
 typedef enum seg_manager_flag_
@@ -90,6 +91,7 @@ int segment_manager_init_first (segment_manager_t * sm);
  * @param sm	segment manager to be freed
  */
 void segment_manager_free (segment_manager_t * sm);
+void segment_manager_free_safe (segment_manager_t *sm);
 
 /**
  * Initiate segment manager cleanup
@@ -101,7 +103,25 @@ segment_manager_t *segment_manager_get (u32 index);
 segment_manager_t *segment_manager_get_if_valid (u32 index);
 u32 segment_manager_index (segment_manager_t * sm);
 
-int segment_manager_add_segment (segment_manager_t * sm, uword segment_size);
+/**
+ * Add segment without lock
+ *
+ * @param sm		Segment manager
+ * @param segment_size	Size of segment to be added
+ * @param notify_app	Flag set if app notification requested
+ */
+int segment_manager_add_segment (segment_manager_t *sm, uword segment_size,
+				 u8 notify_app);
+
+/**
+ * Add segment with lock
+ *
+ * @param sm		Segment manager
+ * @param segment_size	Size of segment to be added
+ * @param flags		Flags to be set on segment
+ */
+int segment_manager_add_segment2 (segment_manager_t *sm, uword segment_size,
+				  u8 flags);
 void segment_manager_del_segment (segment_manager_t * sm,
 				  fifo_segment_t * fs);
 void segment_manager_lock_and_del_segment (segment_manager_t * sm,
@@ -118,7 +138,6 @@ u64 segment_manager_make_segment_handle (u32 segment_manager_index,
 u64 segment_manager_segment_handle (segment_manager_t * sm,
 				    fifo_segment_t * segment);
 void segment_manager_segment_reader_unlock (segment_manager_t * sm);
-void segment_manager_segment_writer_unlock (segment_manager_t * sm);
 
 int segment_manager_alloc_session_fifos (segment_manager_t * sm,
 					 u32 thread_index,
@@ -158,6 +177,8 @@ void segment_manager_app_detach (segment_manager_t * sm);
  * @param sm	segment manager whose sessions are to be disconnected
  */
 void segment_manager_del_sessions (segment_manager_t * sm);
+void segment_manager_del_sessions_filter (segment_manager_t *sm,
+					  session_state_t *states);
 void segment_manager_format_sessions (segment_manager_t * sm, int verbose);
 
 void segment_manager_main_init (void);

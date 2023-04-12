@@ -14,22 +14,28 @@
 DPDK_PKTMBUF_HEADROOM        ?= 128
 DPDK_USE_LIBBSD              ?= n
 DPDK_DEBUG                   ?= n
-DPDK_MLX4_PMD                ?= n
-DPDK_MLX5_PMD                ?= n
-DPDK_MLX5_COMMON_PMD         ?= n
 DPDK_TAP_PMD                 ?= n
 DPDK_FAILSAFE_PMD            ?= n
 DPDK_MACHINE                 ?= default
 DPDK_MLX_IBV_LINK            ?= static
 
-dpdk_version                 ?= 20.11
+dpdk_version                 ?= 22.07
 dpdk_base_url                ?= http://fast.dpdk.org/rel
 dpdk_tarball                 := dpdk-$(dpdk_version).tar.xz
-dpdk_tarball_md5sum_20.11    := 13a990dc3b300635f685e268b36918a3
+dpdk_tarball_md5sum_22.07    := fb73b58b80b1349cd05fe9cf6984afd4
+dpdk_tarball_md5sum_22.03    := a07ca8839f98062f46e1cc359735cce8
+dpdk_tarball_md5sum_21.11    := 58660bbbe9e95abce86e47692b196555
+dpdk_tarball_md5sum_21.08    := de33433a1806280996a0ecbe66e3642f
+dpdk_tarball_md5sum_21.05    := a78bba290b11d9717d1272cc6bfaf7c3
 dpdk_tarball_md5sum          := $(dpdk_tarball_md5sum_$(dpdk_version))
 dpdk_url                     := $(dpdk_base_url)/$(dpdk_tarball)
 dpdk_tarball_strip_dirs      := 1
 dpdk_depends		     := rdma-core $(if $(ARCH_X86_64), ipsec-mb)
+
+DPDK_MLX_DEFAULT             := $(shell if grep -q "rdma=$(rdma-core_version) dpdk=$(dpdk_version)" mlx_rdma_dpdk_matrix.txt; then echo 'y'; else echo 'n'; fi)
+DPDK_MLX4_PMD                ?= $(DPDK_MLX_DEFAULT)
+DPDK_MLX5_PMD                ?= $(DPDK_MLX_DEFAULT)
+DPDK_MLX5_COMMON_PMD         ?= $(DPDK_MLX_DEFAULT)
 # Debug or release
 
 DPDK_BUILD_TYPE:=release
@@ -40,10 +46,12 @@ endif
 DPDK_DRIVERS_DISABLED := baseband/\*,	\
 	bus/dpaa,							\
 	bus/ifpga,							\
+	common/cnxk,						\
 	compress/isal,						\
 	compress/octeontx,					\
 	compress/zlib,						\
 	crypto/ccp,							\
+	crypto/cnxk,						\
 	crypto/dpaa_sec,					\
 	crypto/openssl,						\
 	crypto/aesni_mb,						\
@@ -53,9 +61,11 @@ DPDK_DRIVERS_DISABLED := baseband/\*,	\
 	crypto/zuc,						\
 	event/\*,							\
 	mempool/dpaa,						\
+	mempool/cnxk,						\
 	net/af_packet,						\
 	net/bnx2x,							\
 	net/bonding,						\
+	net/cnxk,							\
 	net/ipn3ke,							\
 	net/liquidio,						\
 	net/pcap,							\
@@ -64,13 +74,14 @@ DPDK_DRIVERS_DISABLED := baseband/\*,	\
 	net/softnic,						\
 	net/thunderx,						\
 	raw/ifpga,							\
-	net/af_xdp							
+	net/af_xdp
 
 DPDK_LIBS_DISABLED := acl,				\
 	bbdev,								\
 	bitratestats,						\
 	bpf,								\
 	cfgfile,							\
+	cnxk,							\
 	distributor,						\
 	efd,								\
 	fib,								\
@@ -164,12 +175,13 @@ PIP_DOWNLOAD_DIR = $(CURDIR)/downloads/
 
 define dpdk_config_cmds
 	cd $(dpdk_build_dir) && \
+	echo "DPDK_MLX_DEFAULT=$(DPDK_MLX_DEFAULT)" > ../../../dpdk_mlx_default.sh && \
 	rm -rf ../dpdk-meson-venv && \
 	mkdir -p ../dpdk-meson-venv && \
 	python3 -m venv ../dpdk-meson-venv && \
 	source ../dpdk-meson-venv/bin/activate && \
-	(if ! ls $(PIP_DOWNLOAD_DIR)meson* ; then pip3 download -d $(PIP_DOWNLOAD_DIR) -f $(DL_CACHE_DIR) meson==0.54 setuptools wheel; fi) && \
-	pip3 install --no-index --find-links=$(PIP_DOWNLOAD_DIR) meson==0.54 && \
+	(if ! ls $(PIP_DOWNLOAD_DIR)meson* ; then pip3 download -d $(PIP_DOWNLOAD_DIR) -f $(DL_CACHE_DIR) meson==0.55 setuptools wheel pyelftools; fi) && \
+	pip3 install --no-index --find-links=$(PIP_DOWNLOAD_DIR) meson==0.55 pyelftools && \
 	PKG_CONFIG_PATH=$(dpdk_install_dir)/lib/pkgconfig meson setup $(dpdk_src_dir) \
 		$(dpdk_build_dir) \
 		$(DPDK_MESON_ARGS) \
@@ -181,10 +193,14 @@ define dpdk_config_cmds
 	$(call dpdk_config_def,USE_LIBBSD)
 endef
 
+ifeq ("$(DPDK_VERBOSE)","1")
+DPDK_VERBOSE_BUILD = --verbose
+endif
+
 define dpdk_build_cmds
 	cd $(dpdk_build_dir) && \
 	source ../dpdk-meson-venv/bin/activate && \
-	meson compile -C . | tee $(dpdk_build_log) && \
+	meson compile $(DPDK_VERBOSE_BUILD) -C . | tee $(dpdk_build_log) && \
 	deactivate
 endef
 

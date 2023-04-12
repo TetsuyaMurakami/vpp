@@ -23,6 +23,7 @@
 #include <vnet/ip/ip6_packet.h>
 #include <vnet/ip/ip4_packet.h>
 #include <vnet/udp/udp_packet.h>
+#include <vnet/tcp/tcp_packet.h>
 #include <vnet/interface/rx_queue_funcs.h>
 #include <vmxnet3/vmxnet3.h>
 
@@ -79,7 +80,7 @@ vmxnet3_handle_offload (vmxnet3_rx_comp * rx_comp, vlib_buffer_t * hb,
 			u16 gso_size)
 {
   u8 l4_hdr_sz = 0;
-  u32 oflags = 0;
+  vnet_buffer_oflags_t oflags = 0;
 
   if (rx_comp->flags & VMXNET3_RXCF_IP4)
     {
@@ -106,19 +107,11 @@ vmxnet3_handle_offload (vmxnet3_rx_comp * rx_comp, vlib_buffer_t * hb,
 	    {
 	      if (rx_comp->flags & VMXNET3_RXCF_TCP)
 		{
-		  tcp_header_t *tcp =
-		    (tcp_header_t *) (hb->data +
-				      vnet_buffer (hb)->l4_hdr_offset);
 		  oflags |= VNET_BUFFER_OFFLOAD_F_TCP_CKSUM;
-		  tcp->checksum = 0;
 		}
 	      else if (rx_comp->flags & VMXNET3_RXCF_UDP)
 		{
-		  udp_header_t *udp =
-		    (udp_header_t *) (hb->data +
-				      vnet_buffer (hb)->l4_hdr_offset);
 		  oflags |= VNET_BUFFER_OFFLOAD_F_UDP_CKSUM;
-		  udp->checksum = 0;
 		}
 	    }
 	}

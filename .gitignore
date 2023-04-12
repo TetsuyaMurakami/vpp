@@ -10,6 +10,7 @@
 /build-root/path_setup
 /build-root/deb/debian/vpp-plugins/
 /build-root/deb/.pybuild/
+/build-root/*.buildinfo
 /build-root/*.deb
 /build-root/*.rpm
 /build-root/*.tar.xz
@@ -17,14 +18,17 @@
 /build-root/rpmbuild/
 /build-root/test-doc/
 /build-root/test-cov/
+/build-root/test/
 /test/run/
 /test/build/
 /test/coverage/
+/test/vapi_test/
+/test/doc/build/
 /build-config.mk
 /build/external/*.tar.gz
 /build/external/*.tar.xz
-/build/external/vpp-*.deb
-/build/external/vpp-*.changes
+/build/external/vpp-*
+/build/external/dpdk_mlx_default.sh
 /build/external/downloads/
 /path_setup
 /tools/
@@ -39,7 +43,6 @@ config.log
 config.guess
 config.sub
 config.status
-configure
 configure.scan
 coverage_report
 depcomp
@@ -80,14 +83,12 @@ GTAGS
 /build-root/docs
 /build-root/.doxygen-bootstrap.ok
 /build-root/.doxygen-siphon.dep
-/docs/_build
-/docs/dynamic_includes
-/sphinx_venv
-!/docs/Makefile
+/docs/venv
 
 # language servers
 compile_commands.json
 .clangd
+.cache
 
 # indent backup files
 *.BAK
@@ -113,3 +114,18 @@ compile_commands.json
 
 # extras gomemif build files
 /extras/gomemif/bazel*
+
+# vpptop build files
+/extras/vpptop/build/*
+
+# debian packaging
+.pc
+
+# No test log files
+**/test-run-*-*-*
+
+# host stack test framework
+/extras/hs-test/vpp-data
+/extras/hs-test/hs-test
+/extras/hs-test/http_server
+/extras/hs-test/.build.vpp

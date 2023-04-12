@@ -77,237 +77,53 @@ set_is_user (void *v, uword i, uword is_user)
 
 static u8 *hash_format_pair_default (u8 * s, va_list * args);
 
-#if uword_bits == 64
-
-static inline u64
-zap64 (u64 x, word n)
-{
-#define _(n) (((u64) 1 << (u64) (8*(n))) - (u64) 1)
-  static u64 masks_little_endian[] = {
-    0, _(1), _(2), _(3), _(4), _(5), _(6), _(7),
-  };
-  static u64 masks_big_endian[] = {
-    0, ~_(7), ~_(6), ~_(5), ~_(4), ~_(3), ~_(2), ~_(1),
-  };
-#undef _
-  if (clib_arch_is_big_endian)
-    return x & masks_big_endian[n];
-  else
-    return x & masks_little_endian[n];
-}
-
-/**
- * make address-sanitizer skip this:
- * clib_mem_unaligned + zap64 casts its input as u64, computes a mask
- * according to the input length, and returns the casted maked value.
- * Therefore all the 8 Bytes of the u64 are systematically read, which
- * rightfully causes address-sanitizer to raise an error on smaller inputs.
- *
- * However the invalid Bytes are discarded within zap64(), which is why
- * this can be silenced safely.
- *
- * The above is true *unless* the extra bytes cross a page boundary
- * into unmapped or no-access space, hence the boundary crossing check.
- */
-static inline u64
-hash_memory64 (void *p, word n_bytes, u64 state)
-{
-  u64 *q = p;
-  u64 a, b, c, n;
-  int page_boundary_crossing;
-  u64 start_addr, end_addr;
-  union
-  {
-    u8 as_u8[8];
-    u64 as_u64;
-  } tmp;
-
-  /*
-   * If the request crosses a 4k boundary, it's not OK to assume
-   * that the zap64 game is safe. 4k is the minimum known page size.
-   */
-  start_addr = (u64) p;
-  end_addr = start_addr + n_bytes + 7;
-  page_boundary_crossing = (start_addr >> 12) != (end_addr >> 12);
-
-  a = b = 0x9e3779b97f4a7c13LL;
-  c = state;
-  n = n_bytes;
-
-  while (n >= 3 * sizeof (u64))
-    {
-      a += clib_mem_unaligned (q + 0, u64);
-      b += clib_mem_unaligned (q + 1, u64);
-      c += clib_mem_unaligned (q + 2, u64);
-      hash_mix64 (a, b, c);
-      n -= 3 * sizeof (u64);
-      q += 3;
-    }
-
-  c += n_bytes;
-  switch (n / sizeof (u64))
-    {
-    case 2:
-      a += clib_mem_unaligned (q + 0, u64);
-      b += clib_mem_unaligned (q + 1, u64);
-      if (n % sizeof (u64))
-	{
-	  if (PREDICT_TRUE (page_boundary_crossing == 0))
-	    c +=
-	      zap64 (CLIB_MEM_OVERFLOW
-		     (clib_mem_unaligned (q + 2, u64), q + 2, sizeof (u64)),
-		     n % sizeof (u64)) << 8;
-	  else
-	    {
-	      clib_memcpy_fast (tmp.as_u8, q + 2, n % sizeof (u64));
-	      c += zap64 (tmp.as_u64, n % sizeof (u64)) << 8;
-	    }
-	}
-      break;
-
-    case 1:
-      a += clib_mem_unaligned (q + 0, u64);
-      if (n % sizeof (u64))
-	{
-	  if (PREDICT_TRUE (page_boundary_crossing == 0))
-	    b +=
-	      zap64 (CLIB_MEM_OVERFLOW
-		     (clib_mem_unaligned (q + 1, u64), q + 1, sizeof (u64)),
-		     n % sizeof (u64));
-	  else
-	    {
-	      clib_memcpy_fast (tmp.as_u8, q + 1, n % sizeof (u64));
-	      b += zap64 (tmp.as_u64, n % sizeof (u64));
-	    }
-	}
-      break;
-
-    case 0:
-      if (n % sizeof (u64))
-	{
-	  if (PREDICT_TRUE (page_boundary_crossing == 0))
-	    a +=
-	      zap64 (CLIB_MEM_OVERFLOW
-		     (clib_mem_unaligned (q + 0, u64), q + 0, sizeof (u64)),
-		     n % sizeof (u64));
-	  else
-	    {
-	      clib_memcpy_fast (tmp.as_u8, q, n % sizeof (u64));
-	      a += zap64 (tmp.as_u64, n % sizeof (u64));
-	    }
-	}
-      break;
-    }
-
-  hash_mix64 (a, b, c);
-
-  return c;
-}
-
-#else /* if uword_bits == 64 */
-
-static inline u32
-zap32 (u32 x, word n)
-{
-#define _(n) (((u32) 1 << (u32) (8*(n))) - (u32) 1)
-  static u32 masks_little_endian[] = {
-    0, _(1), _(2), _(3),
-  };
-  static u32 masks_big_endian[] = {
-    0, ~_(3), ~_(2), ~_(1),
-  };
-#undef _
-  if (clib_arch_is_big_endian)
-    return x & masks_big_endian[n];
-  else
-    return x & masks_little_endian[n];
-}
-
-static inline u32
-hash_memory32 (void *p, word n_bytes, u32 state)
-{
-  u32 *q = p;
-  u32 a, b, c, n;
-
-  a = b = 0x9e3779b9;
-  c = state;
-  n = n_bytes;
-
-  while (n >= 3 * sizeof (u32))
-    {
-      a += clib_mem_unaligned (q + 0, u32);
-      b += clib_mem_unaligned (q + 1, u32);
-      c += clib_mem_unaligned (q + 2, u32);
-      hash_mix32 (a, b, c);
-      n -= 3 * sizeof (u32);
-      q += 3;
-    }
-
-  c += n_bytes;
-  switch (n / sizeof (u32))
-    {
-    case 2:
-      a += clib_mem_unaligned (q + 0, u32);
-      b += clib_mem_unaligned (q + 1, u32);
-      if (n % sizeof (u32))
-	c += zap32 (clib_mem_unaligned (q + 2, u32), n % sizeof (u32)) << 8;
-      break;
-
-    case 1:
-      a += clib_mem_unaligned (q + 0, u32);
-      if (n % sizeof (u32))
-	b += zap32 (clib_mem_unaligned (q + 1, u32), n % sizeof (u32));
-      break;
-
-    case 0:
-      if (n % sizeof (u32))
-	a += zap32 (clib_mem_unaligned (q + 0, u32), n % sizeof (u32));
-      break;
-    }
-
-  hash_mix32 (a, b, c);
-
-  return c;
-}
-#endif
-
 __clib_export uword
 hash_memory (void *p, word n_bytes, uword state)
 {
-  uword *q = p;
+  uword last[3] = {};
+  uwordu *q = p;
+  u64 a, b, c, n;
 
-#if uword_bits == 64
-  return hash_memory64 (q, n_bytes, state);
-#else
-  return hash_memory32 (q, n_bytes, state);
-#endif
+  a = b = (uword_bits == 64) ? 0x9e3779b97f4a7c13LL : 0x9e3779b9;
+  c = state;
+  n = n_bytes;
+
+  while (n >= 3 * sizeof (uword))
+    {
+      a += q[0];
+      b += q[1];
+      c += q[2];
+      hash_mix (a, b, c);
+      n -= 3 * sizeof (uword);
+      q += 3;
+    }
+
+  c += n_bytes;
+
+  if (n > 0)
+    {
+      clib_memcpy_fast (&last, q, n);
+      a += last[0];
+      b += last[1];
+      c += last[2];
+    }
+
+  hash_mix (a, b, c);
+
+  return c;
 }
 
-#if uword_bits == 64
 always_inline uword
 hash_uword (uword x)
 {
-  u64 a, b, c;
+  uword a, b, c;
 
-  a = b = 0x9e3779b97f4a7c13LL;
+  a = b = (uword_bits == 64) ? 0x9e3779b97f4a7c13LL : 0x9e3779b9;
   c = 0;
   a += x;
-  hash_mix64 (a, b, c);
+  hash_mix (a, b, c);
   return c;
 }
-#else
-always_inline uword
-hash_uword (uword x)
-{
-  u32 a, b, c;
-
-  a = b = 0x9e3779b9;
-  c = 0;
-  a += x;
-  hash_mix32 (a, b, c);
-  return c;
-}
-#endif
 
 /* Call sum function.  Hash code will be sum function value
    modulo the prime length of the hash table. */
@@ -469,9 +285,7 @@ set_indirect (void *v, hash_pair_indirect_t * pi, uword key,
       new_len = len + 1;
       if (new_len * hash_pair_bytes (h) > (1ULL << log2_bytes))
 	{
-	  pi->pairs = clib_mem_realloc (pi->pairs,
-					1ULL << (log2_bytes + 1),
-					1ULL << log2_bytes);
+	  pi->pairs = clib_mem_realloc (pi->pairs, 1ULL << (log2_bytes + 1));
 	  log2_bytes++;
 	}
 
@@ -528,7 +342,7 @@ unset_indirect (void *v, uword i, hash_pair_t * q)
       else
 	zero_pair (h, q);
       if (is_vec)
-	_vec_len (pi->pairs) -= 1;
+	vec_dec_len (pi->pairs, 1);
       else
 	indirect_pair_set (pi, indirect_pair_get_log2_bytes (pi), len - 1);
     }
@@ -653,8 +467,8 @@ _hash_get_pair (void *v, uword key)
   return lookup (v, key, GET, 0, 0);
 }
 
-hash_pair_t *
-hash_next (void *v, hash_next_t * hn)
+__clib_export hash_pair_t *
+hash_next (void *v, hash_next_t *hn)
 {
   hash_t *h = hash_header (v);
   hash_pair_t *p;
@@ -734,6 +548,7 @@ _hash_create (uword elts, hash_t * h_user)
   hash_t *h;
   uword log2_pair_size;
   void *v;
+  vec_attr_t va = { .hdr_sz = sizeof (h[0]), .align = sizeof (hash_pair_t) };
 
   /* Size of hash is power of 2 >= ELTS and larger than
      number of bits in is_user bitmap elements. */
@@ -744,19 +559,19 @@ _hash_create (uword elts, hash_t * h_user)
   if (h_user)
     log2_pair_size = h_user->log2_pair_size;
 
-  v = _vec_resize ((void *) 0,
-		   /* vec len: */ elts,
-		   /* data bytes: */
-		   (elts << log2_pair_size) * sizeof (hash_pair_t),
-		   /* header bytes: */
-		   sizeof (h[0]) +
-		   (elts / BITS (h->is_user[0])) * sizeof (h->is_user[0]),
-		   /* alignment */ sizeof (hash_pair_t));
+  va.elt_sz = (1 << log2_pair_size) * sizeof (hash_pair_t),
+  v = _vec_alloc_internal (elts, &va);
   h = hash_header (v);
 
   if (h_user)
-    h[0] = h_user[0];
+    {
+      h[0] = h_user[0];
+      h->is_user = 0;
+    }
 
+  vec_validate_aligned (
+    h->is_user, ((elts / BITS (h->is_user[0])) * sizeof (h->is_user[0])) - 1,
+    CLIB_CACHE_LINE_BYTES);
   h->log2_pair_size = log2_pair_size;
   h->elts = 0;
 
@@ -796,6 +611,7 @@ _hash_free (void *v)
 	clib_mem_free (p->indirect.pairs);
     }
 
+  vec_free (h->is_user);
   vec_free_header (h);
 
   return 0;
@@ -824,7 +640,7 @@ hash_resize_internal (void *old, uword new_size, uword free_old)
   return new;
 }
 
-void *
+__clib_export void *
 hash_resize (void *old, uword new_size)
 {
   return hash_resize_internal (old, new_size, 1);
@@ -999,7 +815,7 @@ hash_bytes (void *v)
   if (!v)
     return 0;
 
-  bytes = vec_capacity (v, hash_header_bytes (v));
+  bytes = vec_mem_size (v);
 
   for (i = 0; i < hash_capacity (v); i++)
     {
@@ -1009,14 +825,14 @@ hash_bytes (void *v)
 	  if (h->log2_pair_size > 0)
 	    bytes += 1 << indirect_pair_get_log2_bytes (&p->indirect);
 	  else
-	    bytes += vec_capacity (p->indirect.pairs, 0);
+	    bytes += vec_mem_size (p->indirect.pairs);
 	}
     }
   return bytes;
 }
 
-u8 *
-format_hash (u8 * s, va_list * va)
+__clib_export u8 *
+format_hash (u8 *s, va_list *va)
 {
   void *v = va_arg (*va, void *);
   int verbose = va_arg (*va, int);
@@ -1110,7 +926,7 @@ unformat_hash_string (unformat_input_t * input, va_list * va)
   return unformat_hash_string_internal (input, va, /* is_vec */ 0);
 }
 
-clib_error_t *
+__clib_export clib_error_t *
 hash_validate (void *v)
 {
   hash_t *h = hash_header (v);

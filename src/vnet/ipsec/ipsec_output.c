@@ -21,8 +21,7 @@
 
 #include <vnet/ipsec/ipsec.h>
 #include <vnet/ipsec/ipsec_io.h>
-
-#if WITH_LIBSSL > 0
+#include <vnet/ipsec/ipsec_output.h>
 
 #define foreach_ipsec_output_error                   \
  _(RX_PKTS, "IPSec pkts received")                   \
@@ -65,114 +64,6 @@ format_ipsec_output_trace (u8 * s, va_list * args)
   return s;
 }
 
-always_inline ipsec_policy_t *
-ipsec_output_policy_match (ipsec_spd_t * spd, u8 pr, u32 la, u32 ra, u16 lp,
-			   u16 rp)
-{
-  ipsec_main_t *im = &ipsec_main;
-  ipsec_policy_t *p;
-  u32 *i;
-
-  if (!spd)
-    return 0;
-
-  vec_foreach (i, spd->policies[IPSEC_SPD_POLICY_IP4_OUTBOUND])
-  {
-    p = pool_elt_at_index (im->policies, *i);
-    if (PREDICT_FALSE (p->protocol && (p->protocol != pr)))
-      continue;
-
-    if (ra < clib_net_to_host_u32 (p->raddr.start.ip4.as_u32))
-      continue;
-
-    if (ra > clib_net_to_host_u32 (p->raddr.stop.ip4.as_u32))
-      continue;
-
-    if (la < clib_net_to_host_u32 (p->laddr.start.ip4.as_u32))
-      continue;
-
-    if (la > clib_net_to_host_u32 (p->laddr.stop.ip4.as_u32))
-      continue;
-
-    if (PREDICT_FALSE
-	((pr != IP_PROTOCOL_TCP) && (pr != IP_PROTOCOL_UDP)
-	 && (pr != IP_PROTOCOL_SCTP)))
-      return p;
-
-    if (lp < p->lport.start)
-      continue;
-
-    if (lp > p->lport.stop)
-      continue;
-
-    if (rp < p->rport.start)
-      continue;
-
-    if (rp > p->rport.stop)
-      continue;
-
-    return p;
-  }
-  return 0;
-}
-
-always_inline uword
-ip6_addr_match_range (ip6_address_t * a, ip6_address_t * la,
-		      ip6_address_t * ua)
-{
-  if ((memcmp (a->as_u64, la->as_u64, 2 * sizeof (u64)) >= 0) &&
-      (memcmp (a->as_u64, ua->as_u64, 2 * sizeof (u64)) <= 0))
-    return 1;
-  return 0;
-}
-
-always_inline ipsec_policy_t *
-ipsec6_output_policy_match (ipsec_spd_t * spd,
-			    ip6_address_t * la,
-			    ip6_address_t * ra, u16 lp, u16 rp, u8 pr)
-{
-  ipsec_main_t *im = &ipsec_main;
-  ipsec_policy_t *p;
-  u32 *i;
-
-  if (!spd)
-    return 0;
-
-  vec_foreach (i, spd->policies[IPSEC_SPD_POLICY_IP6_OUTBOUND])
-  {
-    p = pool_elt_at_index (im->policies, *i);
-    if (PREDICT_FALSE (p->protocol && (p->protocol != pr)))
-      continue;
-
-    if (!ip6_addr_match_range (ra, &p->raddr.start.ip6, &p->raddr.stop.ip6))
-      continue;
-
-    if (!ip6_addr_match_range (la, &p->laddr.start.ip6, &p->laddr.stop.ip6))
-      continue;
-
-    if (PREDICT_FALSE
-	((pr != IP_PROTOCOL_TCP) && (pr != IP_PROTOCOL_UDP)
-	 && (pr != IP_PROTOCOL_SCTP)))
-      return p;
-
-    if (lp < p->lport.start)
-      continue;
-
-    if (lp > p->lport.stop)
-      continue;
-
-    if (rp < p->rport.start)
-      continue;
-
-    if (rp > p->rport.stop)
-      continue;
-
-    return p;
-  }
-
-  return 0;
-}
-
 static inline uword
 ipsec_output_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 		     vlib_frame_t * from_frame, int is_ipv6)
@@ -187,6 +78,7 @@ ipsec_output_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
   ipsec_spd_t *spd0 = 0;
   int bogus;
   u64 nc_protect = 0, nc_bypass = 0, nc_discard = 0, nc_nomatch = 0;
+  u8 flow_cache_enabled = im->output_flow_cache_flag;
 
   from = vlib_frame_vector_args (from_frame);
   n_left_from = from_frame->n_vectors;
@@ -196,7 +88,7 @@ ipsec_output_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
     {
       u32 bi0, pi0, bi1;
       vlib_buffer_t *b0, *b1;
-      ipsec_policy_t *p0;
+      ipsec_policy_t *p0 = NULL;
       ip4_header_t *ip0;
       ip6_header_t *ip6_0 = 0;
       udp_header_t *udp0;
@@ -264,15 +156,26 @@ ipsec_output_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 			sw_if_index0, spd_index0, spd0->id);
 #endif
 
-	  p0 = ipsec_output_policy_match (spd0, ip0->protocol,
-					  clib_net_to_host_u32
-					  (ip0->src_address.as_u32),
-					  clib_net_to_host_u32
-					  (ip0->dst_address.as_u32),
-					  clib_net_to_host_u16
-					  (udp0->src_port),
-					  clib_net_to_host_u16
-					  (udp0->dst_port));
+	  /*
+	   * Check whether flow cache is enabled.
+	   */
+	  if (flow_cache_enabled)
+	    {
+	      p0 = ipsec4_out_spd_find_flow_cache_entry (
+		im, ip0->protocol, ip0->src_address.as_u32,
+		ip0->dst_address.as_u32, udp0->src_port, udp0->dst_port);
+	    }
+
+	  /* Fall back to linear search if flow cache lookup fails */
+	  if (p0 == NULL)
+	    {
+	      p0 = ipsec_output_policy_match (
+		spd0, ip0->protocol,
+		clib_net_to_host_u32 (ip0->src_address.as_u32),
+		clib_net_to_host_u32 (ip0->dst_address.as_u32),
+		clib_net_to_host_u16 (udp0->src_port),
+		clib_net_to_host_u16 (udp0->dst_port), flow_cache_enabled);
+	    }
 	}
       tcp0 = (void *) udp0;
 
@@ -297,7 +200,7 @@ ipsec_output_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 	    {
 	      ipsec_sa_t *sa = 0;
 	      nc_protect++;
-	      sa = pool_elt_at_index (im->sad, p0->sa_index);
+	      sa = ipsec_sa_get (p0->sa_index);
 	      if (sa->protocol == IPSEC_PROTOCOL_ESP)
 		if (is_ipv6)
 		  next_node_index = im->esp6_encrypt_node_index;
@@ -311,7 +214,7 @@ ipsec_output_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 
 	      if (PREDICT_FALSE (b0->flags & VNET_BUFFER_F_OFFLOAD))
 		{
-		  u32 oflags = vnet_buffer2 (b0)->oflags;
+		  vnet_buffer_oflags_t oflags = vnet_buffer (b0)->oflags;
 
 		  /*
 		   * Clearing offload flags before checksum is computed
@@ -458,7 +361,6 @@ VLIB_NODE_FN (ipsec6_output_node) (vlib_main_t * vm,
   return ipsec_output_inline (vm, node, frame, 1);
 }
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (ipsec6_output_node) = {
   .name = "ipsec6-output-feature",
   .vector_size = sizeof (u32),
@@ -475,38 +377,4 @@ VLIB_REGISTER_NODE (ipsec6_output_node) = {
 #undef _
   },
 };
-/* *INDENT-ON* */
 
-#else /* IPSEC > 1 */
-
-/* Dummy ipsec output node, in case when IPSec is disabled */
-
-static uword
-ipsec_output_node_fn (vlib_main_t * vm,
-		      vlib_node_runtime_t * node, vlib_frame_t * frame)
-{
-  return 0;
-}
-
-/* *INDENT-OFF* */
-VLIB_REGISTER_NODE (ipsec4_output_node) = {
-  .vector_size = sizeof (u32),
-  .function = ipsec_output_node_fn,
-  .name = "ipsec4-output-feature",
-};
-
-VLIB_REGISTER_NODE (ipsec6_output_node) = {
-  .vector_size = sizeof (u32),
-  .function = ipsec_output_node_fn,
-  .name = "ipsec6-output-feature",
-};
-/* *INDENT-ON* */
-#endif
-
-/*
- * fd.io coding-style-patch-verification: ON
- *
- * Local Variables:
- * eval: (c-set-style "gnu")
- * End:
- */

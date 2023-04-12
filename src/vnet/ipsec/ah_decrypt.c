@@ -38,28 +38,6 @@ typedef enum
     AH_DECRYPT_N_NEXT,
 } ah_decrypt_next_t;
 
-#define foreach_ah_decrypt_error                \
-  _ (RX_PKTS, "AH pkts received")               \
-  _ (DECRYPTION_FAILED, "AH decryption failed") \
-  _ (INTEG_ERROR, "Integrity check failed")     \
-  _ (NO_TAIL_SPACE, "not enough buffer tail space (dropped)")     \
-  _ (DROP_FRAGMENTS, "IP fragments drop")       \
-  _ (REPLAY, "SA replayed packet")
-
-typedef enum
-{
-#define _(sym,str) AH_DECRYPT_ERROR_##sym,
-  foreach_ah_decrypt_error
-#undef _
-    AH_DECRYPT_N_ERROR,
-} ah_decrypt_error_t;
-
-static char *ah_decrypt_error_strings[] = {
-#define _(sym,string) string,
-  foreach_ah_decrypt_error
-#undef _
-};
-
 typedef struct
 {
   ipsec_integ_alg_t integ_alg;
@@ -98,6 +76,7 @@ typedef struct
   };
   u32 sa_index;
   u32 seq;
+  u32 seq_hi;
   u8 icv_padding_len;
   u8 icv_size;
   u8 ip_hdr_size;
@@ -124,8 +103,9 @@ ah_process_ops (vlib_main_t * vm, vlib_node_runtime_t * node,
       if (op->status != VNET_CRYPTO_OP_STATUS_COMPLETED)
 	{
 	  u32 bi = op->user_data;
-	  b[bi]->error = node->errors[AH_DECRYPT_ERROR_INTEG_ERROR];
-	  nexts[bi] = AH_DECRYPT_NEXT_DROP;
+	  ah_decrypt_set_next_index (
+	    b[bi], node, vm->thread_index, AH_DECRYPT_ERROR_INTEG_ERROR, bi,
+	    nexts, AH_DECRYPT_NEXT_DROP, vnet_buffer (b[bi])->ipsec.sad_index);
 	  n_fail--;
 	}
       op++;
@@ -165,18 +145,17 @@ ah_decrypt_inline (vlib_main_t * vm,
 	{
 	  if (current_sa_index != ~0)
 	    vlib_increment_combined_counter (&ipsec_sa_counters, thread_index,
-					     current_sa_index,
-					     current_sa_pkts,
+					     current_sa_index, current_sa_pkts,
 					     current_sa_bytes);
 	  current_sa_index = vnet_buffer (b[0])->ipsec.sad_index;
-	  sa0 = pool_elt_at_index (im->sad, current_sa_index);
+	  sa0 = ipsec_sa_get (current_sa_index);
 
 	  current_sa_bytes = current_sa_pkts = 0;
 	  vlib_prefetch_combined_counter (&ipsec_sa_counters,
 					  thread_index, current_sa_index);
 	}
 
-      if (PREDICT_FALSE (~0 == sa0->thread_index))
+      if (PREDICT_FALSE ((u16) ~0 == sa0->thread_index))
 	{
 	  /* this is the first packet to use this SA, claim the SA
 	   * for this thread. this could happen simultaneously on
@@ -210,8 +189,9 @@ ah_decrypt_inline (vlib_main_t * vm,
 	{
 	  if (ip4_is_fragment (ih4))
 	    {
-	      b[0]->error = node->errors[AH_DECRYPT_ERROR_DROP_FRAGMENTS];
-	      next[0] = AH_DECRYPT_NEXT_DROP;
+	      ah_decrypt_set_next_index (
+		b[0], node, vm->thread_index, AH_DECRYPT_ERROR_DROP_FRAGMENTS,
+		0, next, AH_DECRYPT_NEXT_DROP, current_sa_index);
 	      goto next;
 	    }
 	  pd->ip_hdr_size = ip4_header_bytes (ih4);
@@ -221,10 +201,12 @@ ah_decrypt_inline (vlib_main_t * vm,
       pd->seq = clib_host_to_net_u32 (ah0->seq_no);
 
       /* anti-replay check */
-      if (ipsec_sa_anti_replay_check (sa0, pd->seq))
+      if (ipsec_sa_anti_replay_and_sn_advance (sa0, pd->seq, ~0, false,
+					       &pd->seq_hi))
 	{
-	  b[0]->error = node->errors[AH_DECRYPT_ERROR_REPLAY];
-	  next[0] = AH_DECRYPT_NEXT_DROP;
+	  ah_decrypt_set_next_index (b[0], node, vm->thread_index,
+				     AH_DECRYPT_ERROR_REPLAY, 0, next,
+				     AH_DECRYPT_NEXT_DROP, current_sa_index);
 	  goto next;
 	}
 
@@ -239,8 +221,9 @@ ah_decrypt_inline (vlib_main_t * vm,
 			     pd->current_data + b[0]->current_length
 			     + sizeof (u32) > buffer_data_size))
 	    {
-	      b[0]->error = node->errors[AH_DECRYPT_ERROR_NO_TAIL_SPACE];
-	      next[0] = AH_DECRYPT_NEXT_DROP;
+	      ah_decrypt_set_next_index (
+		b[0], node, vm->thread_index, AH_DECRYPT_ERROR_NO_TAIL_SPACE,
+		0, next, AH_DECRYPT_NEXT_DROP, current_sa_index);
 	      goto next;
 	    }
 
@@ -257,7 +240,7 @@ ah_decrypt_inline (vlib_main_t * vm,
 	  op->user_data = b - bufs;
 	  if (ipsec_sa_is_set_USE_ESN (sa0))
 	    {
-	      u32 seq_hi = clib_host_to_net_u32 (sa0->seq_hi);
+	      u32 seq_hi = clib_host_to_net_u32 (pd->seq_hi);
 
 	      op->len += sizeof (seq_hi);
 	      clib_memcpy (op->src + b[0]->current_length, &seq_hi,
@@ -313,22 +296,29 @@ ah_decrypt_inline (vlib_main_t * vm,
     {
       ip4_header_t *oh4;
       ip6_header_t *oh6;
+      u64 n_lost = 0;
 
       if (next[0] < AH_DECRYPT_N_NEXT)
 	goto trace;
 
-      sa0 = vec_elt_at_index (im->sad, pd->sa_index);
+      sa0 = ipsec_sa_get (pd->sa_index);
 
       if (PREDICT_TRUE (sa0->integ_alg != IPSEC_INTEG_ALG_NONE))
 	{
-	  /* redo the anit-reply check. see esp_decrypt for details */
-	  if (ipsec_sa_anti_replay_check (sa0, pd->seq))
+	  /* redo the anti-reply check. see esp_decrypt for details */
+	  if (ipsec_sa_anti_replay_and_sn_advance (sa0, pd->seq, pd->seq_hi,
+						   true, NULL))
 	    {
-	      b[0]->error = node->errors[AH_DECRYPT_ERROR_REPLAY];
-	      next[0] = AH_DECRYPT_NEXT_DROP;
+	      ah_decrypt_set_next_index (b[0], node, vm->thread_index,
+					 AH_DECRYPT_ERROR_REPLAY, 0, next,
+					 AH_DECRYPT_NEXT_DROP, pd->sa_index);
 	      goto trace;
 	    }
-	  ipsec_sa_anti_replay_advance (sa0, pd->seq);
+	  n_lost = ipsec_sa_anti_replay_advance (sa0, thread_index, pd->seq,
+						 pd->seq_hi);
+	  vlib_prefetch_simple_counter (
+	    &ipsec_sa_err_counters[IPSEC_SA_ERROR_LOST], thread_index,
+	    pd->sa_index);
 	}
 
       u16 ah_hdr_len = sizeof (ah_header_t) + pd->icv_size
@@ -344,8 +334,10 @@ ah_decrypt_inline (vlib_main_t * vm,
 	    next[0] = AH_DECRYPT_NEXT_IP6_INPUT;
 	  else
 	    {
-	      b[0]->error = node->errors[AH_DECRYPT_ERROR_DECRYPTION_FAILED];
-	      next[0] = AH_DECRYPT_NEXT_DROP;
+	      ah_decrypt_set_next_index (b[0], node, vm->thread_index,
+					 AH_DECRYPT_ERROR_DECRYPTION_FAILED, 0,
+					 next, AH_DECRYPT_NEXT_DROP,
+					 pd->sa_index);
 	      goto trace;
 	    }
 	}
@@ -395,12 +387,16 @@ ah_decrypt_inline (vlib_main_t * vm,
 	    }
 	}
 
+      if (PREDICT_FALSE (n_lost))
+	vlib_increment_simple_counter (
+	  &ipsec_sa_err_counters[IPSEC_SA_ERROR_LOST], thread_index,
+	  pd->sa_index, n_lost);
+
       vnet_buffer (b[0])->sw_if_index[VLIB_TX] = (u32) ~ 0;
     trace:
       if (PREDICT_FALSE (b[0]->flags & VLIB_BUFFER_IS_TRACED))
 	{
-	  sa0 = pool_elt_at_index (im->sad,
-				   vnet_buffer (b[0])->ipsec.sad_index);
+	  sa0 = ipsec_sa_get (vnet_buffer (b[0])->ipsec.sad_index);
 	  ah_decrypt_trace_t *tr =
 	    vlib_add_trace (vm, node, b[0], sizeof (*tr));
 	  tr->integ_alg = sa0->integ_alg;
@@ -433,8 +429,8 @@ VLIB_REGISTER_NODE (ah4_decrypt_node) = {
   .format_trace = format_ah_decrypt_trace,
   .type = VLIB_NODE_TYPE_INTERNAL,
 
-  .n_errors = ARRAY_LEN(ah_decrypt_error_strings),
-  .error_strings = ah_decrypt_error_strings,
+  .n_errors = AH_DECRYPT_N_ERROR,
+  .error_counters = ah_decrypt_error_counters,
 
   .n_next_nodes = AH_DECRYPT_N_NEXT,
   .next_nodes = {
@@ -460,8 +456,8 @@ VLIB_REGISTER_NODE (ah6_decrypt_node) = {
   .format_trace = format_ah_decrypt_trace,
   .type = VLIB_NODE_TYPE_INTERNAL,
 
-  .n_errors = ARRAY_LEN(ah_decrypt_error_strings),
-  .error_strings = ah_decrypt_error_strings,
+  .n_errors = AH_DECRYPT_N_ERROR,
+  .error_counters = ah_decrypt_error_counters,
 
   .n_next_nodes = AH_DECRYPT_N_NEXT,
   .next_nodes = {
@@ -472,6 +468,25 @@ VLIB_REGISTER_NODE (ah6_decrypt_node) = {
   },
 };
 /* *INDENT-ON* */
+
+#ifndef CLIB_MARCH_VARIANT
+
+static clib_error_t *
+ah_decrypt_init (vlib_main_t *vm)
+{
+  ipsec_main_t *im = &ipsec_main;
+
+  im->ah4_dec_fq_index =
+    vlib_frame_queue_main_init (ah4_decrypt_node.index, 0);
+  im->ah6_dec_fq_index =
+    vlib_frame_queue_main_init (ah6_decrypt_node.index, 0);
+
+  return 0;
+}
+
+VLIB_INIT_FUNCTION (ah_decrypt_init);
+
+#endif
 
 /*
  * fd.io coding-style-patch-verification: ON

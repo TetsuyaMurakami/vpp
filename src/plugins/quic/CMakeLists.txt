@@ -13,13 +13,13 @@
 # limitations under the License.
 
 unset(QUIC_LINK_LIBRARIES)
-set(EXPECTED_QUICLY_VERSION "0.1.2-vpp")
+set(EXPECTED_QUICLY_VERSION "0.1.4-vpp")
 
-find_path(QUICLY_INCLUDE_DIR NAMES quicly.h)
-find_path(PICOTLS_INCLUDE_DIR NAMES picotls.h)
-find_library (QUICLY_LIBRARY NAMES "libquicly.a")
-find_library (PICOTLS_CORE_LIBRARY NAMES "libpicotls-core.a")
-find_library (PICOTLS_OPENSSL_LIBRARY NAMES "libpicotls-openssl.a")
+vpp_find_path(QUICLY_INCLUDE_DIR NAMES quicly.h)
+vpp_find_path(PICOTLS_INCLUDE_DIR NAMES picotls.h)
+vpp_find_library(QUICLY_LIBRARY NAMES "libquicly.a")
+vpp_find_library(PICOTLS_CORE_LIBRARY NAMES "libpicotls-core.a")
+vpp_find_library(PICOTLS_OPENSSL_LIBRARY NAMES "libpicotls-openssl.a")
 
 list(APPEND QUIC_LINK_LIBRARIES
   ${QUICLY_LIBRARY}
@@ -48,7 +48,7 @@ if(QUICLY_INCLUDE_DIR AND QUIC_LINK_LIBRARIES)
       quic.c
       quic_crypto.c
 
-      LINK_LIBRARIES ${QUIC_LINK_LIBRARIES}
+      LINK_LIBRARIES ${QUIC_LINK_LIBRARIES} ${OPENSSL_LIBRARIES}
     )
     message(STATUS "Found quicly ${EXPECTED_QUICLY_VERSION} in ${QUICLY_INCLUDE_DIR}")
   else()

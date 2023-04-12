@@ -56,16 +56,17 @@
  * vlib_load_new_plugins().
  */
 
-/* *INDENT-OFF* */
-typedef CLIB_PACKED(struct {
-  u8 default_disabled;
-  const char version[32];
-  const char version_required[32];
+typedef struct
+{
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
+  u8 default_disabled : 1;
+  u8 deep_bind : 1;
+  const char version[64];
+  const char version_required[64];
   const char overrides[256];
   const char *early_init;
   const char *description;
-}) vlib_plugin_registration_t;
-/* *INDENT-ON* */
+} vlib_plugin_registration_t;
 
 /*
  * Plugins may also use this registration format, which is
@@ -123,6 +124,7 @@ typedef struct
 
   /* paths and name filters */
   u8 *plugin_path;
+  u8 *plugin_path_add;
   u8 *plugin_name_filter;
   u8 *vat_plugin_path;
   u8 *vat_plugin_name_filter;
@@ -144,12 +146,12 @@ extern plugin_main_t vlib_plugin_main;
 clib_error_t *vlib_plugin_config (vlib_main_t * vm, unformat_input_t * input);
 int vlib_plugin_early_init (vlib_main_t * vm);
 int vlib_load_new_plugins (plugin_main_t * pm, int from_early_init);
-void *vlib_get_plugin_symbol (char *plugin_name, char *symbol_name);
+void *vlib_get_plugin_symbol (const char *plugin_name,
+			      const char *symbol_name);
 u8 *vlib_get_vat_plugin_path (void);
 
 #define VLIB_PLUGIN_REGISTER() \
   vlib_plugin_registration_t vlib_plugin_registration \
-  CLIB_NOSANITIZE_PLUGIN_REG_SECTION \
   __clib_export __clib_section(".vlib_plugin_registration")
 
 /* Call a plugin init function: used for init function dependencies. */

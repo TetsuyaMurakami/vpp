@@ -18,31 +18,43 @@
 
 #include <vppinfra/clib.h>
 #include <vppinfra/pcap.h>
+#include <vnet/vnet.h>
 #include <vnet/l3_types.h>
 #include <vnet/ip/ip4_packet.h>
 #include <vnet/ip/ip6_packet.h>
 #include <vnet/ethernet/packet.h>
 
-#define foreach_flow_type \
-  /* l2 flow*/ \
-  _(ETHERNET, ethernet, "ethernet") \
-  /* l3 IP flow */ \
-  _(IP4, ip4, "ipv4") \
-  _(IP6, ip6, "ipv6") \
-  /* IP tunnel flow */ \
-  _(IP4_L2TPV3OIP, ip4_l2tpv3oip, "ipv4-l2tpv3oip") \
-  _(IP4_IPSEC_ESP, ip4_ipsec_esp, "ipv4-ipsec-esp") \
-  _(IP4_IPSEC_AH, ip4_ipsec_ah, "ipv4-ipsec-ah") \
-  /* l4 flow*/ \
-  _(IP4_N_TUPLE, ip4_n_tuple, "ipv4-n-tuple") \
-  _(IP6_N_TUPLE, ip6_n_tuple, "ipv6-n-tuple") \
-  _(IP4_N_TUPLE_TAGGED, ip4_n_tuple_tagged, "ipv4-n-tuple-tagged") \
-  _(IP6_N_TUPLE_TAGGED, ip6_n_tuple_tagged, "ipv6-n-tuple-tagged") \
-  /* L4 tunnel flow*/ \
-  _(IP4_VXLAN, ip4_vxlan, "ipv4-vxlan") \
-  _(IP6_VXLAN, ip6_vxlan, "ipv6-vxlan") \
-  _(IP4_GTPC, ip4_gtpc, "ipv4-gtpc") \
-  _(IP4_GTPU, ip4_gtpu, "ipv4-gtpu")
+#define foreach_flow_type                                                     \
+  /* l2 flow*/                                                                \
+  _ (ETHERNET, ethernet, "ethernet")                                          \
+  /* l3 IP flow */                                                            \
+  _ (IP4, ip4, "ipv4")                                                        \
+  _ (IP6, ip6, "ipv6")                                                        \
+  /* IP tunnel flow */                                                        \
+  _ (IP4_L2TPV3OIP, ip4_l2tpv3oip, "ipv4-l2tpv3oip")                          \
+  _ (IP4_IPSEC_ESP, ip4_ipsec_esp, "ipv4-ipsec-esp")                          \
+  _ (IP4_IPSEC_AH, ip4_ipsec_ah, "ipv4-ipsec-ah")                             \
+  /* l4 flow*/                                                                \
+  _ (IP4_N_TUPLE, ip4_n_tuple, "ipv4-n-tuple")                                \
+  _ (IP6_N_TUPLE, ip6_n_tuple, "ipv6-n-tuple")                                \
+  _ (IP4_N_TUPLE_TAGGED, ip4_n_tuple_tagged, "ipv4-n-tuple-tagged")           \
+  _ (IP6_N_TUPLE_TAGGED, ip6_n_tuple_tagged, "ipv6-n-tuple-tagged")           \
+  /* L4 tunnel flow*/                                                         \
+  _ (IP4_VXLAN, ip4_vxlan, "ipv4-vxlan")                                      \
+  _ (IP6_VXLAN, ip6_vxlan, "ipv6-vxlan")                                      \
+  _ (IP4_GTPC, ip4_gtpc, "ipv4-gtpc")                                         \
+  _ (IP4_GTPU, ip4_gtpu, "ipv4-gtpu")                                         \
+  /* generic flow */                                                          \
+  _ (GENERIC, generic, "generic")                                             \
+  /* IP in IP */                                                              \
+  _ (IP6_IP6, ip6_ip6, "ipv6-ipv6")                                           \
+  _ (IP6_IP4, ip6_ip4, "ipv6-ipv4")                                           \
+  _ (IP4_IP6, ip4_ip6, "ipv4-ipv6")                                           \
+  _ (IP4_IP4, ip4_ip4, "ipv4-ipv4")                                           \
+  _ (IP6_IP6_N_TUPLE, ip6_ip6_n_tuple, "ipv6-ipv6-n-tuple")                   \
+  _ (IP6_IP4_N_TUPLE, ip6_ip4_n_tuple, "ipv6-ipv4-n-tuple")                   \
+  _ (IP4_IP6_N_TUPLE, ip4_ip6_n_tuple, "ipv4-ipv6-n-tuple")                   \
+  _ (IP4_IP4_N_TUPLE, ip4_ip4_n_tuple, "ipv4-ipv4-n-tuple")
 
 #define foreach_flow_entry_ethernet \
   _fe(ethernet_header_t, eth_hdr)
@@ -89,13 +101,11 @@
   _fe(ip_port_and_mask_t, src_port) \
   _fe(ip_port_and_mask_t, dst_port)
 
-#define foreach_flow_entry_ip4_vxlan \
-  foreach_flow_entry_ip4_n_tuple \
-  _fe(u16, vni)
+#define foreach_flow_entry_ip4_vxlan                                          \
+  foreach_flow_entry_ip4_n_tuple _fe (u32, vni)
 
-#define foreach_flow_entry_ip6_vxlan \
-  foreach_flow_entry_ip6_n_tuple \
-  _fe(u16, vni)
+#define foreach_flow_entry_ip6_vxlan                                          \
+  foreach_flow_entry_ip6_n_tuple _fe (u32, vni)
 
 #define foreach_flow_entry_ip4_gtpc \
   foreach_flow_entry_ip4_n_tuple \
@@ -104,6 +114,44 @@
 #define foreach_flow_entry_ip4_gtpu \
   foreach_flow_entry_ip4_n_tuple \
   _fe(u32, teid)
+
+#define foreach_flow_entry_ip6_ip6                                            \
+  foreach_flow_entry_ip6 _fe (ip6_address_and_mask_t, in_src_addr)            \
+    _fe (ip6_address_and_mask_t, in_dst_addr)                                 \
+      _fe (ip_prot_and_mask_t, in_protocol)
+
+#define foreach_flow_entry_ip6_ip6_n_tuple                                    \
+  foreach_flow_entry_ip6_ip6 _fe (ip_port_and_mask_t, in_src_port)            \
+    _fe (ip_port_and_mask_t, in_dst_port)
+
+#define foreach_flow_entry_ip6_ip4                                            \
+  foreach_flow_entry_ip6 _fe (ip4_address_and_mask_t, in_src_addr)            \
+    _fe (ip4_address_and_mask_t, in_dst_addr)                                 \
+      _fe (ip_prot_and_mask_t, in_protocol)
+
+#define foreach_flow_entry_ip6_ip4_n_tuple                                    \
+  foreach_flow_entry_ip6_ip4 _fe (ip_port_and_mask_t, in_src_port)            \
+    _fe (ip_port_and_mask_t, in_dst_port)
+
+#define foreach_flow_entry_ip4_ip6                                            \
+  foreach_flow_entry_ip4 _fe (ip6_address_and_mask_t, in_src_addr)            \
+    _fe (ip6_address_and_mask_t, in_dst_addr)                                 \
+      _fe (ip_prot_and_mask_t, in_protocol)
+
+#define foreach_flow_entry_ip4_ip6_n_tuple                                    \
+  foreach_flow_entry_ip4_ip6 _fe (ip_port_and_mask_t, in_src_port)            \
+    _fe (ip_port_and_mask_t, in_dst_port)
+
+#define foreach_flow_entry_ip4_ip4                                            \
+  foreach_flow_entry_ip4 _fe (ip4_address_and_mask_t, in_src_addr)            \
+    _fe (ip4_address_and_mask_t, in_dst_addr)                                 \
+      _fe (ip_prot_and_mask_t, in_protocol)
+
+#define foreach_flow_entry_ip4_ip4_n_tuple                                    \
+  foreach_flow_entry_ip4_ip4 _fe (ip_port_and_mask_t, in_src_port)            \
+    _fe (ip_port_and_mask_t, in_dst_port)
+
+#define foreach_flow_entry_generic _fe (generic_pattern_t, pattern)
 
 #define foreach_flow_action \
   _(0, COUNT, "count") \
@@ -129,32 +177,40 @@ typedef enum
   _( -5, NO_SUCH_INTERFACE, "no such interface")		\
   _( -6, INTERNAL, "internal error")
 
-#define foreach_flow_rss_types                    \
-  _(0, FRAG_IPV4,          "ipv4-frag")   \
-  _(1, IPV4_TCP,           "ipv4-tcp")    \
-  _(2, IPV4_UDP,           "ipv4-udp")    \
-  _(3, IPV4_SCTP,          "ipv4-sctp")   \
-  _(4, IPV4_OTHER,         "ipv4-other")  \
-  _(5, IPV4,               "ipv4")        \
-  _(6, IPV6_TCP_EX,        "ipv6-tcp-ex") \
-  _(7, IPV6_UDP_EX,        "ipv6-udp-ex") \
-  _(8, FRAG_IPV6,          "ipv6-frag")   \
-  _(9, IPV6_TCP,           "ipv6-tcp")    \
-  _(10, IPV6_UDP,          "ipv6-udp")    \
-  _(11, IPV6_SCTP,         "ipv6-sctp")   \
-  _(12, IPV6_OTHER,        "ipv6-other")  \
-  _(13, IPV6_EX,           "ipv6-ex")     \
-  _(14, IPV6,              "ipv6")        \
-  _(15, L2_PAYLOAD,        "l2-payload")  \
-  _(16, PORT,              "port")        \
-  _(17, VXLAN,             "vxlan")       \
-  _(18, GENEVE,            "geneve")      \
-  _(19, NVGRE,             "nvgre")       \
-  _(20, GTPU,              "gtpu")        \
-  _(60, L4_DST_ONLY,       "l4-dst-only") \
-  _(61, L4_SRC_ONLY,       "l4-src-only") \
-  _(62, L3_DST_ONLY,       "l3-dst-only") \
-  _(63, L3_SRC_ONLY,       "l3-src-only")
+#define foreach_flow_rss_types                                                \
+  _ (0, FRAG_IPV4, "ipv4-frag")                                               \
+  _ (1, IPV4_TCP, "ipv4-tcp")                                                 \
+  _ (2, IPV4_UDP, "ipv4-udp")                                                 \
+  _ (3, IPV4_SCTP, "ipv4-sctp")                                               \
+  _ (4, IPV4_OTHER, "ipv4-other")                                             \
+  _ (5, IPV4, "ipv4")                                                         \
+  _ (6, IPV6_TCP_EX, "ipv6-tcp-ex")                                           \
+  _ (7, IPV6_UDP_EX, "ipv6-udp-ex")                                           \
+  _ (8, FRAG_IPV6, "ipv6-frag")                                               \
+  _ (9, IPV6_TCP, "ipv6-tcp")                                                 \
+  _ (10, IPV6_UDP, "ipv6-udp")                                                \
+  _ (11, IPV6_SCTP, "ipv6-sctp")                                              \
+  _ (12, IPV6_OTHER, "ipv6-other")                                            \
+  _ (13, IPV6_EX, "ipv6-ex")                                                  \
+  _ (14, IPV6, "ipv6")                                                        \
+  _ (15, L2_PAYLOAD, "l2-payload")                                            \
+  _ (16, PORT, "port")                                                        \
+  _ (17, VXLAN, "vxlan")                                                      \
+  _ (18, GENEVE, "geneve")                                                    \
+  _ (19, NVGRE, "nvgre")                                                      \
+  _ (20, GTPU, "gtpu")                                                        \
+  _ (21, ESP, "esp")                                                          \
+  _ (60, L4_DST_ONLY, "l4-dst-only")                                          \
+  _ (61, L4_SRC_ONLY, "l4-src-only")                                          \
+  _ (62, L3_DST_ONLY, "l3-dst-only")                                          \
+  _ (63, L3_SRC_ONLY, "l3-src-only")
+
+typedef enum
+{
+#define _(v, n, s) VNET_FLOW_RSS_TYPES_##n = v,
+  foreach_flow_rss_types
+#undef _
+} vnet_flow_rss_types_t;
 
 #define foreach_rss_function           \
   _(DEFAULT, "default")                \
@@ -182,6 +238,12 @@ typedef struct
   /* other values are meanless */
   u8 mask;
 } ip_prot_and_mask_t;
+
+typedef struct
+{
+  u8 spec[1024];
+  u8 mask[1024];
+} generic_pattern_t;
 
 typedef enum
 {
@@ -235,6 +297,10 @@ typedef struct
   /* queue for VNET_FLOW_ACTION_REDIRECT_TO_QUEUE */
   u32 redirect_queue;
 
+  /* start queue index and queue numbers for RSS queue group */
+  u32 queue_index;
+  u32 queue_num;
+
   /* buffer offset for VNET_FLOW_ACTION_BUFFER_ADVANCE */
   i32 buffer_advance;
 
@@ -281,6 +347,7 @@ typedef struct
   /* vector of flow ranges */
   vnet_flow_range_t *ranges;
 
+  u16 msg_id_base;
 } vnet_flow_main_t;
 
 extern vnet_flow_main_t flow_main;

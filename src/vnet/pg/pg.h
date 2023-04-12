@@ -296,8 +296,15 @@ pg_free_edit_group (pg_stream_t * s)
 
   pg_edit_group_free (g);
   clib_memset (g, 0, sizeof (g[0]));
-  _vec_len (s->edit_groups) = i;
+  vec_set_len (s->edit_groups, i);
 }
+
+typedef enum pg_interface_mode_t_
+{
+  PG_MODE_ETHERNET,
+  PG_MODE_IP4,
+  PG_MODE_IP6,
+} pg_interface_mode_t;
 
 typedef struct
 {
@@ -316,6 +323,7 @@ typedef struct
   u32 gso_size;
   pcap_main_t pcap_main;
   char *pcap_file_name;
+  pg_interface_mode_t mode;
 
   mac_address_t *allowed_mcast_macs;
 } pg_interface_t;
@@ -348,6 +356,8 @@ typedef struct pg_main_t
 
   /* Per VLIB node information. */
   pg_node_t *nodes;
+
+  u16 msg_id_base;
 } pg_main_t;
 
 /* Global main structure. */
@@ -373,9 +383,9 @@ void pg_interface_enable_disable_coalesce (pg_interface_t * pi, u8 enable,
 					   u32 tx_node_index);
 
 /* Find/create free packet-generator interface index. */
-u32 pg_interface_add_or_get (pg_main_t * pg, uword stream_index,
-			     u8 gso_enabled, u32 gso_size,
-			     u8 coalesce_enabled);
+u32 pg_interface_add_or_get (pg_main_t *pg, uword stream_index, u8 gso_enabled,
+			     u32 gso_size, u8 coalesce_enabled,
+			     pg_interface_mode_t mode);
 
 always_inline pg_node_t *
 pg_get_node (uword node_index)

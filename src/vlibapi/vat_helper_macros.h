@@ -62,6 +62,22 @@ do {                                                            \
     mp->client_index = vam->my_client_index;			\
 } while(0);
 
+#define PING(_tm, mp_ping)                                                    \
+  do                                                                          \
+    {                                                                         \
+      socket_client_main_t *scm = vam->socket_client_main;                    \
+      if (scm && scm->socket_enable)                                          \
+	mp_ping = vl_socket_client_msg_alloc (sizeof (*mp_ping));             \
+      else                                                                    \
+	mp_ping = vl_msg_api_alloc_as_if_client (sizeof (*mp_ping));          \
+      mp_ping->_vl_msg_id = htons (VL_API_CONTROL_PING + 1);                  \
+      mp_ping->client_index = vam->my_client_index;                           \
+      vam->result_ready = 0;                                                  \
+      if (scm)                                                                \
+	scm->control_pings_outstanding++;                                     \
+    }                                                                         \
+  while (0);
+
 /* S: send a message */
 #define S(mp)                                                   \
 do {                                                            \

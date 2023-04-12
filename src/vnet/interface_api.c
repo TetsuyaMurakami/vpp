@@ -22,36 +22,29 @@
 
 #include <vnet/interface.h>
 #include <vnet/interface/rx_queue_funcs.h>
+#include <vnet/interface/tx_queue_funcs.h>
 #include <vnet/api_errno.h>
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/ip/ip.h>
 #include <vnet/fib/fib_table.h>
 #include <vnet/mfib/mfib_table.h>
 #include <vnet/l2/l2_vtr.h>
-#include <vnet/vnet_msg_enum.h>
 #include <vnet/fib/fib_api.h>
 #include <vnet/mfib/mfib_table.h>
-
 #include <vlibapi/api_types.h>
 
+#include <vnet/format_fns.h>
 #include <vnet/ip/ip_types_api.h>
 #include <vnet/ethernet/ethernet_types_api.h>
 
-#define vl_typedefs		/* define message structures */
-#include <vnet/vnet_all_api_h.h>
-#undef vl_typedefs
+#include <interface.api_enum.h>
+#include <interface.api_types.h>
 
-#define vl_endianfun		/* define message structures */
-#include <vnet/vnet_all_api_h.h>
-#undef vl_endianfun
-
-/* instantiate all the print functions we know about */
-#define vl_print(handle, ...) vlib_cli_output (handle, __VA_ARGS__)
-#define vl_printfun
-#include <vnet/vnet_all_api_h.h>
-#undef vl_printfun
-
+#define REPLY_MSG_ID_BASE msg_id_base
 #include <vlibapi/api_helper_macros.h>
+
+static u16 msg_id_base;
+
 vpe_api_main_t vpe_api_main;
 
 #define foreach_vpe_api_msg                                                   \
@@ -64,7 +57,9 @@ vpe_api_main_t vpe_api_main;
   _ (SW_INTERFACE_ADD_DEL_ADDRESS, sw_interface_add_del_address)              \
   _ (SW_INTERFACE_SET_RX_MODE, sw_interface_set_rx_mode)                      \
   _ (SW_INTERFACE_RX_PLACEMENT_DUMP, sw_interface_rx_placement_dump)          \
+  _ (SW_INTERFACE_TX_PLACEMENT_GET, sw_interface_tx_placement_get)            \
   _ (SW_INTERFACE_SET_RX_PLACEMENT, sw_interface_set_rx_placement)            \
+  _ (SW_INTERFACE_SET_TX_PLACEMENT, sw_interface_set_tx_placement)            \
   _ (SW_INTERFACE_SET_TABLE, sw_interface_set_table)                          \
   _ (SW_INTERFACE_GET_TABLE, sw_interface_get_table)                          \
   _ (SW_INTERFACE_SET_UNNUMBERED, sw_interface_set_unnumbered)                \
@@ -151,6 +146,7 @@ vl_api_hw_interface_set_mtu_t_handler (vl_api_hw_interface_set_mtu_t * mp)
   u32 sw_if_index = ntohl (mp->sw_if_index);
   u16 mtu = ntohs (mp->mtu);
   ethernet_main_t *em = &ethernet_main;
+  clib_error_t *err;
   int rv = 0;
 
   VALIDATE_SW_IF_INDEX (mp);
@@ -162,7 +158,6 @@ vl_api_hw_interface_set_mtu_t_handler (vl_api_hw_interface_set_mtu_t * mp)
       goto bad_sw_if_index;
     }
 
-  vnet_hw_interface_t *hi = vnet_get_hw_interface (vnm, si->hw_if_index);
   ethernet_interface_t *eif = ethernet_get_interface (em, si->hw_if_index);
 
   if (!eif)
@@ -171,19 +166,12 @@ vl_api_hw_interface_set_mtu_t_handler (vl_api_hw_interface_set_mtu_t * mp)
       goto bad_sw_if_index;
     }
 
-  if (mtu < hi->min_supported_packet_bytes)
+  if ((err = vnet_hw_interface_set_mtu (vnm, si->hw_if_index, mtu)))
     {
-      rv = VNET_API_ERROR_INVALID_VALUE;
+      rv = vnet_api_error (err);
+      clib_error_free (err);
       goto bad_sw_if_index;
     }
-
-  if (mtu > hi->max_supported_packet_bytes)
-    {
-      rv = VNET_API_ERROR_INVALID_VALUE;
-      goto bad_sw_if_index;
-    }
-
-  vnet_hw_interface_set_mtu (vnm, si->hw_if_index, mtu);
 
   BAD_SW_IF_INDEX_LABEL;
   REPLY_MACRO (VL_API_HW_INTERFACE_SET_MTU_REPLY);
@@ -241,7 +229,7 @@ send_sw_interface_details (vpe_api_main_t * am,
 
   vl_api_sw_interface_details_t *mp = vl_msg_api_alloc (sizeof (*mp));
   clib_memset (mp, 0, sizeof (*mp));
-  mp->_vl_msg_id = ntohs (VL_API_SW_INTERFACE_DETAILS);
+  mp->_vl_msg_id = ntohs (REPLY_MSG_ID_BASE + VL_API_SW_INTERFACE_DETAILS);
   mp->sw_if_index = ntohl (swif->sw_if_index);
   mp->sup_sw_if_index = ntohl (swif->sup_sw_if_index);
 
@@ -267,10 +255,10 @@ send_sw_interface_details (vpe_api_main_t * am,
     }
   mp->type = ntohl (mp->type);
 
-  mp->link_duplex = ((hi->flags & VNET_HW_INTERFACE_FLAG_DUPLEX_MASK) >>
-		     VNET_HW_INTERFACE_FLAG_DUPLEX_SHIFT);
+  mp->link_duplex = ntohl (((hi->flags & VNET_HW_INTERFACE_FLAG_DUPLEX_MASK) >>
+			    VNET_HW_INTERFACE_FLAG_DUPLEX_SHIFT));
   mp->link_speed = ntohl (hi->link_speed);
-  mp->link_mtu = ntohs (hi->max_packet_bytes);
+  mp->link_mtu = ntohs (hi->max_frame_size - hi->frame_overhead);
   mp->mtu[VNET_MTU_L3] = ntohl (swif->mtu[VNET_MTU_L3]);
   mp->mtu[VNET_MTU_IP4] = ntohl (swif->mtu[VNET_MTU_IP4]);
   mp->mtu[VNET_MTU_IP6] = ntohl (swif->mtu[VNET_MTU_IP6]);
@@ -469,34 +457,121 @@ vl_api_sw_interface_set_table_t_handler (vl_api_sw_interface_set_table_t * mp)
   VALIDATE_SW_IF_INDEX (mp);
 
   if (mp->is_ipv6)
-    rv = ip_table_bind (FIB_PROTOCOL_IP6, sw_if_index, table_id, 1);
+    rv = ip_table_bind (FIB_PROTOCOL_IP6, sw_if_index, table_id);
   else
-    rv = ip_table_bind (FIB_PROTOCOL_IP4, sw_if_index, table_id, 1);
+    rv = ip_table_bind (FIB_PROTOCOL_IP4, sw_if_index, table_id);
 
   BAD_SW_IF_INDEX_LABEL;
 
   REPLY_MACRO (VL_API_SW_INTERFACE_SET_TABLE_REPLY);
 }
 
-int
-ip_table_bind (fib_protocol_t fproto,
-	       u32 sw_if_index, u32 table_id, u8 is_api)
+void
+fib_table_bind (fib_protocol_t fproto, u32 sw_if_index, u32 fib_index)
 {
-  CLIB_UNUSED (ip_interface_address_t * ia);
-  u32 fib_index, mfib_index;
-  fib_source_t src;
-  mfib_source_t msrc;
+  u32 table_id;
 
-  if (is_api)
+  table_id = fib_table_get_table_id (fib_index, fproto);
+  ASSERT (table_id != ~0);
+
+  if (FIB_PROTOCOL_IP6 == fproto)
     {
-      src = FIB_SOURCE_API;
-      msrc = MFIB_SOURCE_API;
+      /*
+       * tell those that are interested that the binding is changing.
+       */
+      ip6_table_bind_callback_t *cb;
+      vec_foreach (cb, ip6_main.table_bind_callbacks)
+	cb->function (&ip6_main, cb->function_opaque,
+		      sw_if_index,
+		      fib_index,
+		      ip6_main.fib_index_by_sw_if_index[sw_if_index]);
+
+      /* unlock currently assigned tables */
+      if (0 != ip6_main.fib_index_by_sw_if_index[sw_if_index])
+	fib_table_unlock (ip6_main.fib_index_by_sw_if_index[sw_if_index],
+			  FIB_PROTOCOL_IP6, FIB_SOURCE_INTERFACE);
+
+      if (0 != table_id)
+	{
+	  /* we need to lock the table now it's inuse */
+	  fib_table_lock (fib_index, FIB_PROTOCOL_IP6, FIB_SOURCE_INTERFACE);
+	}
+
+      ip6_main.fib_index_by_sw_if_index[sw_if_index] = fib_index;
     }
   else
     {
-      src = FIB_SOURCE_CLI;
-      msrc = MFIB_SOURCE_CLI;
+      /*
+       * tell those that are interested that the binding is changing.
+       */
+      ip4_table_bind_callback_t *cb;
+      vec_foreach (cb, ip4_main.table_bind_callbacks)
+	cb->function (&ip4_main, cb->function_opaque,
+		      sw_if_index,
+		      fib_index,
+		      ip4_main.fib_index_by_sw_if_index[sw_if_index]);
+
+      /* unlock currently assigned tables */
+      if (0 != ip4_main.fib_index_by_sw_if_index[sw_if_index])
+	fib_table_unlock (ip4_main.fib_index_by_sw_if_index[sw_if_index],
+			  FIB_PROTOCOL_IP4, FIB_SOURCE_INTERFACE);
+
+      if (0 != table_id)
+	{
+	  /* we need to lock the table now it's inuse */
+	  fib_index = fib_table_find_or_create_and_lock (
+	    FIB_PROTOCOL_IP4, table_id, FIB_SOURCE_INTERFACE);
+	}
+
+      ip4_main.fib_index_by_sw_if_index[sw_if_index] = fib_index;
     }
+}
+
+void
+mfib_table_bind (fib_protocol_t fproto, u32 sw_if_index, u32 mfib_index)
+{
+  u32 table_id;
+
+  table_id = mfib_table_get_table_id (mfib_index, fproto);
+  ASSERT (table_id != ~0);
+
+  if (FIB_PROTOCOL_IP6 == fproto)
+    {
+      if (0 != ip6_main.mfib_index_by_sw_if_index[sw_if_index])
+	mfib_table_unlock (ip6_main.mfib_index_by_sw_if_index[sw_if_index],
+			   FIB_PROTOCOL_IP6, MFIB_SOURCE_INTERFACE);
+
+      if (0 != table_id)
+	{
+	  /* we need to lock the table now it's inuse */
+	  mfib_table_lock (mfib_index, FIB_PROTOCOL_IP6,
+			   MFIB_SOURCE_INTERFACE);
+	}
+
+      ip6_main.mfib_index_by_sw_if_index[sw_if_index] = mfib_index;
+    }
+  else
+    {
+      if (0 != ip4_main.mfib_index_by_sw_if_index[sw_if_index])
+	mfib_table_unlock (ip4_main.mfib_index_by_sw_if_index[sw_if_index],
+			   FIB_PROTOCOL_IP4, MFIB_SOURCE_INTERFACE);
+
+      if (0 != table_id)
+	{
+	  /* we need to lock the table now it's inuse */
+	  mfib_index = mfib_table_find_or_create_and_lock (
+	    FIB_PROTOCOL_IP4, table_id, MFIB_SOURCE_INTERFACE);
+	}
+
+      ip4_main.mfib_index_by_sw_if_index[sw_if_index] = mfib_index;
+    }
+}
+
+int
+ip_table_bind (fib_protocol_t fproto, u32 sw_if_index, u32 table_id)
+{
+  CLIB_UNUSED (ip_interface_address_t * ia);
+  u32 fib_index, mfib_index;
 
   /*
    * This if table does not exist = error is what we want in the end.
@@ -509,111 +584,24 @@ ip_table_bind (fib_protocol_t fproto,
       return (VNET_API_ERROR_NO_SUCH_FIB);
     }
 
-  if (FIB_PROTOCOL_IP6 == fproto)
-    {
-      /*
-       * If the interface already has in IP address, then a change int
-       * VRF is not allowed. The IP address applied must first be removed.
-       * We do not do that automatically here, since VPP has no knowledge
-       * of whether those subnets are valid in the destination VRF.
-       */
-      /* *INDENT-OFF* */
-      foreach_ip_interface_address (&ip6_main.lookup_main,
-				    ia, sw_if_index,
-				    1 /* honor unnumbered */ ,
-      ({
-        return (VNET_API_ERROR_ADDRESS_FOUND_FOR_INTERFACE);
-      }));
-      /* *INDENT-ON* */
+  /*
+   * If the interface already has in IP address, then a change int
+   * VRF is not allowed. The IP address applied must first be removed.
+   * We do not do that automatically here, since VPP has no knowledge
+   * of whether those subnets are valid in the destination VRF.
+   */
+  /* clang-format off */
+  foreach_ip_interface_address (FIB_PROTOCOL_IP6 == fproto ?
+				&ip6_main.lookup_main : &ip4_main.lookup_main,
+				ia, sw_if_index,
+				1 /* honor unnumbered */ ,
+  ({
+    return (VNET_API_ERROR_ADDRESS_FOUND_FOR_INTERFACE);
+  }));
+  /* clang-format on */
 
-      vec_validate (ip6_main.fib_index_by_sw_if_index, sw_if_index);
-      vec_validate (ip6_main.mfib_index_by_sw_if_index, sw_if_index);
-
-      /*
-       * tell those that are interested that the binding is changing.
-       */
-      ip6_table_bind_callback_t *cb;
-      vec_foreach (cb, ip6_main.table_bind_callbacks)
-	cb->function (&ip6_main, cb->function_opaque,
-		      sw_if_index,
-		      fib_index,
-		      ip6_main.fib_index_by_sw_if_index[sw_if_index]);
-
-      if (0 == table_id)
-	{
-	  /* reset back to default */
-	  if (0 != ip6_main.fib_index_by_sw_if_index[sw_if_index])
-	    fib_table_unlock (ip6_main.fib_index_by_sw_if_index[sw_if_index],
-			      FIB_PROTOCOL_IP6, src);
-	  if (0 != ip6_main.mfib_index_by_sw_if_index[sw_if_index])
-	    mfib_table_unlock (ip6_main.mfib_index_by_sw_if_index
-			       [sw_if_index], FIB_PROTOCOL_IP6, msrc);
-
-	}
-      else
-	{
-	  /* we need to lock the table now it's inuse */
-	  fib_table_lock (fib_index, FIB_PROTOCOL_IP6, src);
-	  mfib_table_lock (mfib_index, FIB_PROTOCOL_IP6, msrc);
-	}
-
-      ip6_main.fib_index_by_sw_if_index[sw_if_index] = fib_index;
-      ip6_main.mfib_index_by_sw_if_index[sw_if_index] = mfib_index;
-    }
-  else
-    {
-      /*
-       * If the interface already has in IP address, then a change int
-       * VRF is not allowed. The IP address applied must first be removed.
-       * We do not do that automatically here, since VPP has no knowledge
-       * of whether those subnets are valid in the destination VRF.
-       */
-      /* *INDENT-OFF* */
-      foreach_ip_interface_address (&ip4_main.lookup_main,
-				    ia, sw_if_index,
-				    1 /* honor unnumbered */ ,
-      ({
-        return (VNET_API_ERROR_ADDRESS_FOUND_FOR_INTERFACE);
-      }));
-      /* *INDENT-ON* */
-
-      vec_validate (ip4_main.fib_index_by_sw_if_index, sw_if_index);
-      vec_validate (ip4_main.mfib_index_by_sw_if_index, sw_if_index);
-
-      /*
-       * tell those that are interested that the binding is changing.
-       */
-      ip4_table_bind_callback_t *cb;
-      vec_foreach (cb, ip4_main.table_bind_callbacks)
-	cb->function (&ip4_main, cb->function_opaque,
-		      sw_if_index,
-		      fib_index,
-		      ip4_main.fib_index_by_sw_if_index[sw_if_index]);
-
-      if (0 == table_id)
-	{
-	  /* reset back to default */
-	  if (0 != ip4_main.fib_index_by_sw_if_index[sw_if_index])
-	    fib_table_unlock (ip4_main.fib_index_by_sw_if_index[sw_if_index],
-			      FIB_PROTOCOL_IP4, src);
-	  if (0 != ip4_main.mfib_index_by_sw_if_index[sw_if_index])
-	    mfib_table_unlock (ip4_main.mfib_index_by_sw_if_index
-			       [sw_if_index], FIB_PROTOCOL_IP4, msrc);
-
-	}
-      else
-	{
-	  /* we need to lock the table now it's inuse */
-	  fib_index = fib_table_find_or_create_and_lock (FIB_PROTOCOL_IP4,
-							 table_id, src);
-
-	  mfib_index = mfib_table_find_or_create_and_lock (FIB_PROTOCOL_IP4,
-							   table_id, msrc);
-	}
-
-      ip4_main.fib_index_by_sw_if_index[sw_if_index] = fib_index;
-      ip4_main.mfib_index_by_sw_if_index[sw_if_index] = mfib_index;
-    }
+  fib_table_bind (fproto, sw_if_index, fib_index);
+  mfib_table_bind (fproto, sw_if_index, mfib_index);
 
   return (0);
 }
@@ -626,7 +614,8 @@ send_sw_interface_get_table_reply (vl_api_registration_t * reg,
 
   mp = vl_msg_api_alloc (sizeof (*mp));
   clib_memset (mp, 0, sizeof (*mp));
-  mp->_vl_msg_id = ntohs (VL_API_SW_INTERFACE_GET_TABLE_REPLY);
+  mp->_vl_msg_id =
+    ntohs (REPLY_MSG_ID_BASE + VL_API_SW_INTERFACE_GET_TABLE_REPLY);
   mp->context = context;
   mp->retval = htonl (retval);
   mp->vrf_id = htonl (vrf_id);
@@ -695,8 +684,8 @@ static void vl_api_sw_interface_set_unnumbered_t_handler
       goto done;
     }
 
-  vnet_sw_interface_update_unnumbered (unnumbered_sw_if_index,
-				       sw_if_index, mp->is_add);
+  rv = vnet_sw_interface_update_unnumbered (unnumbered_sw_if_index,
+					    sw_if_index, mp->is_add);
 done:
   REPLY_MACRO (VL_API_SW_INTERFACE_SET_UNNUMBERED_REPLY);
 }
@@ -769,7 +758,7 @@ send_sw_interface_event (vpe_api_main_t * am,
 
   mp = vl_msg_api_alloc (sizeof (*mp));
   clib_memset (mp, 0, sizeof (*mp));
-  mp->_vl_msg_id = ntohs (VL_API_SW_INTERFACE_EVENT);
+  mp->_vl_msg_id = ntohs (REPLY_MSG_ID_BASE + VL_API_SW_INTERFACE_EVENT);
   mp->sw_if_index = ntohl (sw_if_index);
   mp->client_index = reg->client_index;
   mp->pid = reg->client_pid;
@@ -1020,12 +1009,46 @@ static void vl_api_sw_interface_get_mac_address_t_handler
   if (!reg)
     return;
   rmp = vl_msg_api_alloc (sizeof (*rmp));
-  rmp->_vl_msg_id = htons (VL_API_SW_INTERFACE_GET_MAC_ADDRESS_REPLY);
+  rmp->_vl_msg_id =
+    htons (REPLY_MSG_ID_BASE + VL_API_SW_INTERFACE_GET_MAC_ADDRESS_REPLY);
   rmp->context = mp->context;
   rmp->retval = htonl (rv);
   if (!rv && eth_if)
     mac_address_encode (&eth_if->address.mac, rmp->mac_address);
   vl_api_send_msg (reg, (u8 *) rmp);
+}
+
+static void
+vl_api_sw_interface_set_interface_name_t_handler (
+  vl_api_sw_interface_set_interface_name_t *mp)
+{
+  vl_api_sw_interface_set_interface_name_reply_t *rmp;
+  vnet_main_t *vnm = vnet_get_main ();
+  u32 sw_if_index = ntohl (mp->sw_if_index);
+  vnet_sw_interface_t *si = vnet_get_sw_interface (vnm, sw_if_index);
+  clib_error_t *error;
+  int rv = 0;
+
+  if (mp->name[0] == 0)
+    {
+      rv = VNET_API_ERROR_INVALID_VALUE;
+      goto out;
+    }
+  if (si == 0)
+    {
+      rv = VNET_API_ERROR_INVALID_SW_IF_INDEX;
+      goto out;
+    }
+
+  error = vnet_rename_interface (vnm, si->hw_if_index, (char *) mp->name);
+  if (error)
+    {
+      clib_error_free (error);
+      rv = VNET_API_ERROR_INVALID_SW_IF_INDEX;
+    }
+
+out:
+  REPLY_MACRO (VL_API_SW_INTERFACE_SET_INTERFACE_NAME_REPLY);
 }
 
 static void vl_api_sw_interface_set_rx_mode_t_handler
@@ -1076,7 +1099,8 @@ send_interface_rx_placement_details (vpe_api_main_t * am,
   mp = vl_msg_api_alloc (sizeof (*mp));
   clib_memset (mp, 0, sizeof (*mp));
 
-  mp->_vl_msg_id = htons (VL_API_SW_INTERFACE_RX_PLACEMENT_DETAILS);
+  mp->_vl_msg_id =
+    htons (REPLY_MSG_ID_BASE + VL_API_SW_INTERFACE_RX_PLACEMENT_DETAILS);
   mp->sw_if_index = htonl (sw_if_index);
   mp->queue_id = htonl (queue_id);
   mp->worker_id = htonl (worker_id);
@@ -1103,7 +1127,7 @@ static void vl_api_sw_interface_rx_placement_dump_t_handler
       vnet_hw_if_rx_queue_t **all_queues = 0;
       vnet_hw_if_rx_queue_t **qptr;
       vnet_hw_if_rx_queue_t *q;
-      vec_foreach (q, vnm->interface_main.hw_if_rx_queues)
+      pool_foreach (q, vnm->interface_main.hw_if_rx_queues)
 	vec_add1 (all_queues, q);
       vec_sort_with_function (all_queues, vnet_hw_if_rxq_cmp_cli_api);
 
@@ -1188,6 +1212,165 @@ out:
 }
 
 static void
+send_interface_tx_placement_details (vnet_hw_if_tx_queue_t **all_queues,
+				     u32 index, vl_api_registration_t *rp,
+				     u32 native_context)
+{
+  vnet_main_t *vnm = vnet_get_main ();
+  vl_api_sw_interface_tx_placement_details_t *rmp;
+  u32 n_bits = 0, v = ~0;
+  vnet_hw_if_tx_queue_t **q = vec_elt_at_index (all_queues, index);
+  uword *bitmap = q[0]->threads;
+  u32 hw_if_index = q[0]->hw_if_index;
+  vnet_hw_interface_t *hw_if = vnet_get_hw_interface (vnm, hw_if_index);
+  u32 context = clib_host_to_net_u32 (native_context);
+
+  n_bits = clib_bitmap_count_set_bits (bitmap);
+  u32 n = n_bits * sizeof (u32);
+
+  REPLY_MACRO_DETAILS5_END (VL_API_SW_INTERFACE_TX_PLACEMENT_DETAILS, n, rp,
+			    context, ({
+			      rmp->sw_if_index = hw_if->sw_if_index;
+			      rmp->queue_id = q[0]->queue_id;
+			      rmp->shared = q[0]->shared_queue;
+			      rmp->array_size = n_bits;
+
+			      v = clib_bitmap_first_set (bitmap);
+			      for (u32 i = 0; i < n_bits; i++)
+				{
+				  rmp->threads[i] = v;
+				  v = clib_bitmap_next_set (bitmap, v + 1);
+				}
+			    }));
+}
+
+static void
+vl_api_sw_interface_tx_placement_get_t_handler (
+  vl_api_sw_interface_tx_placement_get_t *mp)
+{
+  vnet_main_t *vnm = vnet_get_main ();
+  vl_api_sw_interface_tx_placement_get_reply_t *rmp = 0;
+  vnet_hw_if_tx_queue_t **all_queues = 0;
+  vnet_hw_if_tx_queue_t *q;
+  u32 sw_if_index = mp->sw_if_index;
+  i32 rv = 0;
+
+  if (pool_elts (vnm->interface_main.hw_if_tx_queues) == 0)
+    {
+      rv = VNET_API_ERROR_NO_SUCH_ENTRY;
+      goto err;
+    }
+
+  if (sw_if_index == ~0)
+    {
+      pool_foreach (q, vnm->interface_main.hw_if_tx_queues)
+	vec_add1 (all_queues, q);
+      vec_sort_with_function (all_queues, vnet_hw_if_txq_cmp_cli_api);
+    }
+  else
+    {
+      u32 qi = ~0;
+      vnet_sw_interface_t *si;
+
+      if (!vnet_sw_if_index_is_api_valid (sw_if_index))
+	{
+	  clib_warning ("sw_if_index %u does not exist", sw_if_index);
+	  rv = VNET_API_ERROR_INVALID_SW_IF_INDEX;
+	  goto err;
+	}
+
+      si = vnet_get_sw_interface (vnm, sw_if_index);
+      if (si->type != VNET_SW_INTERFACE_TYPE_HARDWARE)
+	{
+	  clib_warning ("interface type is not HARDWARE! P2P, PIPE and SUB"
+			" interfaces are not supported");
+	  rv = VNET_API_ERROR_INVALID_INTERFACE;
+	  goto err;
+	}
+
+      vnet_hw_interface_t *hw = vnet_get_hw_interface (vnm, si->hw_if_index);
+      for (qi = 0; qi < vec_len (hw->tx_queue_indices); qi++)
+	{
+	  q = vnet_hw_if_get_tx_queue (vnm, hw->tx_queue_indices[qi]);
+	  vec_add1 (all_queues, q);
+	}
+    }
+
+  REPLY_AND_DETAILS_VEC_MACRO_END (VL_API_SW_INTERFACE_TX_PLACEMENT_GET_REPLY,
+				   all_queues, mp, rmp, rv, ({
+				     send_interface_tx_placement_details (
+				       all_queues, cursor, rp, mp->context);
+				   }));
+
+  vec_free (all_queues);
+  return;
+
+err:
+  REPLY_MACRO_END (VL_API_SW_INTERFACE_TX_PLACEMENT_GET_REPLY);
+}
+
+static void
+vl_api_sw_interface_set_tx_placement_t_handler (
+  vl_api_sw_interface_set_tx_placement_t *mp)
+{
+  vl_api_sw_interface_set_tx_placement_reply_t *rmp;
+  vnet_main_t *vnm = vnet_get_main ();
+  u32 sw_if_index = mp->sw_if_index;
+  vnet_sw_interface_t *si;
+  uword *bitmap = 0;
+  u32 queue_id = ~0;
+  u32 size = 0;
+  clib_error_t *error = 0;
+  int rv = 0;
+
+  VALIDATE_SW_IF_INDEX_END (mp);
+
+  si = vnet_get_sw_interface (vnm, sw_if_index);
+  if (si->type != VNET_SW_INTERFACE_TYPE_HARDWARE)
+    {
+      rv = VNET_API_ERROR_INVALID_VALUE;
+      goto bad_sw_if_index;
+    }
+
+  size = mp->array_size;
+  for (u32 i = 0; i < size; i++)
+    {
+      u32 thread_index = mp->threads[i];
+      bitmap = clib_bitmap_set (bitmap, thread_index, 1);
+    }
+
+  queue_id = mp->queue_id;
+  rv = set_hw_interface_tx_queue (si->hw_if_index, queue_id, bitmap);
+
+  switch (rv)
+    {
+    case VNET_API_ERROR_INVALID_VALUE:
+      error = clib_error_return (
+	0, "please specify valid thread(s) - last thread index %u",
+	clib_bitmap_last_set (bitmap));
+      break;
+    case VNET_API_ERROR_INVALID_QUEUE:
+      error = clib_error_return (
+	0, "unknown queue %u on interface %s", queue_id,
+	vnet_get_hw_interface (vnet_get_main (), si->hw_if_index)->name);
+      break;
+    default:
+      break;
+    }
+
+  if (error)
+    {
+      clib_error_report (error);
+      goto out;
+    }
+
+  BAD_SW_IF_INDEX_LABEL;
+out:
+  REPLY_MACRO_END (VL_API_SW_INTERFACE_SET_TX_PLACEMENT_REPLY);
+  clib_bitmap_free (bitmap);
+}
+
+static void
 vl_api_create_vlan_subif_t_handler (vl_api_create_vlan_subif_t * mp)
 {
   vl_api_create_vlan_subif_reply_t *rmp;
@@ -1261,7 +1444,7 @@ out:
     return;
 
   rmp = vl_msg_api_alloc (sizeof (*rmp));
-  rmp->_vl_msg_id = htons (VL_API_CREATE_VLAN_SUBIF_REPLY);
+  rmp->_vl_msg_id = htons (REPLY_MSG_ID_BASE + VL_API_CREATE_VLAN_SUBIF_REPLY);
   rmp->context = mp->context;
   rmp->retval = htonl (rv);
   rmp->sw_if_index = htonl (sw_if_index);
@@ -1421,6 +1604,65 @@ static void
   REPLY_MACRO (VL_API_SW_INTERFACE_ADDRESS_REPLACE_END_REPLY);
 }
 
+static void
+vl_api_pcap_trace_on_t_handler (vl_api_pcap_trace_on_t *mp)
+{
+  vl_api_pcap_trace_on_reply_t *rmp;
+  unformat_input_t filename, drop_err_name;
+  vnet_pcap_dispatch_trace_args_t capture_args;
+  int rv = 0;
+
+  VALIDATE_SW_IF_INDEX (mp);
+
+  unformat_init_cstring (&filename, (char *) mp->filename);
+  if (!unformat_user (&filename, unformat_vlib_tmpfile,
+		      &capture_args.filename))
+    {
+      rv = VNET_API_ERROR_ILLEGAL_NAME;
+      goto out;
+    }
+
+  capture_args.rx_enable = mp->capture_rx;
+  capture_args.tx_enable = mp->capture_tx;
+  capture_args.preallocate_data = mp->preallocate_data;
+  capture_args.free_data = mp->free_data;
+  capture_args.drop_enable = mp->capture_drop;
+  capture_args.status = 0;
+  capture_args.packets_to_capture = ntohl (mp->max_packets);
+  capture_args.sw_if_index = ntohl (mp->sw_if_index);
+  capture_args.filter = mp->filter;
+  capture_args.max_bytes_per_pkt = ntohl (mp->max_bytes_per_packet);
+  capture_args.drop_err = ~0;
+
+  unformat_init_cstring (&drop_err_name, (char *) mp->error);
+  unformat_user (&drop_err_name, unformat_vlib_error, vlib_get_main (),
+		 &capture_args.drop_err);
+
+  rv = vnet_pcap_dispatch_trace_configure (&capture_args);
+
+  BAD_SW_IF_INDEX_LABEL;
+
+out:
+  unformat_free (&filename);
+  unformat_free (&drop_err_name);
+
+  REPLY_MACRO (VL_API_PCAP_TRACE_ON_REPLY);
+}
+
+static void
+vl_api_pcap_trace_off_t_handler (vl_api_pcap_trace_off_t *mp)
+{
+  vl_api_pcap_trace_off_reply_t *rmp;
+  vnet_pcap_dispatch_trace_args_t capture_args;
+  int rv = 0;
+
+  clib_memset (&capture_args, 0, sizeof (capture_args));
+
+  rv = vnet_pcap_dispatch_trace_configure (&capture_args);
+
+  REPLY_MACRO (VL_API_PCAP_TRACE_OFF_REPLY);
+}
+
 /*
  * vpe_api_hookup
  * Add vpe's API message handlers to the table.
@@ -1428,47 +1670,39 @@ static void
  * added the client registration handlers.
  * See .../vlib-api/vlibmemory/memclnt_vlib.c:memclnt_process()
  */
-#define vl_msg_name_crc_list
-#include <vnet/interface.api.h>
-#undef vl_msg_name_crc_list
-
-static void
-setup_message_id_table (api_main_t * am)
-{
-#define _(id,n,crc) vl_msg_api_add_msg_name_crc (am, #n "_" #crc, id);
-  foreach_vl_msg_name_crc_interface;
-#undef _
-}
 
 pub_sub_handler (interface_events, INTERFACE_EVENTS);
 
+#include <vnet/interface.api.c>
 static clib_error_t *
 interface_api_hookup (vlib_main_t * vm)
 {
   api_main_t *am = vlibapi_get_main ();
 
-#define _(N,n)                                                  \
-    vl_msg_api_set_handlers(VL_API_##N, #n,                     \
-                           vl_api_##n##_t_handler,              \
-                           vl_noop_handler,                     \
-                           vl_api_##n##_t_endian,               \
-                           vl_api_##n##_t_print,                \
-                           sizeof(vl_api_##n##_t), 1);
-  foreach_vpe_api_msg;
-#undef _
-
-  /* Mark these APIs as mp safe */
-  am->is_mp_safe[VL_API_SW_INTERFACE_DUMP] = 1;
-  am->is_mp_safe[VL_API_SW_INTERFACE_DETAILS] = 1;
-  am->is_mp_safe[VL_API_SW_INTERFACE_TAG_ADD_DEL] = 1;
-
-  /* Do not replay VL_API_SW_INTERFACE_DUMP messages */
-  am->api_trace_cfg[VL_API_SW_INTERFACE_DUMP].replay_enable = 0;
-
   /*
    * Set up the (msg_name, crc, message-id) table
    */
-  setup_message_id_table (am);
+  REPLY_MSG_ID_BASE = setup_message_id_table ();
+
+  /* Mark these APIs as mp safe */
+  vl_api_set_msg_thread_safe (am, REPLY_MSG_ID_BASE + VL_API_SW_INTERFACE_DUMP,
+			      1);
+  vl_api_set_msg_thread_safe (
+    am, REPLY_MSG_ID_BASE + VL_API_SW_INTERFACE_DETAILS, 1);
+  vl_api_set_msg_thread_safe (
+    am, REPLY_MSG_ID_BASE + VL_API_SW_INTERFACE_TAG_ADD_DEL, 1);
+  vl_api_set_msg_thread_safe (
+    am, REPLY_MSG_ID_BASE + VL_API_SW_INTERFACE_SET_INTERFACE_NAME, 1);
+
+  /* Do not replay VL_API_SW_INTERFACE_DUMP messages */
+  vl_api_allow_msg_replay (am, REPLY_MSG_ID_BASE + VL_API_SW_INTERFACE_DUMP,
+			   0);
+
+  /* Mark these APIs as autoendian */
+  vl_api_set_msg_autoendian (
+    am, REPLY_MSG_ID_BASE + VL_API_SW_INTERFACE_SET_TX_PLACEMENT, 1);
+  vl_api_set_msg_autoendian (
+    am, REPLY_MSG_ID_BASE + VL_API_SW_INTERFACE_TX_PLACEMENT_GET, 1);
 
   return 0;
 }

@@ -17,5 +17,8 @@
 #define included_vpp_vnet_config_h
 
 #define VPP_SANITIZE_ADDR_OPTIONS "@VPP_SANITIZE_ADDR_OPTIONS@"
+#cmakedefine VPP_IP_FIB_MTRIE_16
+#cmakedefine VPP_TCP_DEBUG_ALWAYS
+#cmakedefine VPP_SESSION_DEBUG
 
 #endif

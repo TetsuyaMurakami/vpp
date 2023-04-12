@@ -131,7 +131,7 @@ pipe_tx (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 {
   u32 n_left_from, n_left_to_next, n_copy, *from, *to_next;
   u32 next_index = VNET_PIPE_TX_NEXT_ETHERNET_INPUT;
-  u32 i, sw_if_index = 0, n_pkts = 0, n_bytes = 0;
+  u32 i, sw_if_index = 0;
   vlib_buffer_t *b;
   pipe_t *pipe;
 
@@ -159,15 +159,13 @@ pipe_tx (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 	  vnet_buffer (b)->sw_if_index[VLIB_TX] = ~0;
 
 	  i++;
-	  n_pkts++;
-	  n_bytes += vlib_buffer_length_in_chain (vm, b);
 	}
       from += n_copy;
 
       vlib_put_next_frame (vm, node, next_index, n_left_to_next);
     }
 
-  return n_left_from;
+  return frame->n_vectors;
 }
 
 static u8 *
@@ -324,8 +322,8 @@ pipe_rx (vlib_main_t * vm,
 	    p3 = vlib_get_buffer (vm, from[3]);
 	    vlib_prefetch_buffer_header (p2, STORE);
 	    vlib_prefetch_buffer_header (p3, STORE);
-	    CLIB_PREFETCH (p2->data, CLIB_CACHE_LINE_BYTES, LOAD);
-	    CLIB_PREFETCH (p3->data, CLIB_CACHE_LINE_BYTES, LOAD);
+	    clib_prefetch_load (p2->data);
+	    clib_prefetch_load (p3->data);
 	  }
 
 	  bi0 = from[0];
@@ -534,6 +532,7 @@ vnet_create_pipe_interface (u8 is_specified,
 {
   vnet_main_t *vnm = vnet_get_main ();
   vlib_main_t *vm = vlib_get_main ();
+  vnet_eth_interface_registration_t eir = {};
   u8 address[6] = {
     [0] = 0x22,
     [1] = 0x22,
@@ -564,15 +563,10 @@ vnet_create_pipe_interface (u8 is_specified,
    */
   address[5] = instance;
 
-  error = ethernet_register_interface (vnm, pipe_device_class.index,
-				       instance, address, &hw_if_index,
-				       /* flag change */ 0);
-
-  if (error)
-    {
-      rv = VNET_API_ERROR_INVALID_REGISTRATION;
-      goto oops;
-    }
+  eir.dev_class_index = pipe_device_class.index;
+  eir.dev_instance = instance;
+  eir.address = address;
+  hw_if_index = vnet_eth_register_interface (vnm, &eir);
 
   hi = vnet_get_hw_interface (vnm, hw_if_index);
   *parent_sw_if_index = hi->sw_if_index;

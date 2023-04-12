@@ -378,8 +378,10 @@ fib_path_list_mk_lb (fib_path_list_t *path_list,
         if ((flags & FIB_PATH_LIST_FWD_FLAG_STICKY) ||
             fib_path_is_resolved(*path_index))
         {
-            nhs = fib_path_append_nh_for_multipath_hash(*path_index,
-                                                        fct, nhs);
+            nhs = fib_path_append_nh_for_multipath_hash(
+                *path_index, fct,
+                fib_forw_chain_type_to_dpo_proto(fct),
+                nhs);
         }
     }
 
@@ -962,8 +964,7 @@ fib_path_list_copy_and_path_add (fib_node_index_t orig_path_list_index,
         }
         if (duplicate)
         {
-            _vec_len(path_list->fpl_paths) =
-                vec_len(path_list->fpl_paths) - 1;
+            vec_set_len(path_list->fpl_paths, vec_len(path_list->fpl_paths) - 1);
             fib_path_destroy(new_path_index);
         }
         else
@@ -1297,15 +1298,8 @@ fib_path_list_child_add (fib_node_index_t path_list_index,
 			 fib_node_type_t child_type,
 			 fib_node_index_t child_index)
 {
-    u32 sibling;
-
-    sibling = fib_node_child_add(FIB_NODE_TYPE_PATH_LIST,
-                                 path_list_index,
-                                 child_type,
-                                 child_index);
-
-    if (FIB_PATH_LIST_POPULAR == fib_node_get_n_children(FIB_NODE_TYPE_PATH_LIST,
-                                                         path_list_index))
+    if (FIB_PATH_LIST_POPULAR - 1 == fib_node_get_n_children(FIB_NODE_TYPE_PATH_LIST,
+                                                             path_list_index))
     {
         /*
          * Set the popular flag on the path-list once we pass the magic
@@ -1328,7 +1322,10 @@ fib_path_list_child_add (fib_node_index_t path_list_index,
 	fib_walk_sync(FIB_NODE_TYPE_PATH_LIST, path_list_index, &ctx);
     }
 
-    return (sibling);
+    return (fib_node_child_add(FIB_NODE_TYPE_PATH_LIST,
+                                 path_list_index,
+                                 child_type,
+                                 child_index));
 }
 
 void

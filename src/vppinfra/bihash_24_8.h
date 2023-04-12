@@ -43,11 +43,16 @@ typedef struct
   u64 value;
 } clib_bihash_kv_24_8_t;
 
+static inline void
+clib_bihash_mark_free_24_8 (clib_bihash_kv_24_8_t *v)
+{
+  v->value = 0xFEEDFACE8BADF00DULL;
+}
+
 static inline int
 clib_bihash_is_free_24_8 (const clib_bihash_kv_24_8_t * v)
 {
-  /* Free values are clib_memset to 0xff, check a bit... */
-  if (v->key[0] == ~0ULL && v->value == ~0ULL)
+  if (v->value == 0xFEEDFACE8BADF00DULL)
     return 1;
   return 0;
 }
@@ -77,8 +82,8 @@ static inline int
 clib_bihash_key_compare_24_8 (u64 * a, u64 * b)
 {
 #if defined (CLIB_HAVE_VEC512)
-  u64x8 v = u64x8_load_unaligned (a) ^ u64x8_load_unaligned (b);
-  return (u64x8_is_zero_mask (v) & 0x7) == 0;
+  return u64x8_is_equal (u64x8_mask_load_zero (a, 0x7),
+			 u64x8_mask_load_zero (b, 0x7));
 #elif defined(CLIB_HAVE_VEC128) && defined(CLIB_HAVE_VEC128_UNALIGNED_LOAD_STORE)
   u64x2 v = { a[2] ^ b[2], 0 };
   v |= u64x2_load_unaligned (a) ^ u64x2_load_unaligned (b);

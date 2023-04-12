@@ -42,6 +42,7 @@
 
 #include <vppinfra/hash.h>
 #include <vppinfra/fifo.h>
+#include <vppinfra/vector/index_to_ptr.h>
 #include <vlib/buffer.h>
 #include <vlib/physmem_funcs.h>
 #include <vlib/main.h>
@@ -50,6 +51,46 @@
 /** \file
     vlib buffer access methods.
 */
+
+typedef void (vlib_buffer_enqueue_to_next_fn_t) (vlib_main_t *vm,
+						 vlib_node_runtime_t *node,
+						 u32 *buffers, u16 *nexts,
+						 uword count);
+typedef void (vlib_buffer_enqueue_to_next_with_aux_fn_t) (
+  vlib_main_t *vm, vlib_node_runtime_t *node, u32 *buffers, u32 *aux_data,
+  u16 *nexts, uword count);
+typedef void (vlib_buffer_enqueue_to_single_next_fn_t) (
+  vlib_main_t *vm, vlib_node_runtime_t *node, u32 *ers, u16 next_index,
+  u32 count);
+
+typedef void (vlib_buffer_enqueue_to_single_next_with_aux_fn_t) (
+  vlib_main_t *vm, vlib_node_runtime_t *node, u32 *ers, u32 *aux_data,
+  u16 next_index, u32 count);
+
+typedef u32 (vlib_buffer_enqueue_to_thread_fn_t) (
+  vlib_main_t *vm, vlib_node_runtime_t *node, u32 frame_queue_index,
+  u32 *buffer_indices, u16 *thread_indices, u32 n_packets,
+  int drop_on_congestion);
+
+typedef u32 (vlib_buffer_enqueue_to_thread_with_aux_fn_t) (
+  vlib_main_t *vm, vlib_node_runtime_t *node, u32 frame_queue_index,
+  u32 *buffer_indices, u32 *aux, u16 *thread_indices, u32 n_packets,
+  int drop_on_congestion);
+
+typedef struct
+{
+  vlib_buffer_enqueue_to_next_fn_t *buffer_enqueue_to_next_fn;
+  vlib_buffer_enqueue_to_next_with_aux_fn_t
+    *buffer_enqueue_to_next_with_aux_fn;
+  vlib_buffer_enqueue_to_single_next_fn_t *buffer_enqueue_to_single_next_fn;
+  vlib_buffer_enqueue_to_single_next_with_aux_fn_t
+    *buffer_enqueue_to_single_next_with_aux_fn;
+  vlib_buffer_enqueue_to_thread_fn_t *buffer_enqueue_to_thread_fn;
+  vlib_buffer_enqueue_to_thread_with_aux_fn_t
+    *buffer_enqueue_to_thread_with_aux_fn;
+} vlib_buffer_func_main_t;
+
+extern vlib_buffer_func_main_t vlib_buffer_func_main;
 
 always_inline void
 vlib_buffer_validate (vlib_main_t * vm, vlib_buffer_t * b)
@@ -101,43 +142,7 @@ vlib_buffer_get_default_data_size (vlib_main_t * vm)
 static_always_inline void
 vlib_buffer_copy_indices (u32 * dst, u32 * src, u32 n_indices)
 {
-#if defined(CLIB_HAVE_VEC512)
-  while (n_indices >= 16)
-    {
-      u32x16_store_unaligned (u32x16_load_unaligned (src), dst);
-      dst += 16;
-      src += 16;
-      n_indices -= 16;
-    }
-#endif
-
-#if defined(CLIB_HAVE_VEC256)
-  while (n_indices >= 8)
-    {
-      u32x8_store_unaligned (u32x8_load_unaligned (src), dst);
-      dst += 8;
-      src += 8;
-      n_indices -= 8;
-    }
-#endif
-
-#if defined(CLIB_HAVE_VEC128)
-  while (n_indices >= 4)
-    {
-      u32x4_store_unaligned (u32x4_load_unaligned (src), dst);
-      dst += 4;
-      src += 4;
-      n_indices -= 4;
-    }
-#endif
-
-  while (n_indices)
-    {
-      dst[0] = src[0];
-      dst += 1;
-      src += 1;
-      n_indices -= 1;
-    }
+  clib_memcpy_u32 (dst, src, n_indices);
 }
 
 always_inline void
@@ -211,61 +216,38 @@ vlib_buffer_pool_get_default_for_numa (vlib_main_t * vm, u32 numa_node)
     @param offset - (i32) offset applied to each pointer
 */
 static_always_inline void
-vlib_get_buffers_with_offset (vlib_main_t * vm, u32 * bi, void **b, int count,
+vlib_get_buffers_with_offset (vlib_main_t *vm, u32 *bi, void **b, u32 count,
 			      i32 offset)
 {
   uword buffer_mem_start = vm->buffer_main->buffer_mem_start;
-#ifdef CLIB_HAVE_VEC256
-  u64x4 off = u64x4_splat (buffer_mem_start + offset);
-  /* if count is not const, compiler will not unroll while loop
-     se we maintain two-in-parallel variant */
-  while (count >= 8)
+  void *base = (void *) (buffer_mem_start + offset);
+  int objsize = __builtin_object_size (b, 0);
+  const int sh = CLIB_LOG2_CACHE_LINE_BYTES;
+
+  if (COMPILE_TIME_CONST (count) == 0 && objsize >= 64 * sizeof (b[0]) &&
+      (objsize & ((8 * sizeof (b[0])) - 1)) == 0)
     {
-      u64x4 b0 = u64x4_from_u32x4 (u32x4_load_unaligned (bi));
-      u64x4 b1 = u64x4_from_u32x4 (u32x4_load_unaligned (bi + 4));
-      /* shift and add to get vlib_buffer_t pointer */
-      u64x4_store_unaligned ((b0 << CLIB_LOG2_CACHE_LINE_BYTES) + off, b);
-      u64x4_store_unaligned ((b1 << CLIB_LOG2_CACHE_LINE_BYTES) + off, b + 4);
-      b += 8;
-      bi += 8;
-      count -= 8;
+      u32 n = round_pow2 (count, 8);
+      ASSERT (objsize >= count);
+      CLIB_ASSUME (objsize >= count);
+      while (n >= 64)
+	{
+	  clib_index_to_ptr_u32 (bi, base, sh, b, 64);
+	  b += 64;
+	  bi += 64;
+	  n -= 64;
+	}
+
+      while (n)
+	{
+	  clib_index_to_ptr_u32 (bi, base, sh, b, 8);
+	  b += 8;
+	  bi += 8;
+	  n -= 8;
+	}
     }
-#endif
-  while (count >= 4)
-    {
-#ifdef CLIB_HAVE_VEC256
-      u64x4 b0 = u64x4_from_u32x4 (u32x4_load_unaligned (bi));
-      /* shift and add to get vlib_buffer_t pointer */
-      u64x4_store_unaligned ((b0 << CLIB_LOG2_CACHE_LINE_BYTES) + off, b);
-#elif defined (CLIB_HAVE_VEC128)
-      u64x2 off = u64x2_splat (buffer_mem_start + offset);
-      u32x4 bi4 = u32x4_load_unaligned (bi);
-      u64x2 b0 = u64x2_from_u32x4 ((u32x4) bi4);
-#if defined (__aarch64__)
-      u64x2 b1 = u64x2_from_u32x4_high ((u32x4) bi4);
-#else
-      bi4 = u32x4_shuffle (bi4, 2, 3, 0, 1);
-      u64x2 b1 = u64x2_from_u32x4 ((u32x4) bi4);
-#endif
-      u64x2_store_unaligned ((b0 << CLIB_LOG2_CACHE_LINE_BYTES) + off, b);
-      u64x2_store_unaligned ((b1 << CLIB_LOG2_CACHE_LINE_BYTES) + off, b + 2);
-#else
-      b[0] = vlib_buffer_ptr_from_index (buffer_mem_start, bi[0], offset);
-      b[1] = vlib_buffer_ptr_from_index (buffer_mem_start, bi[1], offset);
-      b[2] = vlib_buffer_ptr_from_index (buffer_mem_start, bi[2], offset);
-      b[3] = vlib_buffer_ptr_from_index (buffer_mem_start, bi[3], offset);
-#endif
-      b += 4;
-      bi += 4;
-      count -= 4;
-    }
-  while (count)
-    {
-      b[0] = vlib_buffer_ptr_from_index (buffer_mem_start, bi[0], offset);
-      b += 1;
-      bi += 1;
-      count -= 1;
-    }
+  else
+    clib_index_to_ptr_u32 (bi, base, sh, b, count);
 }
 
 /** \brief Translate array of buffer indices into buffer pointers
@@ -277,7 +259,7 @@ vlib_get_buffers_with_offset (vlib_main_t * vm, u32 * bi, void **b, int count,
 */
 
 static_always_inline void
-vlib_get_buffers (vlib_main_t * vm, u32 * bi, vlib_buffer_t ** b, int count)
+vlib_get_buffers (vlib_main_t *vm, u32 *bi, vlib_buffer_t **b, u32 count)
 {
   vlib_get_buffers_with_offset (vm, bi, (void **) b, count, 0);
 }
@@ -595,11 +577,7 @@ vlib_buffer_alloc_from_pool (vlib_main_t * vm, u32 * buffers, u32 n_buffers,
       src = bpt->cached_buffers + len - n_buffers;
       vlib_buffer_copy_indices (dst, src, n_buffers);
       bpt->n_cached -= n_buffers;
-
-      if (CLIB_DEBUG > 0)
-	vlib_buffer_validate_alloc_free (vm, buffers, n_buffers,
-					 VLIB_BUFFER_KNOWN_FREE);
-      return n_buffers;
+      goto done;
     }
 
   /* alloc bigger than cache - take buffers directly from main pool */
@@ -607,11 +585,7 @@ vlib_buffer_alloc_from_pool (vlib_main_t * vm, u32 * buffers, u32 n_buffers,
     {
       n_buffers = vlib_buffer_pool_get (vm, buffer_pool_index, buffers,
 					n_buffers);
-
-      if (CLIB_DEBUG > 0)
-	vlib_buffer_validate_alloc_free (vm, buffers, n_buffers,
-					 VLIB_BUFFER_KNOWN_FREE);
-      return n_buffers;
+      goto done;
     }
 
   /* take everything available in the cache */
@@ -639,11 +613,13 @@ vlib_buffer_alloc_from_pool (vlib_main_t * vm, u32 * buffers, u32 n_buffers,
 
   n_buffers -= n_left;
 
+done:
   /* Verify that buffers are known free. */
   if (CLIB_DEBUG > 0)
     vlib_buffer_validate_alloc_free (vm, buffers, n_buffers,
 				     VLIB_BUFFER_KNOWN_FREE);
-
+  if (PREDICT_FALSE (bm->alloc_callback_fn != 0))
+    bm->alloc_callback_fn (vm, buffer_pool_index, buffers, n_buffers);
   return n_buffers;
 }
 
@@ -745,6 +721,7 @@ static_always_inline void
 vlib_buffer_pool_put (vlib_main_t * vm, u8 buffer_pool_index,
 		      u32 * buffers, u32 n_buffers)
 {
+  vlib_buffer_main_t *bm = vm->buffer_main;
   vlib_buffer_pool_t *bp = vlib_get_buffer_pool (vm, buffer_pool_index);
   vlib_buffer_pool_thread_t *bpt = vec_elt_at_index (bp->threads,
 						     vm->thread_index);
@@ -753,6 +730,8 @@ vlib_buffer_pool_put (vlib_main_t * vm, u8 buffer_pool_index,
   if (CLIB_DEBUG > 0)
     vlib_buffer_validate_alloc_free (vm, buffers, n_buffers,
 				     VLIB_BUFFER_KNOWN_ALLOCATED);
+  if (PREDICT_FALSE (bm->free_callback_fn != 0))
+    bm->free_callback_fn (vm, buffer_pool_index, buffers, n_buffers);
 
   n_cached = bpt->n_cached;
   n_empty = VLIB_BUFFER_POOL_PER_THREAD_CACHE_SZ - n_cached;
@@ -786,11 +765,22 @@ vlib_buffer_free_inline (vlib_main_t * vm, u32 * buffers, u32 n_buffers,
   vlib_buffer_t bt = { };
 #if defined(CLIB_HAVE_VEC128)
   vlib_buffer_t bpi_mask = {.buffer_pool_index = ~0 };
-  vlib_buffer_t bpi_vec = {.buffer_pool_index = ~0 };
+  vlib_buffer_t bpi_vec = {};
   vlib_buffer_t flags_refs_mask = {
     .flags = VLIB_BUFFER_NEXT_PRESENT,
     .ref_count = ~1
   };
+#endif
+
+  if (PREDICT_FALSE (n_buffers == 0))
+    return;
+
+  vlib_buffer_t *b = vlib_get_buffer (vm, buffers[0]);
+  buffer_pool_index = b->buffer_pool_index;
+  bp = vlib_get_buffer_pool (vm, buffer_pool_index);
+  vlib_buffer_copy_template (&bt, &bp->buffer_template);
+#if defined(CLIB_HAVE_VEC128)
+  bpi_vec.buffer_pool_index = buffer_pool_index;
 #endif
 
   while (n_buffers)
@@ -798,18 +788,53 @@ vlib_buffer_free_inline (vlib_main_t * vm, u32 * buffers, u32 n_buffers,
       vlib_buffer_t *b[8];
       u32 bi, sum = 0, flags, next;
 
-      if (n_buffers < 12)
+#if defined(CLIB_HAVE_VEC512)
+      if (n_buffers < 8)
+#else
+      if (n_buffers < 4)
+#endif
 	goto one_by_one;
 
+#if defined(CLIB_HAVE_VEC512)
+      vlib_get_buffers (vm, buffers, b, 8);
+#else
       vlib_get_buffers (vm, buffers, b, 4);
-      vlib_get_buffers (vm, buffers + 8, b + 4, 4);
 
-      vlib_prefetch_buffer_header (b[4], LOAD);
-      vlib_prefetch_buffer_header (b[5], LOAD);
-      vlib_prefetch_buffer_header (b[6], LOAD);
-      vlib_prefetch_buffer_header (b[7], LOAD);
+      if (n_buffers >= 12)
+	{
+	  vlib_get_buffers (vm, buffers + 8, b + 4, 4);
+	  vlib_prefetch_buffer_header (b[4], LOAD);
+	  vlib_prefetch_buffer_header (b[5], LOAD);
+	  vlib_prefetch_buffer_header (b[6], LOAD);
+	  vlib_prefetch_buffer_header (b[7], LOAD);
+	}
+#endif
 
-#if defined(CLIB_HAVE_VEC128)
+#if defined(CLIB_HAVE_VEC512)
+      u8x16 p0, p1, p2, p3, p4, p5, p6, p7, r;
+      p0 = u8x16_load_unaligned (b[0]);
+      p1 = u8x16_load_unaligned (b[1]);
+      p2 = u8x16_load_unaligned (b[2]);
+      p3 = u8x16_load_unaligned (b[3]);
+      p4 = u8x16_load_unaligned (b[4]);
+      p5 = u8x16_load_unaligned (b[5]);
+      p6 = u8x16_load_unaligned (b[6]);
+      p7 = u8x16_load_unaligned (b[7]);
+
+      r = p0 ^ bpi_vec.as_u8x16[0];
+      r |= p1 ^ bpi_vec.as_u8x16[0];
+      r |= p2 ^ bpi_vec.as_u8x16[0];
+      r |= p3 ^ bpi_vec.as_u8x16[0];
+      r |= p4 ^ bpi_vec.as_u8x16[0];
+      r |= p5 ^ bpi_vec.as_u8x16[0];
+      r |= p6 ^ bpi_vec.as_u8x16[0];
+      r |= p7 ^ bpi_vec.as_u8x16[0];
+      r &= bpi_mask.as_u8x16[0];
+      r |=
+	(p0 | p1 | p2 | p3 | p4 | p5 | p6 | p7) & flags_refs_mask.as_u8x16[0];
+
+      sum = !u8x16_is_all_zero (r);
+#elif defined(CLIB_HAVE_VEC128)
       u8x16 p0, p1, p2, p3, r;
       p0 = u8x16_load_unaligned (b[0]);
       p1 = u8x16_load_unaligned (b[1]);
@@ -843,6 +868,36 @@ vlib_buffer_free_inline (vlib_main_t * vm, u32 * buffers, u32 n_buffers,
       if (sum)
 	goto one_by_one;
 
+#if defined(CLIB_HAVE_VEC512)
+      vlib_buffer_copy_indices (queue + n_queue, buffers, 8);
+      vlib_buffer_copy_template (b[0], &bt);
+      vlib_buffer_copy_template (b[1], &bt);
+      vlib_buffer_copy_template (b[2], &bt);
+      vlib_buffer_copy_template (b[3], &bt);
+      vlib_buffer_copy_template (b[4], &bt);
+      vlib_buffer_copy_template (b[5], &bt);
+      vlib_buffer_copy_template (b[6], &bt);
+      vlib_buffer_copy_template (b[7], &bt);
+      n_queue += 8;
+
+      vlib_buffer_validate (vm, b[0]);
+      vlib_buffer_validate (vm, b[1]);
+      vlib_buffer_validate (vm, b[2]);
+      vlib_buffer_validate (vm, b[3]);
+      vlib_buffer_validate (vm, b[4]);
+      vlib_buffer_validate (vm, b[5]);
+      vlib_buffer_validate (vm, b[6]);
+      vlib_buffer_validate (vm, b[7]);
+
+      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[0]);
+      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[1]);
+      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[2]);
+      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[3]);
+      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[4]);
+      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[5]);
+      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[6]);
+      VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[7]);
+#else
       vlib_buffer_copy_indices (queue + n_queue, buffers, 4);
       vlib_buffer_copy_template (b[0], &bt);
       vlib_buffer_copy_template (b[1], &bt);
@@ -859,14 +914,20 @@ vlib_buffer_free_inline (vlib_main_t * vm, u32 * buffers, u32 n_buffers,
       VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[1]);
       VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[2]);
       VLIB_BUFFER_TRACE_TRAJECTORY_INIT (b[3]);
+#endif
 
       if (n_queue >= queue_size)
 	{
 	  vlib_buffer_pool_put (vm, buffer_pool_index, queue, n_queue);
 	  n_queue = 0;
 	}
+#if defined(CLIB_HAVE_VEC512)
+      buffers += 8;
+      n_buffers -= 8;
+#else
       buffers += 4;
       n_buffers -= 4;
+#endif
       continue;
 
     one_by_one:
@@ -1423,138 +1484,147 @@ vlib_buffer_space_left_at_end (vlib_main_t * vm, vlib_buffer_t * b)
     ((u8 *) vlib_buffer_get_current (b) + b->current_length);
 }
 
+#define VLIB_BUFFER_LINEARIZE_MAX 64
+
 always_inline u32
 vlib_buffer_chain_linearize (vlib_main_t * vm, vlib_buffer_t * b)
 {
-  vlib_buffer_t *db = b, *sb, *first = b;
-  int is_cloned = 0;
-  u32 bytes_left = 0, data_size;
-  u16 src_left, dst_left, n_buffers = 1;
-  u8 *dp, *sp;
-  u32 to_free = 0;
+  vlib_buffer_t *dst_b;
+  u32 n_buffers = 1, to_free = 0;
+  u16 rem_len, dst_len, data_size, src_len = 0;
+  u8 *dst, *src = 0;
 
   if (PREDICT_TRUE ((b->flags & VLIB_BUFFER_NEXT_PRESENT) == 0))
     return 1;
 
+  ASSERT (1 == b->ref_count);
+  if (PREDICT_FALSE (1 != b->ref_count))
+    return 0;
+
   data_size = vlib_buffer_get_default_data_size (vm);
+  rem_len = vlib_buffer_length_in_chain (vm, b) - b->current_length;
 
-  dst_left = vlib_buffer_space_left_at_end (vm, b);
+  dst_b = b;
+  dst = vlib_buffer_get_tail (dst_b);
+  dst_len = vlib_buffer_space_left_at_end (vm, dst_b);
 
-  while (b->flags & VLIB_BUFFER_NEXT_PRESENT)
+  b->total_length_not_including_first_buffer -= dst_len;
+
+  while (rem_len > 0)
     {
-      b = vlib_get_buffer (vm, b->next_buffer);
-      if (b->ref_count > 1)
-	is_cloned = 1;
-      bytes_left += b->current_length;
-      n_buffers++;
-    }
+      u16 copy_len;
 
-  /* if buffer is cloned, create completely new chain - unless everything fits
-   * into one buffer */
-  if (is_cloned && bytes_left >= dst_left)
-    {
-      u32 len = 0;
-      u32 space_needed = bytes_left - dst_left;
-      u32 tail;
-
-      if (vlib_buffer_alloc (vm, &tail, 1) == 0)
-	return 0;
-
-      ++n_buffers;
-      len += data_size;
-      b = vlib_get_buffer (vm, tail);
-
-      while (len < space_needed)
+      while (0 == src_len)
 	{
-	  u32 bi;
-	  if (vlib_buffer_alloc (vm, &bi, 1) == 0)
-	    {
-	      vlib_buffer_free_one (vm, tail);
-	      return 0;
-	    }
-	  b->flags = VLIB_BUFFER_NEXT_PRESENT;
-	  b->next_buffer = bi;
-	  b = vlib_get_buffer (vm, bi);
-	  len += data_size;
-	  n_buffers++;
+	  ASSERT (b->flags & VLIB_BUFFER_NEXT_PRESENT);
+	  if (PREDICT_FALSE (!(b->flags & VLIB_BUFFER_NEXT_PRESENT)))
+	    break; /* malformed chained buffer */
+
+	  b = vlib_get_buffer (vm, b->next_buffer);
+	  src = vlib_buffer_get_current (b);
+	  src_len = b->current_length;
 	}
-      sb = vlib_get_buffer (vm, first->next_buffer);
-      to_free = first->next_buffer;
-      first->next_buffer = tail;
-    }
-  else
-    sb = vlib_get_buffer (vm, first->next_buffer);
 
-  src_left = sb->current_length;
-  sp = vlib_buffer_get_current (sb);
-  dp = vlib_buffer_get_tail (db);
-
-  while (bytes_left)
-    {
-      u16 bytes_to_copy;
-
-      if (dst_left == 0)
+      if (0 == dst_len)
 	{
-	  db->current_length = dp - (u8 *) vlib_buffer_get_current (db);
-	  ASSERT (db->flags & VLIB_BUFFER_NEXT_PRESENT);
-	  db = vlib_get_buffer (vm, db->next_buffer);
-	  dst_left = data_size;
-	  if (db->current_data > 0)
+	  ASSERT (dst_b->flags & VLIB_BUFFER_NEXT_PRESENT);
+	  if (PREDICT_FALSE (!(dst_b->flags & VLIB_BUFFER_NEXT_PRESENT)))
+	    break; /* malformed chained buffer */
+
+	  vlib_buffer_t *next_dst_b = vlib_get_buffer (vm, dst_b->next_buffer);
+
+	  if (PREDICT_TRUE (1 == next_dst_b->ref_count))
 	    {
-	      db->current_data = 0;
+	      /* normal case: buffer is not cloned, just use it */
+	      dst_b = next_dst_b;
 	    }
 	  else
 	    {
-	      dst_left += -db->current_data;
+	      /* cloned buffer, build a new dest chain from there */
+	      vlib_buffer_t *bufs[VLIB_BUFFER_LINEARIZE_MAX];
+	      u32 bis[VLIB_BUFFER_LINEARIZE_MAX + 1];
+	      const int n = (rem_len + data_size - 1) / data_size;
+	      int n_alloc;
+	      int i;
+
+	      ASSERT (n <= VLIB_BUFFER_LINEARIZE_MAX);
+	      if (PREDICT_FALSE (n > VLIB_BUFFER_LINEARIZE_MAX))
+		return 0;
+
+	      n_alloc = vlib_buffer_alloc (vm, bis, n);
+	      if (PREDICT_FALSE (n_alloc != n))
+		{
+		  vlib_buffer_free (vm, bis, n_alloc);
+		  return 0;
+		}
+
+	      vlib_get_buffers (vm, bis, bufs, n);
+
+	      for (i = 0; i < n - 1; i++)
+		{
+		  bufs[i]->flags |= VLIB_BUFFER_NEXT_PRESENT;
+		  bufs[i]->next_buffer = bis[i + 1];
+		}
+
+	      to_free = dst_b->next_buffer;
+	      dst_b->next_buffer = bis[0];
+	      dst_b = bufs[0];
 	    }
-	  dp = vlib_buffer_get_current (db);
+
+	  n_buffers++;
+
+	  dst_b->current_data = clib_min (0, dst_b->current_data);
+	  dst_b->current_length = 0;
+
+	  dst = dst_b->data + dst_b->current_data;
+	  dst_len = data_size - dst_b->current_data;
 	}
 
-      while (src_left == 0)
+      copy_len = clib_min (src_len, dst_len);
+
+      if (PREDICT_TRUE (src == dst))
 	{
-	  ASSERT (sb->flags & VLIB_BUFFER_NEXT_PRESENT);
-	  sb = vlib_get_buffer (vm, sb->next_buffer);
-	  src_left = sb->current_length;
-	  sp = vlib_buffer_get_current (sb);
+	  /* nothing to do */
 	}
-
-      bytes_to_copy = clib_min (dst_left, src_left);
-
-      if (dp != sp)
+      else if (src + copy_len > dst && dst + copy_len > src)
 	{
-	  if (sb == db)
-	    bytes_to_copy = clib_min (bytes_to_copy, sp - dp);
-
-	  clib_memcpy_fast (dp, sp, bytes_to_copy);
+	  /* src and dst overlap */
+	  ASSERT (b == dst_b);
+	  memmove (dst, src, copy_len);
+	}
+      else
+	{
+	  clib_memcpy_fast (dst, src, copy_len);
 	}
 
-      src_left -= bytes_to_copy;
-      dst_left -= bytes_to_copy;
-      dp += bytes_to_copy;
-      sp += bytes_to_copy;
-      bytes_left -= bytes_to_copy;
+      dst_b->current_length += copy_len;
+
+      dst += copy_len;
+      src += copy_len;
+      dst_len -= copy_len;
+      src_len -= copy_len;
+      rem_len -= copy_len;
     }
-  if (db != first)
-    db->current_data = 0;
-  db->current_length = dp - (u8 *) vlib_buffer_get_current (db);
 
-  if (is_cloned && to_free)
+  /* in case of a malformed chain buffer, we'll exit early from the loop. */
+  ASSERT (0 == rem_len);
+  b->total_length_not_including_first_buffer -= rem_len;
+
+  if (to_free)
     vlib_buffer_free_one (vm, to_free);
-  else
+
+  if (dst_b->flags & VLIB_BUFFER_NEXT_PRESENT)
     {
-      if (db->flags & VLIB_BUFFER_NEXT_PRESENT)
-	vlib_buffer_free_one (vm, db->next_buffer);
-      db->flags &= ~VLIB_BUFFER_NEXT_PRESENT;
-      b = first;
-      n_buffers = 1;
-      while (b->flags & VLIB_BUFFER_NEXT_PRESENT)
+      /* the resulting chain is smaller than the original, cut it there */
+      dst_b->flags &= ~VLIB_BUFFER_NEXT_PRESENT;
+      vlib_buffer_free_one (vm, dst_b->next_buffer);
+      if (1 == n_buffers)
 	{
-	  b = vlib_get_buffer (vm, b->next_buffer);
-	  ++n_buffers;
+	  /* no longer a chained buffer */
+	  dst_b->flags &= ~VLIB_BUFFER_TOTAL_LENGTH_VALID;
+	  dst_b->total_length_not_including_first_buffer = 0;
 	}
     }
-
-  first->flags &= ~VLIB_BUFFER_TOTAL_LENGTH_VALID;
 
   return n_buffers;
 }

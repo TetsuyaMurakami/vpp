@@ -75,6 +75,9 @@ print_results (vlib_main_t * vm, unittest_crypto_test_registration_t ** rv,
       case VNET_CRYPTO_OP_TYPE_HMAC:
 	exp_digest = &r->digest;
 	break;
+      case VNET_CRYPTO_OP_TYPE_HASH:
+	exp_digest = &r->digest;
+	break;
       default:
 	ASSERT (0);
       }
@@ -629,6 +632,12 @@ test_crypto_static (vlib_main_t * vm, crypto_test_main_t * tm,
               op->len = r->plaintext.length;
               }
 	      break;
+	    case VNET_CRYPTO_OP_TYPE_HASH:
+	      op->digest = computed_data + computed_data_total_len;
+	      computed_data_total_len += r->digest.length;
+	      op->src = r->plaintext.data;
+	      op->len = r->plaintext.length;
+	      break;
 	    default:
 	      break;
 	    };
@@ -802,6 +811,10 @@ test_crypto (vlib_main_t * vm, crypto_test_main_t * tm)
 		    n_ops_static += 1;
 		}
 	      break;
+	    case VNET_CRYPTO_OP_TYPE_HASH:
+	      computed_data_total_len += r->digest.length;
+	      n_ops_static += 1;
+	      break;
 	    default:
 	      break;
 	    };
@@ -844,7 +857,7 @@ test_crypto_perf (vlib_main_t * vm, crypto_test_main_t * tm)
   vnet_crypto_op_t *ops1 = 0, *ops2 = 0, *op1, *op2;
   vnet_crypto_alg_data_t *ad = vec_elt_at_index (cm->algs, tm->alg);
   vnet_crypto_key_index_t key_index = ~0;
-  u8 key[32];
+  u8 key[64];
   int buffer_size = vlib_buffer_get_default_data_size (vm);
   u64 seed = clib_cpu_time_now ();
   u64 t0[5], t1[5], t2[5], n_bytes = 0;
@@ -912,7 +925,6 @@ test_crypto_perf (vlib_main_t * vm, crypto_test_main_t * tm)
 			       ad->op_by_type[VNET_CRYPTO_OP_TYPE_ENCRYPT]);
 	  vnet_crypto_op_init (op2,
 			       ad->op_by_type[VNET_CRYPTO_OP_TYPE_DECRYPT]);
-	  op1->flags = VNET_CRYPTO_OP_FLAG_INIT_IV;
 	  op1->src = op2->src = op1->dst = op2->dst = b->data;
 	  op1->key_index = op2->key_index = key_index;
 	  op1->iv = op2->iv = b->data - 64;

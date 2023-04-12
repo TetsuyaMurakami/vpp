@@ -15,9 +15,10 @@ set(chacha20_poly1305)
 if (OPENSSL_VERSION VERSION_GREATER_EQUAL 1.1.0)
     set(chacha20_poly1305 crypto/chacha20_poly1305.c)
 endif()
-
+include_directories(${CMAKE_SOURCE_DIR}/vpp-api ${CMAKE_CURRENT_BINARY_DIR}/../../vpp-api)
 add_vpp_plugin(unittest
   SOURCES
+  api_test.c
   api_fuzz_test.c
   bier_test.c
   bihash_test.c
@@ -29,16 +30,21 @@ add_vpp_plugin(unittest
   crypto/rfc2202_hmac_md5.c
   crypto/rfc2202_hmac_sha1.c
   crypto/rfc4231.c
+  crypto/sha.c
   crypto_test.c
   fib_test.c
+  gso_test.c
+  hash_test.c
   interface_test.c
   ipsec_test.c
+  ip_psh_cksum_test.c
   llist_test.c
   mactime_test.c
   mem_bulk_test.c
   mfib_test.c
   mpcap_node.c
   policer_test.c
+  pool_test.c
   punt_test.c
   rbtree_test.c
   session_test.c
@@ -52,4 +58,8 @@ add_vpp_plugin(unittest
   util_test.c
   vlib_test.c
   counter_test.c
+
+  COMPONENT
+  vpp-plugin-devtools
+  LINK_LIBRARIES vapiclient
 )

@@ -85,7 +85,7 @@ typedef struct udp_encap_t_
   /**
    * The second cacheline contains control-plane data
    */
-    CLIB_CACHE_LINE_ALIGN_MARK (cacheline1);
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline1);
 
   /**
    * linkage into the FIB graph
@@ -115,6 +115,7 @@ extern index_t udp_encap_add_and_lock (fib_protocol_t proto,
 extern void udp_encap_lock (index_t uei);
 extern void udp_encap_unlock (index_t uei);
 extern u8 *format_udp_encap (u8 * s, va_list * args);
+extern u8 *format_udp_encap_fixup_flags (u8 *s, va_list *args);
 extern void udp_encap_contribute_forwarding (index_t uei,
 					     dpo_proto_t proto,
 					     dpo_id_t * dpo);

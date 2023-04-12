@@ -35,7 +35,7 @@ char *vlib_plugin_app_version __attribute__ ((weak));
 char *vlib_plugin_app_version = "";
 
 void *
-vlib_get_plugin_symbol (char *plugin_name, char *symbol_name)
+vlib_get_plugin_symbol (const char *plugin_name, const char *symbol_name)
 {
   plugin_main_t *pm = &vlib_plugin_main;
   uword *p;
@@ -194,6 +194,8 @@ load_one_plugin (plugin_main_t * pm, plugin_info_t * pi, int from_early_init)
       reread_reg = 0;
       goto process_reg;
     }
+  else
+    clib_error_free (error);
 
   error = elf_get_section_by_name (&em, ".vlib_plugin_registration",
 				   &section);
@@ -304,7 +306,8 @@ process_reg:
     }
   vec_free (version_required);
 
-  handle = dlopen ((char *) pi->filename, RTLD_LAZY);
+  handle = dlopen ((char *) pi->filename,
+		   RTLD_LAZY | (reg->deep_bind ? RTLD_DEEPBIND : 0));
 
   if (handle == 0)
     {
@@ -593,7 +596,12 @@ vlib_plugin_early_init (vlib_main_t * vm)
 					0x7FFFFFFF /* aka no rate limit */ );
 
   if (pm->plugin_path == 0)
-    pm->plugin_path = format (0, "%s%c", vlib_plugin_path, 0);
+    pm->plugin_path = format (0, "%s", vlib_plugin_path);
+
+  if (pm->plugin_path_add)
+    pm->plugin_path = format (pm->plugin_path, ":%s", pm->plugin_path_add);
+
+  pm->plugin_path = format (pm->plugin_path, "%c", 0);
 
   PLUGIN_LOG_DBG ("plugin path %s", pm->plugin_path);
 
@@ -755,6 +763,8 @@ done:
       u8 *s = 0;
       if (unformat (input, "path %s", &s))
 	pm->plugin_path = s;
+      else if (unformat (input, "add-path %s", &s))
+	pm->plugin_path_add = s;
       else if (unformat (input, "name-filter %s", &s))
 	pm->plugin_name_filter = s;
       else if (unformat (input, "vat-path %s", &s))

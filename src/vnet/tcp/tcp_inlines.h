@@ -18,6 +18,35 @@
 
 #include <vnet/tcp/tcp.h>
 
+always_inline void
+tcp_node_inc_counter_i (vlib_main_t *vm, u32 tcp4_node, u32 tcp6_node,
+			u8 is_ip4, u32 evt, u32 val)
+{
+  if (is_ip4)
+    vlib_node_increment_counter (vm, tcp4_node, evt, val);
+  else
+    vlib_node_increment_counter (vm, tcp6_node, evt, val);
+}
+
+#define tcp_inc_counter(node_id, err, count)                                  \
+  tcp_node_inc_counter_i (vm, tcp4_##node_id##_node.index,                    \
+			  tcp6_##node_id##_node.index, is_ip4, err, count)
+#define tcp_maybe_inc_err_counter(cnts, err)                                  \
+  {                                                                           \
+    cnts[err] += (next0 != tcp_next_drop (is_ip4));                           \
+  }
+#define tcp_inc_err_counter(cnts, err, val)                                   \
+  {                                                                           \
+    cnts[err] += val;                                                         \
+  }
+#define tcp_store_err_counters(node_id, cnts)                                 \
+  {                                                                           \
+    int i;                                                                    \
+    for (i = 0; i < TCP_N_ERROR; i++)                                         \
+      if (cnts[i])                                                            \
+	tcp_inc_counter (node_id, i, cnts[i]);                                \
+  }
+
 always_inline tcp_header_t *
 tcp_buffer_hdr (vlib_buffer_t * b)
 {
@@ -66,12 +95,7 @@ tcp_listener_get (u32 tli)
 always_inline tcp_connection_t *
 tcp_half_open_connection_get (u32 conn_index)
 {
-  tcp_connection_t *tc = 0;
-  clib_spinlock_lock_if_init (&tcp_main.half_open_lock);
-  if (!pool_is_free_index (tcp_main.half_open_connections, conn_index))
-    tc = pool_elt_at_index (tcp_main.half_open_connections, conn_index);
-  clib_spinlock_unlock_if_init (&tcp_main.half_open_lock);
-  return tc;
+  return tcp_connection_get (conn_index, transport_cl_thread ());
 }
 
 /**
@@ -187,16 +211,13 @@ tcp_is_lost_fin (tcp_connection_t * tc)
   return 0;
 }
 
+/**
+ * Time used to generate timestamps, not the timestamp
+ */
 always_inline u32
-tcp_time_now (void)
+tcp_time_tstamp (u32 thread_index)
 {
-  return tcp_main.wrk_ctx[vlib_get_thread_index ()].time_now;
-}
-
-always_inline u32
-tcp_time_now_w_thread (u32 thread_index)
-{
-  return tcp_main.wrk_ctx[thread_index].time_now;
+  return tcp_main.wrk_ctx[thread_index].time_tstamp;
 }
 
 /**
@@ -205,20 +226,34 @@ tcp_time_now_w_thread (u32 thread_index)
 always_inline u32
 tcp_tstamp (tcp_connection_t * tc)
 {
-  return (tcp_main.wrk_ctx[tc->c_thread_index].time_now -
+  return (tcp_main.wrk_ctx[tc->c_thread_index].time_tstamp -
 	  tc->timestamp_delta);
 }
 
 always_inline f64
 tcp_time_now_us (u32 thread_index)
 {
-  return transport_time_now (thread_index);
+  return tcp_main.wrk_ctx[thread_index].time_us;
 }
 
-always_inline u32
-tcp_set_time_now (tcp_worker_ctx_t * wrk)
+always_inline void
+tcp_set_time_now (tcp_worker_ctx_t *wrk, f64 now)
 {
-  return wrk->time_now = (u64) (vlib_time_now (wrk->vm) * TCP_TSTP_HZ);
+  /* TCP internal cache of time reference. Could use @ref transport_time_now
+   * but because @ref tcp_time_now_us is used per packet, caching might
+   * slightly improve efficiency. */
+  wrk->time_us = now;
+  wrk->time_tstamp = (u64) (now * TCP_TSTP_HZ);
+}
+
+always_inline void
+tcp_update_time_now (tcp_worker_ctx_t *wrk)
+{
+  f64 now = vlib_time_now (wrk->vm);
+
+  /* Both pacer and tcp us time need to be updated */
+  transport_update_pacer_time (wrk->vm->thread_index, now);
+  tcp_set_time_now (wrk, now);
 }
 
 always_inline tcp_connection_t *
@@ -287,7 +322,7 @@ tcp_input_lookup_buffer (vlib_buffer_t * b, u8 thread_index, u32 * error,
 	    {
 	      ip6_main_t *im = &ip6_main;
 	      fib_index = vec_elt (im->fib_index_by_sw_if_index,
-				   vnet_buffer (b)->sw_if_index[VLIB_RX]);
+				   vnet_buffer (b)->ip.rx_sw_if_index);
 	    }
 
 	  tc = session_lookup_connection_wt6 (fib_index, &ip6->dst_address,
@@ -297,6 +332,10 @@ tcp_input_lookup_buffer (vlib_buffer_t * b, u8 thread_index, u32 * error,
 					      thread_index, &result);
 	}
     }
+
+  /* Set the sw_if_index[VLIB_RX] to the interface we received
+   * the connection on (the local interface) */
+  vnet_buffer (b)->sw_if_index[VLIB_RX] = vnet_buffer (b)->ip.rx_sw_if_index;
 
   if (is_nolookup)
     tc =
@@ -359,7 +398,7 @@ tcp_init_w_buffer (tcp_connection_t * tc, vlib_buffer_t * b, u8 is_ip4)
   if (tcp_opts_tstamp (&tc->rcv_opts))
     {
       tc->tsval_recent = tc->rcv_opts.tsval;
-      tc->tsval_recent_age = tcp_time_now ();
+      tc->tsval_recent_age = tcp_time_tstamp (tc->c_thread_index);
     }
 
   if (tcp_opts_wscale (&tc->rcv_opts))

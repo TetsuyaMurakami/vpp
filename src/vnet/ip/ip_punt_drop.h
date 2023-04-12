@@ -72,10 +72,6 @@ ip_punt_policer (vlib_main_t * vm,
   u64 time_in_policer_periods;
   vnet_feature_main_t *fm = &feature_main;
   vnet_feature_config_main_t *cm = &fm->feature_config_mains[arc_index];
-  vnet_policer_main_t *pm = &vnet_policer_main;
-  policer_t *pol = &pm->policers[policer_index];
-  u32 pol_thread_index = pol->thread_index;
-  u32 this_thread_index = vm->thread_index;
 
   time_in_policer_periods =
     clib_cpu_time_now () >> POLICER_TICKS_PER_PERIOD_SHIFT;
@@ -83,20 +79,6 @@ ip_punt_policer (vlib_main_t * vm,
   from = vlib_frame_vector_args (frame);
   n_left_from = frame->n_vectors;
   next_index = node->cached_next_index;
-
-  if (PREDICT_FALSE (pol_thread_index == ~0))
-    {
-      /*
-       * This is the first packet to use this policer. Set the
-       * thread index in the policer to this thread and any
-       * packets seen by this node on other threads will
-       * be handed off to this one.
-       *
-       * This could happen simultaneously on another thread.
-       */
-      clib_atomic_cmp_and_swap (&pol->thread_index, ~0, this_thread_index);
-      pol_thread_index = this_thread_index;
-    }
 
   while (n_left_from > 0)
     {
@@ -121,7 +103,14 @@ ip_punt_policer (vlib_main_t * vm,
 	  b0 = vlib_get_buffer (vm, bi0);
 	  b1 = vlib_get_buffer (vm, bi1);
 
-	  if (PREDICT_FALSE (this_thread_index != pol_thread_index))
+	  act0 = vnet_policer_police (vm, b0, policer_index,
+				      time_in_policer_periods, POLICE_CONFORM,
+				      true);
+	  act1 = vnet_policer_police (vm, b1, policer_index,
+				      time_in_policer_periods, POLICE_CONFORM,
+				      true);
+
+	  if (PREDICT_FALSE (act0 == QOS_ACTION_HANDOFF))
 	    {
 	      next0 = next1 = IP_PUNT_POLICER_NEXT_HANDOFF;
 	    }
@@ -132,13 +121,6 @@ ip_punt_policer (vlib_main_t * vm,
 				    &b0->current_config_index, &next0, 0);
 	      vnet_get_config_data (&cm->config_main,
 				    &b1->current_config_index, &next1, 0);
-
-	      act0 =
-		vnet_policer_police (vm, b0, policer_index,
-				     time_in_policer_periods, POLICE_CONFORM);
-	      act1 =
-		vnet_policer_police (vm, b1, policer_index,
-				     time_in_policer_periods, POLICE_CONFORM);
 
 	      if (PREDICT_FALSE (act0 == QOS_ACTION_DROP))
 		{
@@ -188,7 +170,10 @@ ip_punt_policer (vlib_main_t * vm,
 
 	  b0 = vlib_get_buffer (vm, bi0);
 
-	  if (PREDICT_FALSE (this_thread_index != pol_thread_index))
+	  act0 = vnet_policer_police (vm, b0, policer_index,
+				      time_in_policer_periods, POLICE_CONFORM,
+				      true);
+	  if (PREDICT_FALSE (act0 == QOS_ACTION_HANDOFF))
 	    {
 	      next0 = IP_PUNT_POLICER_NEXT_HANDOFF;
 	    }
@@ -197,9 +182,6 @@ ip_punt_policer (vlib_main_t * vm,
 	      vnet_get_config_data (&cm->config_main,
 				    &b0->current_config_index, &next0, 0);
 
-	      act0 =
-		vnet_policer_police (vm, b0, policer_index,
-				     time_in_policer_periods, POLICE_CONFORM);
 	      if (PREDICT_FALSE (act0 == QOS_ACTION_DROP))
 		{
 		  next0 = IP_PUNT_POLICER_NEXT_DROP;
@@ -285,10 +267,9 @@ typedef struct ip4_punt_redirect_trace_t_
 /**
  * Add a punt redirect entry
  */
-extern void ip_punt_redirect_add (fib_protocol_t fproto,
-				  u32 rx_sw_if_index,
+extern void ip_punt_redirect_add (fib_protocol_t fproto, u32 rx_sw_if_index,
 				  fib_forward_chain_type_t ct,
-				  fib_route_path_t * rpaths);
+				  const fib_route_path_t *rpaths);
 
 extern void ip_punt_redirect_del (fib_protocol_t fproto, u32 rx_sw_if_index);
 extern index_t ip_punt_redirect_find (fib_protocol_t fproto,
@@ -367,6 +348,8 @@ ip_punt_redirect (vlib_main_t * vm,
 
 	  if (PREDICT_TRUE (INDEX_INVALID != rrxi0))
 	    {
+	      /* prevent ttl decrement on forward */
+	      b0->flags |= VNET_BUFFER_F_LOCALLY_ORIGINATED;
 	      rrx0 = ip_punt_redirect_get (rrxi0);
 	      vnet_buffer (b0)->ip.adj_index[VLIB_TX] = rrx0->dpo.dpoi_index;
 	      next0 = rrx0->dpo.dpoi_next_node;

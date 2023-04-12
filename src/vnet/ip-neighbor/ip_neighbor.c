@@ -23,8 +23,77 @@
 #include <vnet/ip-neighbor/ip_neighbor_watch.h>
 
 #include <vnet/ip/ip6_ll_table.h>
+#include <vnet/ip/ip46_address.h>
 #include <vnet/fib/fib_table.h>
 #include <vnet/adj/adj_mcast.h>
+
+ip_neighbor_counters_t ip_neighbor_counters[] =
+{
+ [AF_IP4] = {
+   .ipnc = {
+     [VLIB_RX] = {
+        [IP_NEIGHBOR_CTR_REPLY] = {
+          .name = "arp-rx-replies",
+          .stat_segment_name = "/net/arp/rx/replies",
+        },
+        [IP_NEIGHBOR_CTR_REQUEST] = {
+          .name = "arp-rx-requests",
+          .stat_segment_name = "/net/arp/rx/requests",
+        },
+        [IP_NEIGHBOR_CTR_GRAT] = {
+          .name = "arp-rx-gratuitous",
+          .stat_segment_name = "/net/arp/rx/gratuitous",
+        },
+      },
+      [VLIB_TX] = {
+        [IP_NEIGHBOR_CTR_REPLY] = {
+          .name = "arp-tx-replies",
+          .stat_segment_name = "/net/arp/tx/replies",
+        },
+        [IP_NEIGHBOR_CTR_REQUEST] = {
+          .name = "arp-tx-requests",
+          .stat_segment_name = "/net/arp/tx/requests",
+        },
+        [IP_NEIGHBOR_CTR_GRAT] = {
+          .name = "arp-tx-gratuitous",
+          .stat_segment_name = "/net/arp/tx/gratuitous",
+        },
+      },
+            },
+ },
+ [AF_IP6] = {
+   .ipnc = {
+     [VLIB_RX] = {
+        [IP_NEIGHBOR_CTR_REPLY] = {
+          .name = "ip6-nd-rx-replies",
+          .stat_segment_name = "/net/ip6-nd/rx/replies",
+        },
+        [IP_NEIGHBOR_CTR_REQUEST] = {
+          .name = "ip6-nd-rx-requests",
+          .stat_segment_name = "/net/ip6-nd/rx/requests",
+        },
+        [IP_NEIGHBOR_CTR_GRAT] = {
+          .name = "ip6-nd-rx-gratuitous",
+          .stat_segment_name = "/net/ip6-nd/rx/gratuitous",
+        },
+      },
+      [VLIB_TX] = {
+        [IP_NEIGHBOR_CTR_REPLY] = {
+          .name = "ip6-nd-tx-replies",
+          .stat_segment_name = "/net/ip6-nd/tx/replies",
+        },
+        [IP_NEIGHBOR_CTR_REQUEST] = {
+          .name = "ip6-nd-tx-requests",
+          .stat_segment_name = "/net/ip6-nd/tx/requests",
+        },
+        [IP_NEIGHBOR_CTR_GRAT] = {
+          .name = "ip6-nd-tx-gratuitous",
+          .stat_segment_name = "/net/ip6-nd/tx/gratuitous",
+        },
+      },
+    },
+ },
+};
 
 /** Pool for All IP neighbors */
 static ip_neighbor_t *ip_neighbor_pool;
@@ -691,13 +760,18 @@ ip_neighbor_update (vnet_main_t * vnm, adj_index_t ai)
 	  ip_neighbor_probe (adj);
 	}
       break;
+    case IP_LOOKUP_NEXT_REWRITE:
+      /* Update of an existing rewrite adjacency happens e.g. when the
+       * interface's MAC address changes */
+      if (NULL != ipn)
+	ip_neighbor_mk_complete (ai, ipn);
+      break;
     case IP_LOOKUP_NEXT_GLEAN:
     case IP_LOOKUP_NEXT_BCAST:
     case IP_LOOKUP_NEXT_MCAST:
     case IP_LOOKUP_NEXT_DROP:
     case IP_LOOKUP_NEXT_PUNT:
     case IP_LOOKUP_NEXT_LOCAL:
-    case IP_LOOKUP_NEXT_REWRITE:
     case IP_LOOKUP_NEXT_MCAST_MIDCHAIN:
     case IP_LOOKUP_NEXT_MIDCHAIN:
     case IP_LOOKUP_NEXT_ICMP_ERROR:
@@ -776,7 +850,7 @@ ip_neighbor_cmd (vlib_main_t * vm,
 /*?
  * Add or delete IPv4 ARP cache entries.
  *
- * @note 'set ip neighbor' options (e.g. delete, static, 'fib-id <id>',
+ * @note 'set ip neighbor' options (e.g. delete, static,
  * 'count <number>', 'interface ip4_addr mac_addr') can be added in
  * any order and combination.
  *
@@ -785,32 +859,37 @@ ip_neighbor_cmd (vlib_main_t * vm,
  * Add or delete IPv4 ARP cache entries as follows. MAC Address can be in
  * either aa:bb:cc:dd:ee:ff format or aabb.ccdd.eeff format.
  * @cliexcmd{set ip neighbor GigabitEthernet2/0/0 6.0.0.3 dead.beef.babe}
- * @cliexcmd{set ip neighbor delete GigabitEthernet2/0/0 6.0.0.3 de:ad:be:ef:ba:be}
+ * @cliexcmd{set ip neighbor delete GigabitEthernet2/0/0 6.0.0.3
+ * de:ad:be:ef:ba:be}
  *
- * To add or delete an IPv4 ARP cache entry to or from a specific fib
+ * To add or delete an IPv4 ARP cache entry
  * table:
- * @cliexcmd{set ip neighbor fib-id 1 GigabitEthernet2/0/0 6.0.0.3 dead.beef.babe}
- * @cliexcmd{set ip neighbor fib-id 1 delete GigabitEthernet2/0/0 6.0.0.3 dead.beef.babe}
+ * @cliexcmd{set ip neighbor GigabitEthernet2/0/0 6.0.0.3 dead.beef.babe}
+ * @cliexcmd{set ip neighbor delete GigabitEthernet2/0/0 6.0.0.3
+ * dead.beef.babe}
  *
  * Add or delete IPv4 static ARP cache entries as follows:
- * @cliexcmd{set ip neighbor static GigabitEthernet2/0/0 6.0.0.3 dead.beef.babe}
- * @cliexcmd{set ip neighbor static delete GigabitEthernet2/0/0 6.0.0.3 dead.beef.babe}
+ * @cliexcmd{set ip neighbor static GigabitEthernet2/0/0 6.0.0.3
+ * dead.beef.babe}
+ * @cliexcmd{set ip neighbor static delete GigabitEthernet2/0/0 6.0.0.3
+ * dead.beef.babe}
  *
  * For testing / debugging purposes, the 'set ip neighbor' command can add or
  * delete multiple entries. Supply the 'count N' parameter:
- * @cliexcmd{set ip neighbor count 10 GigabitEthernet2/0/0 6.0.0.3 dead.beef.babe}
+ * @cliexcmd{set ip neighbor count 10 GigabitEthernet2/0/0 6.0.0.3
+ * dead.beef.babe}
  * @endparblock
  ?*/
 VLIB_CLI_COMMAND (ip_neighbor_command, static) = {
   .path = "set ip neighbor",
-  .short_help =
-  "set ip neighbor [del] <intfc> <ip-address> <mac-address> [static] [no-fib-entry] [count <count>] [fib-id <fib-id>] [proxy <lo-addr> - <hi-addr>]",
+  .short_help = "set ip neighbor [del] <intfc> <ip-address> <mac-address> "
+		"[static] [no-fib-entry] [count <count>]",
   .function = ip_neighbor_cmd,
 };
 VLIB_CLI_COMMAND (ip_neighbor_command2, static) = {
   .path = "ip neighbor",
-  .short_help =
-  "ip neighbor [del] <intfc> <ip-address> <mac-address> [static] [no-fib-entry] [count <count>] [fib-id <fib-id>] [proxy <lo-addr> - <hi-addr>]",
+  .short_help = "ip neighbor [del] <intfc> <ip-address> <mac-address> "
+		"[static] [no-fib-entry] [count <count>]",
   .function = ip_neighbor_cmd,
 };
 /* *INDENT-ON* */
@@ -1011,8 +1090,8 @@ ip_neighbor_register (ip_address_family_t af, const ip_neighbor_vft_t * vft)
 }
 
 void
-ip_neighbor_probe_dst (u32 sw_if_index,
-		       ip_address_family_t af, const ip46_address_t * dst)
+ip_neighbor_probe_dst (u32 sw_if_index, u32 thread_index,
+		       ip_address_family_t af, const ip46_address_t *dst)
 {
   if (!vnet_sw_interface_is_admin_up (vnet_get_main (), sw_if_index))
     return;
@@ -1020,10 +1099,10 @@ ip_neighbor_probe_dst (u32 sw_if_index,
   switch (af)
     {
     case AF_IP6:
-      ip6_neighbor_probe_dst (sw_if_index, &dst->ip6);
+      ip6_neighbor_probe_dst (sw_if_index, thread_index, &dst->ip6);
       break;
     case AF_IP4:
-      ip4_neighbor_probe_dst (sw_if_index, &dst->ip4);
+      ip4_neighbor_probe_dst (sw_if_index, thread_index, &dst->ip4);
       break;
     }
 }
@@ -1032,6 +1111,7 @@ void
 ip_neighbor_probe (const ip_adjacency_t * adj)
 {
   ip_neighbor_probe_dst (adj->rewrite_header.sw_if_index,
+			 vlib_get_thread_index (),
 			 ip_address_family_from_fib_proto (adj->ia_nh_proto),
 			 &adj->sub_type.nbr.next_hop);
 }
@@ -1141,31 +1221,6 @@ ip6_neighbor_proxy_del (u32 sw_if_index, const ip6_address_t * addr)
   return -1;
 }
 
-static void
-ip_neighbor_ethernet_change_mac (ethernet_main_t * em,
-				 u32 sw_if_index, uword opaque)
-{
-  ip_neighbor_t *ipn;
-
-  IP_NEIGHBOR_DBG ("mac-change: %U",
-		   format_vnet_sw_if_index_name, vnet_get_main (),
-		   sw_if_index);
-
-  /* *INDENT-OFF* */
-  pool_foreach (ipn, ip_neighbor_pool)
-   {
-    if (ipn->ipn_key->ipnk_sw_if_index == sw_if_index)
-      adj_nbr_walk_nh (ipn->ipn_key->ipnk_sw_if_index,
-                       ip_address_family_to_fib_proto(ip_neighbor_get_af(ipn)),
-                       &ip_addr_46(&ipn->ipn_key->ipnk_ip),
-                       ip_neighbor_mk_complete_walk,
-                       ipn);
-  }
-  /* *INDENT-ON* */
-
-  adj_glean_update_rewrite_itf (sw_if_index);
-}
-
 void
 ip_neighbor_populate (ip_address_family_t af, u32 sw_if_index)
 {
@@ -1223,7 +1278,7 @@ ip_neighbor_flush (ip_address_family_t af, u32 sw_if_index)
   vec_free (ipnis);
 }
 
-static walk_rc_t
+walk_rc_t
 ip_neighbor_mark_one (index_t ipni, void *ctx)
 {
   ip_neighbor_t *ipn;
@@ -1310,8 +1365,8 @@ VNET_SW_INTERFACE_ADMIN_UP_DOWN_FUNCTION (ip_neighbor_interface_admin_change);
  * Remove any arp entries associated with the specified interface
  */
 static clib_error_t *
-ip_neighbor_delete_sw_interface (vnet_main_t * vnm,
-				 u32 sw_if_index, u32 is_add)
+ip_neighbor_add_del_sw_interface (vnet_main_t *vnm, u32 sw_if_index,
+				  u32 is_add)
 {
   IP_NEIGHBOR_DBG ("interface-change: %U  %s",
 		   format_vnet_sw_if_index_name, vnet_get_main (),
@@ -1324,10 +1379,16 @@ ip_neighbor_delete_sw_interface (vnet_main_t * vnm,
       FOR_EACH_IP_ADDRESS_FAMILY (af) ip_neighbor_flush (af, sw_if_index);
     }
 
+  if (is_add)
+    {
+      ip_neighbor_alloc_ctr (&ip_neighbor_counters[AF_IP4], sw_if_index);
+      ip_neighbor_alloc_ctr (&ip_neighbor_counters[AF_IP6], sw_if_index);
+    }
+
   return (NULL);
 }
 
-VNET_SW_INTERFACE_ADD_DEL_FUNCTION (ip_neighbor_delete_sw_interface);
+VNET_SW_INTERFACE_ADD_DEL_FUNCTION (ip_neighbor_add_del_sw_interface);
 
 typedef struct ip_neighbor_walk_covered_ctx_t_
 {
@@ -1385,10 +1446,9 @@ ip_neighbor_add_del_interface_address_v4 (ip4_main_t * im,
    * Flush the ARP cache of all entries covered by the address
    * that is being removed.
    */
-  IP_NEIGHBOR_DBG ("addr-%d: %U, %U/%d",
-		   (is_del ? "del" : "add"),
-		   format_vnet_sw_if_index_name, vnet_get_main (),
-		   sw_if_index, format_ip4_address, address, address_length);
+  IP_NEIGHBOR_DBG ("addr-%s: %U, %U/%d", (is_del ? "del" : "add"),
+		   format_vnet_sw_if_index_name, vnet_get_main (), sw_if_index,
+		   format_ip4_address, address, address_length);
 
   if (is_del)
     {
@@ -1538,8 +1598,9 @@ ip_neighbour_age_out (index_t ipni, f64 now, f64 * wait)
 	}
       else
 	{
-	  ip_neighbor_probe_dst (ip_neighbor_get_sw_if_index (ipn),
-				 af, &ip_addr_46 (&ipn->ipn_key->ipnk_ip));
+	  ip_neighbor_probe_dst (ip_neighbor_get_sw_if_index (ipn), af,
+				 vlib_get_thread_index (),
+				 &ip_addr_46 (&ipn->ipn_key->ipnk_ip));
 
 	  ipn->ipn_n_probes++;
 	  *wait = 1;
@@ -1717,11 +1778,110 @@ ip_neighbor_config_show (vlib_main_t * vm,
   return (NULL);
 }
 
+static clib_error_t *
+ip_neighbor_config_set (vlib_main_t *vm, unformat_input_t *input,
+			vlib_cli_command_t *cmd)
+{
+  unformat_input_t _line_input, *line_input = &_line_input;
+  clib_error_t *error = NULL;
+  ip_address_family_t af;
+  u32 limit, age;
+  bool recycle;
+
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  if (!unformat (line_input, "%U", unformat_ip_address_family, &af))
+    {
+      error = unformat_parse_error (line_input);
+      goto done;
+    }
+
+  limit = ip_neighbor_db[af].ipndb_limit;
+  age = ip_neighbor_db[af].ipndb_age;
+  recycle = ip_neighbor_db[af].ipndb_recycle;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "limit %u", &limit))
+	;
+      else if (unformat (line_input, "age %u", &age))
+	;
+      else if (unformat (line_input, "recycle"))
+	recycle = true;
+      else if (unformat (line_input, "norecycle"))
+	recycle = false;
+      else
+	{
+	  error = unformat_parse_error (line_input);
+	  goto done;
+	}
+    }
+
+  ip_neighbor_config (af, limit, age, recycle);
+
+done:
+  unformat_free (line_input);
+  return error;
+}
+
+static void
+ip_neighbor_stats_show_one (vlib_main_t *vm, vnet_main_t *vnm, u32 sw_if_index)
+{
+  vlib_cli_output (vm, "  %U", format_vnet_sw_if_index_name, vnm, sw_if_index);
+  vlib_cli_output (vm, "    arp:%U", format_ip_neighbor_counters,
+		   &ip_neighbor_counters[AF_IP4], sw_if_index);
+  vlib_cli_output (vm, "    nd: %U", format_ip_neighbor_counters,
+		   &ip_neighbor_counters[AF_IP6], sw_if_index);
+}
+
+static walk_rc_t
+ip_neighbor_stats_show_cb (vnet_main_t *vnm, vnet_sw_interface_t *si,
+			   void *ctx)
+{
+  ip_neighbor_stats_show_one (ctx, vnm, si->sw_if_index);
+
+  return (WALK_CONTINUE);
+}
+
+static clib_error_t *
+ip_neighbor_stats_show (vlib_main_t *vm, unformat_input_t *input,
+			vlib_cli_command_t *cmd)
+{
+  vnet_main_t *vnm;
+  u32 sw_if_index;
+
+  vnm = vnet_get_main ();
+  sw_if_index = ~0;
+  (void) unformat_user (input, unformat_vnet_sw_interface, vnm, &sw_if_index);
+
+  if (~0 == sw_if_index)
+    {
+      vnet_sw_interface_walk (vnm, ip_neighbor_stats_show_cb, vm);
+    }
+  else
+    {
+      ip_neighbor_stats_show_one (vm, vnm, sw_if_index);
+    }
+  return (NULL);
+}
+
 /* *INDENT-OFF* */
 VLIB_CLI_COMMAND (show_ip_neighbor_cfg_cmd_node, static) = {
   .path = "show ip neighbor-config",
   .function = ip_neighbor_config_show,
   .short_help = "show ip neighbor-config",
+};
+VLIB_CLI_COMMAND (set_ip_neighbor_cfg_cmd_node, static) = {
+  .path = "set ip neighbor-config",
+  .function = ip_neighbor_config_set,
+  .short_help = "set ip neighbor-config ip4|ip6 [limit <limit>] [age <age>] "
+		"[recycle|norecycle]",
+};
+VLIB_CLI_COMMAND (show_ip_neighbor_stats_cmd_node, static) = {
+  .path = "show ip neighbor-stats",
+  .function = ip_neighbor_stats_show,
+  .short_help = "show ip neighbor-stats [interface]",
 };
 /* *INDENT-ON* */
 
@@ -1752,14 +1912,6 @@ ip_neighbor_init (vlib_main_t * vm)
     };
     vec_add1 (ip6_main.table_bind_callbacks, cb);
   }
-  {
-    ethernet_address_change_ctx_t ctx = {
-      .function = ip_neighbor_ethernet_change_mac,
-      .function_opaque = 0,
-    };
-    vec_add1 (ethernet_main.address_change_callbacks, ctx);
-  }
-
   ipn_logger = vlib_log_register_class ("ip", "neighbor");
 
   ip_address_family_t af;

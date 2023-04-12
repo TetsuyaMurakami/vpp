@@ -664,14 +664,18 @@ fib_path_attached_next_hop_get_adj (fib_path_t *path,
 static void
 fib_path_attached_next_hop_set (fib_path_t *path)
 {
+    dpo_id_t tmp = DPO_INVALID;
+
     /*
      * resolve directly via the adjacency discribed by the
      * interface and next-hop
      */
+    dpo_copy (&tmp, &path->fp_dpo);
     path = fib_path_attached_next_hop_get_adj(path,
                                               dpo_proto_to_link(path->fp_nh_proto),
-                                              &path->fp_dpo);
-
+                                              &tmp);
+    dpo_copy(&path->fp_dpo, &tmp);
+    dpo_reset(&tmp);
     ASSERT(dpo_is_adj(&path->fp_dpo));
 
     /*
@@ -1089,16 +1093,20 @@ FIXME comment
             /*
              * restack the DPO to pick up the correct DPO sub-type
              */
+            dpo_id_t tmp = DPO_INVALID;
             uword if_is_up;
 
             if_is_up = vnet_sw_interface_is_up(
                            vnet_get_main(),
                            path->attached_next_hop.fp_interface);
 
+            dpo_copy (&tmp, &path->fp_dpo);
             path = fib_path_attached_next_hop_get_adj(
                 path,
                 dpo_proto_to_link(path->fp_nh_proto),
-                &path->fp_dpo);
+                &tmp);
+            dpo_copy(&path->fp_dpo, &tmp);
+            dpo_reset(&tmp);
 
             path->fp_oper_flags &= ~FIB_PATH_OPER_FLAG_RESOLVED;
             if (if_is_up && adj_is_up(path->fp_dpo.dpoi_index))
@@ -1152,6 +1160,11 @@ FIXME comment
 	{
 	    fib_path_unresolve(path);
 	    path->fp_oper_flags |= FIB_PATH_OPER_FLAG_DROP;
+	}
+	if (FIB_NODE_BW_REASON_FLAG_INTERFACE_BIND & ctx->fnbw_reason)
+	{
+            /* bind walks should appear here and pass silently up to
+             * to the fib_entry */
 	}
 	break;
     case FIB_PATH_TYPE_UDP_ENCAP:
@@ -1493,6 +1506,12 @@ fib_path_copy (fib_node_index_t path_index,
     path->fp_via_fib   = FIB_NODE_INDEX_INVALID;
     clib_memset(&path->fp_dpo, 0, sizeof(path->fp_dpo));
     dpo_reset(&path->fp_dpo);
+
+    if (path->fp_type == FIB_PATH_TYPE_EXCLUSIVE)
+    {
+	clib_memset(&path->exclusive.fp_ex_dpo, 0, sizeof(dpo_id_t));
+	dpo_copy(&path->exclusive.fp_ex_dpo, &orig_path->exclusive.fp_ex_dpo);
+    }
 
     return (fib_path_get_index(path));
 }
@@ -1979,7 +1998,11 @@ fib_path_resolve (fib_node_index_t path_index)
 	}
 	else
 	{
-	    fib_prefix_from_ip46_addr(&path->recursive.fp_nh.fp_ip, &pfx);
+	    ASSERT(!ip46_address_is_zero(&path->recursive.fp_nh.fp_ip));
+
+	    fib_protocol_t fp = (ip46_address_is_ip4(&path->recursive.fp_nh.fp_ip) ?
+                                        FIB_PROTOCOL_IP4 : FIB_PROTOCOL_IP6);
+	    fib_prefix_from_ip46_addr(fp, &path->recursive.fp_nh.fp_ip, &pfx);
 	}
 
         fib_table_lock(path->recursive.fp_tbl_id,
@@ -2328,10 +2351,12 @@ fib_path_contribute_urpf (fib_node_index_t path_index,
     case FIB_PATH_TYPE_DVR:
 	fib_urpf_list_append(urpf, path->dvr.fp_interface);
 	break;
+    case FIB_PATH_TYPE_UDP_ENCAP:
+        fib_urpf_list_append(urpf, path->udp_encap.fp_udp_encap_id);
+	break;
     case FIB_PATH_TYPE_DEAG:
     case FIB_PATH_TYPE_RECEIVE:
     case FIB_PATH_TYPE_INTF_RX:
-    case FIB_PATH_TYPE_UDP_ENCAP:
     case FIB_PATH_TYPE_BIER_FMASK:
     case FIB_PATH_TYPE_BIER_TABLE:
     case FIB_PATH_TYPE_BIER_IMP:
@@ -2406,6 +2431,7 @@ fib_path_stack_mpls_disp (fib_node_index_t path_index,
 void
 fib_path_contribute_forwarding (fib_node_index_t path_index,
 				fib_forward_chain_type_t fct,
+                                dpo_proto_t payload_proto,
 				dpo_id_t *dpo)
 {
     fib_path_t *path;
@@ -2413,7 +2439,6 @@ fib_path_contribute_forwarding (fib_node_index_t path_index,
     path = fib_path_get(path_index);
 
     ASSERT(path);
-    ASSERT(FIB_FORW_CHAIN_TYPE_MPLS_EOS != fct);
 
     /*
      * The DPO stored in the path was created when the path was resolved.
@@ -2431,19 +2456,35 @@ fib_path_contribute_forwarding (fib_node_index_t path_index,
 	case FIB_PATH_TYPE_ATTACHED_NEXT_HOP:
 	    switch (fct)
 	    {
+	    case FIB_FORW_CHAIN_TYPE_MPLS_EOS: {
+                    dpo_id_t tmp = DPO_INVALID;
+                    dpo_copy (&tmp, dpo);
+                    path = fib_path_attached_next_hop_get_adj(
+                           path,
+                           dpo_proto_to_link(payload_proto),
+                           &tmp);
+                    dpo_copy (dpo, &tmp);
+                    dpo_reset(&tmp);
+                    break;
+            }
 	    case FIB_FORW_CHAIN_TYPE_UNICAST_IP4:
 	    case FIB_FORW_CHAIN_TYPE_UNICAST_IP6:
-	    case FIB_FORW_CHAIN_TYPE_MPLS_EOS:
 	    case FIB_FORW_CHAIN_TYPE_MPLS_NON_EOS:
 	    case FIB_FORW_CHAIN_TYPE_ETHERNET:
 	    case FIB_FORW_CHAIN_TYPE_NSH:
 	    case FIB_FORW_CHAIN_TYPE_MCAST_IP4:
 	    case FIB_FORW_CHAIN_TYPE_MCAST_IP6:
-		path = fib_path_attached_next_hop_get_adj(
-                    path,
-                    fib_forw_chain_type_to_link_type(fct),
-                    dpo);
-		break;
+                {
+                    dpo_id_t tmp = DPO_INVALID;
+                    dpo_copy (&tmp, dpo);
+                    path = fib_path_attached_next_hop_get_adj(
+                           path,
+                           fib_forw_chain_type_to_link_type(fct),
+                           &tmp);
+                    dpo_copy (dpo, &tmp);
+                    dpo_reset(&tmp);
+                    break;
+                }
 	    case FIB_FORW_CHAIN_TYPE_BIER:
 		break;
 	    }
@@ -2539,10 +2580,25 @@ fib_path_contribute_forwarding (fib_node_index_t path_index,
         case FIB_PATH_TYPE_ATTACHED:
 	    switch (fct)
 	    {
+	    case FIB_FORW_CHAIN_TYPE_MPLS_EOS:
+                /*
+                 * End of stack traffic via an attacehd path (a glean)
+                 * must forace an IP lookup so that the IP packet can
+                 * match against any installed adj-fibs
+                 */
+                lookup_dpo_add_or_lock_w_fib_index(
+                    fib_table_get_index_for_sw_if_index(
+                        dpo_proto_to_fib(payload_proto),
+                        path->attached.fp_interface),
+                    payload_proto,
+                    LOOKUP_UNICAST,
+                    LOOKUP_INPUT_DST_ADDR,
+                    LOOKUP_TABLE_FROM_CONFIG,
+                    dpo);
+                break;
 	    case FIB_FORW_CHAIN_TYPE_MPLS_NON_EOS:
 	    case FIB_FORW_CHAIN_TYPE_UNICAST_IP4:
 	    case FIB_FORW_CHAIN_TYPE_UNICAST_IP6:
-	    case FIB_FORW_CHAIN_TYPE_MPLS_EOS:
 	    case FIB_FORW_CHAIN_TYPE_ETHERNET:
 	    case FIB_FORW_CHAIN_TYPE_NSH:
             case FIB_FORW_CHAIN_TYPE_BIER:
@@ -2588,8 +2644,8 @@ fib_path_contribute_forwarding (fib_node_index_t path_index,
             /*
              * Create the adj needed for sending IP multicast traffic
              */
-            interface_rx_dpo_add_or_lock(fib_forw_chain_type_to_dpo_proto(fct),
-                                         path->attached.fp_interface,
+            interface_rx_dpo_add_or_lock(payload_proto,
+                                         path->intf_rx.fp_interface,
                                          dpo);
             break;
         case FIB_PATH_TYPE_UDP_ENCAP:
@@ -2609,6 +2665,7 @@ fib_path_contribute_forwarding (fib_node_index_t path_index,
 load_balance_path_t *
 fib_path_append_nh_for_multipath_hash (fib_node_index_t path_index,
 				       fib_forward_chain_type_t fct,
+                                       dpo_proto_t payload_proto,
 				       load_balance_path_t *hash_key)
 {
     load_balance_path_t *mnh;
@@ -2625,7 +2682,7 @@ fib_path_append_nh_for_multipath_hash (fib_node_index_t path_index,
 
     if (fib_path_is_resolved(path_index))
     {
-        fib_path_contribute_forwarding(path_index, fct, &mnh->path_dpo);
+        fib_path_contribute_forwarding(path_index, fct, payload_proto, &mnh->path_dpo);
     }
     else
     {

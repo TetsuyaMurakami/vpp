@@ -29,7 +29,8 @@
 #include <vppinfra/vec.h>
 #include <vppinfra/lock.h>
 #include <stdatomic.h>
-#include <vpp/stats/stat_segment.h>
+#include <vlib/vlib.h>
+#include <vlib/stats/stats.h>
 #include <vpp-api/client/stat_client.h>
 
 stat_client_main_t stat_client_main;
@@ -81,8 +82,8 @@ recv_fd (int sock)
   return fd;
 }
 
-static stat_segment_directory_entry_t *
-get_stat_vector_r (stat_client_main_t * sm)
+static vlib_stats_entry_t *
+get_stat_vector_r (stat_client_main_t *sm)
 {
   ASSERT (sm->shared_header);
   return stat_segment_adjust (sm,
@@ -172,9 +173,9 @@ double
 stat_segment_heartbeat_r (stat_client_main_t * sm)
 {
   stat_segment_access_t sa;
-  stat_segment_directory_entry_t *ep;
+  vlib_stats_entry_t *ep;
 
-  /* Has directory been update? */
+  /* Has directory been updated? */
   if (sm->shared_header->epoch != sm->current_epoch)
     return 0;
   if (stat_segment_access_start (&sa, sm))
@@ -202,19 +203,41 @@ stat_segment_heartbeat (void)
    _v(v);                                             \
 })
 
+static counter_t *
+stat_vec_simple_init (counter_t c)
+{
+  counter_t *v = 0;
+  vec_add1 (v, c);
+  return v;
+}
+
+static vlib_counter_t *
+stat_vec_combined_init (vlib_counter_t c)
+{
+  vlib_counter_t *v = 0;
+  vec_add1 (v, c);
+  return v;
+}
+
+/*
+ * If index2 is specified copy out the column (the indexed value across all
+ * threads), otherwise copy out all values.
+ */
 static stat_segment_data_t
-copy_data (stat_segment_directory_entry_t * ep, stat_client_main_t * sm)
+copy_data (vlib_stats_entry_t *ep, u32 index2, char *name,
+	   stat_client_main_t *sm, bool via_symlink)
 {
   stat_segment_data_t result = { 0 };
   int i;
   vlib_counter_t **combined_c;	/* Combined counter */
   counter_t **simple_c;		/* Simple counter */
-  uint64_t *error_vector;
 
   assert (sm->shared_header);
 
   result.type = ep->type;
-  result.name = strdup (ep->name);
+  result.via_symlink = via_symlink;
+  result.name = strdup (name ? name : ep->name);
+
   switch (ep->type)
     {
     case STAT_DIR_TYPE_SCALAR_INDEX:
@@ -227,7 +250,10 @@ copy_data (stat_segment_directory_entry_t * ep, stat_client_main_t * sm)
       for (i = 0; i < vec_len (simple_c); i++)
 	{
 	  counter_t *cb = stat_segment_adjust (sm, simple_c[i]);
-	  result.simple_counter_vec[i] = stat_vec_dup (sm, cb);
+	  if (index2 != ~0)
+	    result.simple_counter_vec[i] = stat_vec_simple_init (cb[index2]);
+	  else
+	    result.simple_counter_vec[i] = stat_vec_dup (sm, cb);
 	}
       break;
 
@@ -237,19 +263,11 @@ copy_data (stat_segment_directory_entry_t * ep, stat_client_main_t * sm)
       for (i = 0; i < vec_len (combined_c); i++)
 	{
 	  vlib_counter_t *cb = stat_segment_adjust (sm, combined_c[i]);
-	  result.combined_counter_vec[i] = stat_vec_dup (sm, cb);
-	}
-      break;
-
-    case STAT_DIR_TYPE_ERROR_INDEX:
-      /* Gather errors from all threads into a vector */
-      error_vector =
-	stat_segment_adjust (sm, (void *) sm->shared_header->error_vector);
-      vec_validate (result.error_vector, vec_len (error_vector) - 1);
-      for (i = 0; i < vec_len (error_vector); i++)
-	{
-	  counter_t *cb = stat_segment_adjust (sm, (void *) error_vector[i]);
-	  result.error_vector[i] = cb[ep->index];
+	  if (index2 != ~0)
+	    result.combined_counter_vec[i] =
+	      stat_vec_combined_init (cb[index2]);
+	  else
+	    result.combined_counter_vec[i] = stat_vec_dup (sm, cb);
 	}
       break;
 
@@ -264,6 +282,16 @@ copy_data (stat_segment_directory_entry_t * ep, stat_client_main_t * sm)
 	  }
       }
       break;
+
+    case STAT_DIR_TYPE_SYMLINK:
+      /* Gather info from all threads into a vector */
+      {
+	vlib_stats_entry_t *ep2;
+	ep2 = vec_elt_at_index (sm->directory_vector, ep->index1);
+	/* We do not intend to return the "result", avoid a leak */
+	free (result.name);
+	return copy_data (ep2, ep->index2, ep->name, sm, true);
+      }
 
     case STAT_DIR_TYPE_EMPTY:
       break;
@@ -297,10 +325,8 @@ stat_segment_data_free (stat_segment_data_t * res)
 	    vec_free (res[i].name_vector[j]);
 	  vec_free (res[i].name_vector);
 	  break;
-	case STAT_DIR_TYPE_ERROR_INDEX:
-	  vec_free (res[i].error_vector);
-	  break;
 	case STAT_DIR_TYPE_SCALAR_INDEX:
+	case STAT_DIR_TYPE_EMPTY:
 	  break;
 	default:
 	  assert (0);
@@ -332,7 +358,7 @@ stat_segment_ls_r (uint8_t ** patterns, stat_client_main_t * sm)
   if (stat_segment_access_start (&sa, sm))
     return 0;
 
-  stat_segment_directory_entry_t *counter_vec = get_stat_vector_r (sm);
+  vlib_stats_entry_t *counter_vec = get_stat_vector_r (sm);
   for (j = 0; j < vec_len (counter_vec); j++)
     {
       for (i = 0; i < vec_len (patterns); i++)
@@ -375,7 +401,7 @@ stat_segment_data_t *
 stat_segment_dump_r (uint32_t * stats, stat_client_main_t * sm)
 {
   int i;
-  stat_segment_directory_entry_t *ep;
+  vlib_stats_entry_t *ep;
   stat_segment_data_t *res = 0;
   stat_segment_access_t sa;
 
@@ -386,11 +412,20 @@ stat_segment_dump_r (uint32_t * stats, stat_client_main_t * sm)
   if (stat_segment_access_start (&sa, sm))
     return 0;
 
+  /* preallocate the elements.
+   * This takes care of a special case where
+   * the vec_len(stats) == 0,
+   * such that we return a vector of
+   * length 0, rather than a null pointer
+   * (since null pointer is an error)
+   */
+  vec_alloc (res, vec_len (stats));
+
   for (i = 0; i < vec_len (stats); i++)
     {
       /* Collect counter */
       ep = vec_elt_at_index (sm->directory_vector, stats[i]);
-      vec_add1 (res, copy_data (ep, sm));
+      vec_add1 (res, copy_data (ep, ~0, 0, sm, false));
     }
 
   if (stat_segment_access_end (&sa, sm))
@@ -436,16 +471,20 @@ stat_segment_string_vector (uint8_t ** string_vector, const char *string)
 stat_segment_data_t *
 stat_segment_dump_entry_r (uint32_t index, stat_client_main_t * sm)
 {
-  stat_segment_directory_entry_t *ep;
+  vlib_stats_entry_t *ep;
   stat_segment_data_t *res = 0;
   stat_segment_access_t sa;
+
+  /* Has directory been update? */
+  if (sm->shared_header->epoch != sm->current_epoch)
+    return 0;
 
   if (stat_segment_access_start (&sa, sm))
     return 0;
 
   /* Collect counter */
   ep = vec_elt_at_index (sm->directory_vector, index);
-  vec_add1 (res, copy_data (ep, sm));
+  vec_add1 (res, copy_data (ep, ~0, 0, sm, false));
 
   if (stat_segment_access_end (&sa, sm))
     return res;
@@ -462,9 +501,9 @@ stat_segment_dump_entry (uint32_t index)
 char *
 stat_segment_index_to_name_r (uint32_t index, stat_client_main_t * sm)
 {
-  stat_segment_directory_entry_t *ep;
+  vlib_stats_entry_t *ep;
   stat_segment_access_t sa;
-  stat_segment_directory_entry_t *vec;
+  vlib_stats_entry_t *vec;
 
   /* Has directory been update? */
   if (sm->shared_header->epoch != sm->current_epoch)

@@ -17,28 +17,17 @@
 #define __included_vpp_echo_common_h__
 
 #include <vnet/session/application_interface.h>
-#include <vpp/api/vpe_msg_enum.h>
-
-#define vl_typedefs		/* define message structures */
-#include <vpp/api/vpe_all_api_h.h>
-#undef vl_typedefs
-
-/* declare message handlers for each api */
-
-#define vl_endianfun		/* define message structures */
-#include <vpp/api/vpe_all_api_h.h>
-#undef vl_endianfun
-
-/* instantiate all the print functions we know about */
-#define vl_print(handle, ...)
-#define vl_printfun
-#include <vpp/api/vpe_all_api_h.h>
-#undef vl_printfun
+#include <vnet/format_fns.h>
+#include <vnet/session/session.api_enum.h>
+#include <vnet/session/session.api_types.h>
 
 #define TIMEOUT 10.0
 #define LOGGING_BATCH (100)
 #define LOG_EVERY_N_IDLE_CYCLES (1e8)
 #define ECHO_MQ_SEG_HANDLE	((u64) ~0 - 1)
+
+#define ECHO_INVALID_SEGMENT_INDEX  ((u32) ~0)
+#define ECHO_INVALID_SEGMENT_HANDLE ((u64) ~0)
 
 #define foreach_echo_fail_code                                          \
   _(ECHO_FAIL_NONE, "ECHO_FAIL_NONE")                                   \
@@ -283,6 +272,7 @@ typedef struct
   svm_queue_t *vl_input_queue;	/* vpe input queue */
   u32 my_client_index;		/* API client handle */
   u8 *uri;			/* The URI we're playing with */
+  u8 *app_name;
   u32 n_uris;			/* Cycle through adjacent ips */
   ip46_address_t lcl_ip;	/* Local ip for client */
   u8 lcl_ip_set;
@@ -291,6 +281,8 @@ typedef struct
   svm_msg_q_t *ctrl_mq;		/* Our control queue (towards vpp) */
   clib_time_t clib_time;	/* For deadman timers */
   u8 *socket_name;
+  u8 use_app_socket_api;
+  clib_socket_t app_api_sock;
   int i_am_master;
   u32 *listen_session_indexes;	/* vec of vpp listener sessions */
   volatile u32 listen_session_cnt;
@@ -448,6 +440,9 @@ int echo_attach_session (uword segment_handle, uword rxf_offset,
 			 uword mq_offset, uword txf_offset, echo_session_t *s);
 int echo_segment_attach_mq (uword segment_handle, uword mq_offset,
 			    u32 mq_index, svm_msg_q_t **mq);
+svm_fifo_chunk_t *echo_segment_alloc_chunk (uword segment_handle,
+					    u32 slice_index, u32 size,
+					    uword *offset);
 
 /* Binary API */
 
@@ -460,6 +455,15 @@ void echo_send_disconnect_session (echo_main_t * em, void *args);
 void echo_api_hookup (echo_main_t * em);
 void echo_send_add_cert_key (echo_main_t * em);
 void echo_send_del_cert_key (echo_main_t * em);
+int echo_bapi_recv_fd (echo_main_t *em, int *fds, int n_fds);
+
+/* Session socket API */
+int echo_sapi_attach (echo_main_t *em);
+int echo_sapi_add_cert_key (echo_main_t *em);
+int echo_sapi_del_cert_key (echo_main_t *em);
+int echo_api_connect_app_socket (echo_main_t *em);
+int echo_sapi_detach (echo_main_t *em);
+int echo_sapi_recv_fd (echo_main_t *em, int *fds, int n_fds);
 
 #endif /* __included_vpp_echo_common_h__ */
 

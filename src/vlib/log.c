@@ -226,13 +226,13 @@ vlib_log (vlib_log_level_t level, vlib_log_class_t class, char *fmt, ...)
 
       if (lm->add_to_elog)
 	{
-          /* *INDENT-OFF* */
-          ELOG_TYPE_DECLARE(ee) =
+	  ELOG_TYPE_DECLARE(ee) =
             {
              .format = "log-%s: %s",
              .format_args = "t4T4",
-             .n_enum_strings = 9,
+             .n_enum_strings = VLIB_LOG_N_LEVELS,
              .enum_strings = {
+                "unknown",
                 "emerg",
                 "alert",
                 "crit",
@@ -244,14 +244,15 @@ vlib_log (vlib_log_level_t level, vlib_log_class_t class, char *fmt, ...)
                 "disabled",
                 },
             };
-          struct {
-            u32 log_level;
-            u32 string_index;
-          } *ed;
-          /* *INDENT-ON* */
-	  ed = ELOG_DATA (&vm->elog_main, ee);
+	  struct
+	  {
+	    u32 log_level;
+	    u32 string_index;
+	  } * ed;
+	  ed = ELOG_DATA (&vlib_global_main.elog_main, ee);
 	  ed->log_level = level;
-	  ed->string_index = elog_string (&vm->elog_main, "%v", e->string);
+	  ed->string_index =
+	    elog_string (&vlib_global_main.elog_main, "%v%c", e->string, 0);
 	}
 
       lm->next = (lm->next + 1) % lm->size;
@@ -365,8 +366,8 @@ format_vlib_log_level (u8 * s, va_list * args)
   return format (s, "%s", t);
 }
 
-static clib_error_t *
-vlib_log_init (vlib_main_t * vm)
+clib_error_t *
+vlib_log_init (vlib_main_t *vm)
 {
   vlib_log_main_t *lm = &log_main;
   vlib_log_class_registration_t *r = lm->registrations;
@@ -395,9 +396,6 @@ vlib_log_init (vlib_main_t * vm)
   return 0;
 }
 
-VLIB_INIT_FUNCTION (vlib_log_init);
-
-
 static clib_error_t *
 show_log (vlib_main_t * vm,
 	  unformat_input_t * input, vlib_cli_command_t * cmd)
@@ -415,10 +413,9 @@ show_log (vlib_main_t * vm,
   while (count--)
     {
       e = vec_elt_at_index (lm->entries, i);
-      vlib_cli_output (vm, "%U %-10U %-14U %v",
-		       format_time_float, 0, e->timestamp + time_offset,
-		       format_vlib_log_level, e->level,
-		       format_vlib_log_class, e->class, e->string);
+      vlib_cli_output (vm, "%U %-10U %-14U %v", format_time_float, NULL,
+		       e->timestamp + time_offset, format_vlib_log_level,
+		       e->level, format_vlib_log_class, e->class, e->string);
       i = (i + 1) % lm->size;
     }
 

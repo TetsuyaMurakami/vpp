@@ -47,6 +47,9 @@
 #include <vppinfra/clib.h>	/* for CLIB_LINUX_KERNEL */
 #include <vppinfra/vector.h>
 #include <vppinfra/error_bootstrap.h>
+#ifdef __SSE4_2__
+#include <vppinfra/memcpy_x86_64.h>
+#endif
 
 #ifdef CLIB_LINUX_KERNEL
 #include <linux/string.h>
@@ -67,26 +70,6 @@
 /* Exchanges source and destination. */
 void clib_memswap (void *_a, void *_b, uword bytes);
 
-/*
- * the vector unit memcpy variants confuse coverity
- * so don't let it anywhere near them.
- */
-#ifndef __COVERITY__
-#if __AVX512BITALG__
-#include <vppinfra/memcpy_avx512.h>
-#define clib_memcpy_fast_arch(a, b, c) clib_memcpy_fast_avx512 (a, b, c)
-#elif __AVX2__
-#include <vppinfra/memcpy_avx2.h>
-#define clib_memcpy_fast_arch(a, b, c) clib_memcpy_fast_avx2 (a, b, c)
-#elif __SSSE3__
-#include <vppinfra/memcpy_sse3.h>
-#define clib_memcpy_fast_arch(a, b, c) clib_memcpy_fast_sse3 (a, b, c)
-#endif /* __AVX512BITALG__ */
-#endif /* __COVERITY__ */
-
-#ifndef clib_memcpy_fast_arch
-#define clib_memcpy_fast_arch(a, b, c) memcpy (a, b, c)
-#endif /* clib_memcpy_fast_arch */
 
 static_always_inline void *
 clib_memcpy_fast (void *restrict dst, const void *restrict src, size_t n)
@@ -94,10 +77,36 @@ clib_memcpy_fast (void *restrict dst, const void *restrict src, size_t n)
   ASSERT (dst && src &&
 	  "memcpy(src, dst, n) with src == NULL or dst == NULL is undefined "
 	  "behaviour");
-  return clib_memcpy_fast_arch (dst, src, n);
+#if defined(__COVERITY__)
+  return memcpy (dst, src, n);
+#elif defined(__SSE4_2__)
+  clib_memcpy_x86_64 (dst, src, n);
+  return dst;
+#else
+  return memcpy (dst, src, n);
+#endif
 }
 
-#undef clib_memcpy_fast_arch
+static_always_inline void *
+clib_memmove (void *dst, const void *src, size_t n)
+{
+  u8 *d = (u8 *) dst;
+  u8 *s = (u8 *) src;
+
+  if (s == d)
+    return d;
+
+  if (d > s)
+    for (uword i = n - 1; (i + 1) > 0; i--)
+      d[i] = s[i];
+  else
+    for (uword i = 0; i < n; i++)
+      d[i] = s[i];
+
+  return d;
+}
+
+#include <vppinfra/memcpy.h>
 
 /* c-11 string manipulation variants */
 
@@ -143,7 +152,7 @@ memcpy_s_inline (void *__restrict__ dest, rsize_t dmax,
    * Optimize constant-number-of-bytes calls without asking
    * "too many questions for someone from New Jersey"
    */
-  if (__builtin_constant_p (n))
+  if (COMPILE_TIME_CONST (n))
     {
       clib_memcpy_fast (dest, src, n);
       return EOK;
@@ -244,14 +253,14 @@ clib_memcpy_le (u8 * dst, u8 * src, u8 len, u8 max_len)
   d0 = u8x32_load_unaligned (dst);
   d1 = u8x32_load_unaligned (dst + 32);
 
-  d0 = u8x32_blend (d0, s0, u8x32_is_greater (lv, mask));
+  d0 = u8x32_blend (d0, s0, lv > mask);
   u8x32_store_unaligned (d0, dst);
 
   if (max_len <= 32)
     return;
 
   mask += add;
-  d1 = u8x32_blend (d1, s1, u8x32_is_greater (lv, mask));
+  d1 = u8x32_blend (d1, s1, lv > mask);
   u8x32_store_unaligned (d1, dst + 32);
 
 #elif defined (CLIB_HAVE_VEC128)
@@ -269,25 +278,25 @@ clib_memcpy_le (u8 * dst, u8 * src, u8 len, u8 max_len)
   d2 = u8x16_load_unaligned (dst + 32);
   d3 = u8x16_load_unaligned (dst + 48);
 
-  d0 = u8x16_blend (d0, s0, u8x16_is_greater (lv, mask));
+  d0 = u8x16_blend (d0, s0, lv > mask);
   u8x16_store_unaligned (d0, dst);
 
   if (max_len <= 16)
     return;
 
   mask += add;
-  d1 = u8x16_blend (d1, s1, u8x16_is_greater (lv, mask));
+  d1 = u8x16_blend (d1, s1, lv > mask);
   u8x16_store_unaligned (d1, dst + 16);
 
   if (max_len <= 32)
     return;
 
   mask += add;
-  d2 = u8x16_blend (d2, s2, u8x16_is_greater (lv, mask));
+  d2 = u8x16_blend (d2, s2, lv > mask);
   u8x16_store_unaligned (d2, dst + 32);
 
   mask += add;
-  d3 = u8x16_blend (d3, s3, u8x16_is_greater (lv, mask));
+  d3 = u8x16_blend (d3, s3, lv > mask);
   u8x16_store_unaligned (d3, dst + 48);
 #else
   memmove (dst, src, len);
@@ -332,9 +341,17 @@ clib_memset_u64 (void *p, u64 val, uword count)
   if (count == 0)
     return;
 #else
+#if defined(CLIB_HAVE_VEC128)
+  u64x2 v = u64x2_splat (val);
+#endif
   while (count >= 4)
     {
+#if defined(CLIB_HAVE_VEC128)
+      u64x2_store_unaligned (v, ptr);
+      u64x2_store_unaligned (v, ptr + 2);
+#else
       ptr[0] = ptr[1] = ptr[2] = ptr[3] = val;
+#endif
       ptr += 4;
       count -= 4;
     }
@@ -481,242 +498,6 @@ clib_memset_u8 (void *p, u8 val, uword count)
     ptr++[0] = val;
 }
 
-static_always_inline uword
-clib_count_equal_u64 (u64 * data, uword max_count)
-{
-  uword count;
-  u64 first;
-
-  if (max_count <= 1)
-    return max_count;
-  if (data[0] != data[1])
-    return 1;
-
-  count = 0;
-  first = data[0];
-
-#if defined(CLIB_HAVE_VEC256)
-  u64x4 splat = u64x4_splat (first);
-  while (count + 3 < max_count)
-    {
-      u64 bmp;
-      bmp = u8x32_msb_mask ((u8x32) (u64x4_load_unaligned (data) == splat));
-      if (bmp != 0xffffffff)
-	{
-	  count += count_trailing_zeros (~bmp) / 8;
-	  return count;
-	}
-
-      data += 4;
-      count += 4;
-    }
-#else
-  count += 2;
-  data += 2;
-  while (count + 3 < max_count &&
-	 ((data[0] ^ first) | (data[1] ^ first) |
-	  (data[2] ^ first) | (data[3] ^ first)) == 0)
-    {
-      data += 4;
-      count += 4;
-    }
-#endif
-  while (count < max_count && (data[0] == first))
-    {
-      data += 1;
-      count += 1;
-    }
-  return count;
-}
-
-static_always_inline uword
-clib_count_equal_u32 (u32 * data, uword max_count)
-{
-  uword count;
-  u32 first;
-
-  if (max_count <= 1)
-    return max_count;
-  if (data[0] != data[1])
-    return 1;
-
-  count = 0;
-  first = data[0];
-
-#if defined(CLIB_HAVE_VEC256)
-  u32x8 splat = u32x8_splat (first);
-  while (count + 7 < max_count)
-    {
-      u64 bmp;
-      bmp = u8x32_msb_mask ((u8x32) (u32x8_load_unaligned (data) == splat));
-      if (bmp != 0xffffffff)
-	{
-	  count += count_trailing_zeros (~bmp) / 4;
-	  return count;
-	}
-
-      data += 8;
-      count += 8;
-    }
-#elif defined(CLIB_HAVE_VEC128) && defined(CLIB_HAVE_VEC128_MSB_MASK)
-  u32x4 splat = u32x4_splat (first);
-  while (count + 3 < max_count)
-    {
-      u64 bmp;
-      bmp = u8x16_msb_mask ((u8x16) (u32x4_load_unaligned (data) == splat));
-      if (bmp != 0xffff)
-	{
-	  count += count_trailing_zeros (~bmp) / 4;
-	  return count;
-	}
-
-      data += 4;
-      count += 4;
-    }
-#else
-  count += 2;
-  data += 2;
-  while (count + 3 < max_count &&
-	 ((data[0] ^ first) | (data[1] ^ first) |
-	  (data[2] ^ first) | (data[3] ^ first)) == 0)
-    {
-      data += 4;
-      count += 4;
-    }
-#endif
-  while (count < max_count && (data[0] == first))
-    {
-      data += 1;
-      count += 1;
-    }
-  return count;
-}
-
-static_always_inline uword
-clib_count_equal_u16 (u16 * data, uword max_count)
-{
-  uword count;
-  u16 first;
-
-  if (max_count <= 1)
-    return max_count;
-  if (data[0] != data[1])
-    return 1;
-
-  count = 0;
-  first = data[0];
-
-#if defined(CLIB_HAVE_VEC256)
-  u16x16 splat = u16x16_splat (first);
-  while (count + 15 < max_count)
-    {
-      u64 bmp;
-      bmp = u8x32_msb_mask ((u8x32) (u16x16_load_unaligned (data) == splat));
-      if (bmp != 0xffffffff)
-	{
-	  count += count_trailing_zeros (~bmp) / 2;
-	  return count;
-	}
-
-      data += 16;
-      count += 16;
-    }
-#elif defined(CLIB_HAVE_VEC128) && defined(CLIB_HAVE_VEC128_MSB_MASK)
-  u16x8 splat = u16x8_splat (first);
-  while (count + 7 < max_count)
-    {
-      u64 bmp;
-      bmp = u8x16_msb_mask ((u8x16) (u16x8_load_unaligned (data) == splat));
-      if (bmp != 0xffff)
-	{
-	  count += count_trailing_zeros (~bmp) / 2;
-	  return count;
-	}
-
-      data += 8;
-      count += 8;
-    }
-#else
-  count += 2;
-  data += 2;
-  while (count + 3 < max_count &&
-	 ((data[0] ^ first) | (data[1] ^ first) |
-	  (data[2] ^ first) | (data[3] ^ first)) == 0)
-    {
-      data += 4;
-      count += 4;
-    }
-#endif
-  while (count < max_count && (data[0] == first))
-    {
-      data += 1;
-      count += 1;
-    }
-  return count;
-}
-
-static_always_inline uword
-clib_count_equal_u8 (u8 * data, uword max_count)
-{
-  uword count;
-  u8 first;
-
-  if (max_count <= 1)
-    return max_count;
-  if (data[0] != data[1])
-    return 1;
-
-  count = 0;
-  first = data[0];
-
-#if defined(CLIB_HAVE_VEC256)
-  u8x32 splat = u8x32_splat (first);
-  while (count + 31 < max_count)
-    {
-      u64 bmp;
-      bmp = u8x32_msb_mask ((u8x32) (u8x32_load_unaligned (data) == splat));
-      if (bmp != 0xffffffff)
-	{
-	  count += count_trailing_zeros (~bmp);
-	  return max_count;
-	}
-
-      data += 32;
-      count += 32;
-    }
-#elif defined(CLIB_HAVE_VEC128) && defined(CLIB_HAVE_VEC128_MSB_MASK)
-  u8x16 splat = u8x16_splat (first);
-  while (count + 15 < max_count)
-    {
-      u64 bmp;
-      bmp = u8x16_msb_mask ((u8x16) (u8x16_load_unaligned (data) == splat));
-      if (bmp != 0xffff)
-	{
-	  count += count_trailing_zeros (~bmp);
-	  return count;
-	}
-
-      data += 16;
-      count += 16;
-    }
-#else
-  count += 2;
-  data += 2;
-  while (count + 3 < max_count &&
-	 ((data[0] ^ first) | (data[1] ^ first) |
-	  (data[2] ^ first) | (data[3] ^ first)) == 0)
-    {
-      data += 4;
-      count += 4;
-    }
-#endif
-  while (count < max_count && (data[0] == first))
-    {
-      data += 1;
-      count += 1;
-    }
-  return count;
-}
 
 /*
  * This macro is to provide smooth mapping from memcmp to memcmp_s.
@@ -927,14 +708,6 @@ strncmp_s_inline (const char *s1, rsize_t s1max, const char *s2, rsize_t n,
   return EOK;
 }
 
-/*
- * This macro is provided for smooth migration from strcpy. It is not perfect
- * because we don't know the size of the destination buffer to pass to strcpy_s.
- * We improvise dmax with CLIB_STRING_MACRO_MAX.
- * Applications are encouraged to move to the C11 strcpy_s API.
- */
-#define clib_strcpy(d,s) strcpy_s_inline(d,CLIB_STRING_MACRO_MAX,s)
-
 errno_t strcpy_s (char *__restrict__ dest, rsize_t dmax,
 		  const char *__restrict__ src);
 
@@ -1061,16 +834,6 @@ strncpy_s_inline (char *__restrict__ dest, rsize_t dmax,
   return status;
 }
 
-/*
- * This macro is to provide smooth migration from strcat to strcat_s.
- * Because there is no dmax in strcat, we improvise it with
- * CLIB_STRING_MACRO_MAX. Please note there may be a chance to overwrite dest
- * with too many bytes from src.
- * Applications are encouraged to use C11 API to provide the actual dmax
- * for proper checking and protection.
- */
-#define clib_strcat(d,s) strcat_s_inline(d,CLIB_STRING_MACRO_MAX,s)
-
 errno_t strcat_s (char *__restrict__ dest, rsize_t dmax,
 		  const char *__restrict__ src);
 
@@ -1121,16 +884,6 @@ strcat_s_inline (char *__restrict__ dest, rsize_t dmax,
   dest[dest_size + n] = '\0';
   return EOK;
 }
-
-/*
- * This macro is to provide smooth migration from strncat to strncat_s.
- * The unsafe strncat does not have s1max. We improvise it with
- * CLIB_STRING_MACRO_MAX. Please note there may be a chance to overwrite
- * dest with too many bytes from src.
- * Applications are encouraged to move to C11 strncat_s which requires dmax
- * from the caller and provides checking to safeguard the memory corruption.
- */
-#define clib_strncat(d,s,n) strncat_s_inline(d,CLIB_STRING_MACRO_MAX,s,n)
 
 errno_t strncat_s (char *__restrict__ dest, rsize_t dmax,
 		   const char *__restrict__ src, rsize_t n);
@@ -1351,23 +1104,6 @@ strtok_s_inline (char *__restrict__ s1, rsize_t * __restrict__ s1max,
   return (ptoken);
 }
 
-/*
- * This macro is to provide smooth mapping from strstr to strstr_s.
- * strstr_s requires s1max and s2max which the unsafe API does not have. So
- * we have to improvise them with CLIB_STRING_MACRO_MAX which may cause us
- * to access memory beyond it is intended if s1 or s2 is unterminated.
- * For the record, strstr crashes if s1 or s2 is unterminated. But this macro
- * does not.
- * Applications are encouraged to use the cool C11 strstr_s API to avoid
- * this problem.
- */
-#define clib_strstr(s1,s2) \
-  ({ char * __substring = 0; \
-    strstr_s_inline (s1, CLIB_STRING_MACRO_MAX, s2, CLIB_STRING_MACRO_MAX, \
-		     &__substring);		 \
-    __substring;				 \
-  })
-
 errno_t strstr_s (char *s1, rsize_t s1max, const char *s2, rsize_t s2max,
 		  char **substring);
 
@@ -1396,7 +1132,7 @@ strstr_s_inline (char *s1, rsize_t s1max, const char *s2, rsize_t s2max,
 	clib_c11_violation ("substring NULL");
       if (s1 && s1max && (s1[clib_strnlen (s1, s1max)] != '\0'))
 	clib_c11_violation ("s1 unterminated");
-      if (s2 && s2max && (s2[clib_strnlen (s2, s1max)] != '\0'))
+      if (s2 && s2max && (s2[clib_strnlen (s2, s2max)] != '\0'))
 	clib_c11_violation ("s2 unterminated");
       return EINVAL;
     }

@@ -56,7 +56,9 @@ static pnat_mask_fast_t pnat_mask2fast(pnat_mask_t lookup_mask) {
         m.as_u64[0] = 0xffffffff00000000;
     if (lookup_mask & PNAT_DA)
         m.as_u64[0] |= 0x00000000ffffffff;
-    m.as_u64[1] = 0xffffffff00000000;
+    m.as_u64[1] = 0x00ffffff00000000;
+    if (lookup_mask & PNAT_PROTO)
+        m.as_u64[1] |= 0xff00000000000000;
     if (lookup_mask & PNAT_SPORT)
         m.as_u64[1] |= 0x00000000ffff0000;
     if (lookup_mask & PNAT_DPORT)
@@ -110,9 +112,15 @@ static clib_error_t *pnat_enable_interface(u32 sw_if_index,
 
         if (input) {
             /* TODO: Make shallow virtual reassembly configurable */
-            ip4_sv_reass_enable_disable_with_refcnt(sw_if_index, 1);
+            if (ip4_sv_reass_enable_disable_with_refcnt(sw_if_index, 1) != 0)
+                return clib_error_return(0, "PNAT SVR enable failed on %u",
+                                         sw_if_index);
+
         } else {
-            ip4_sv_reass_output_enable_disable_with_refcnt(sw_if_index, 1);
+            if (ip4_sv_reass_output_enable_disable_with_refcnt(sw_if_index,
+                                                               1) != 0)
+                return clib_error_return(0, "PNAT SVR enable failed on %u",
+                                         sw_if_index);
         }
 
         interface->lookup_mask[attachment] = mask;
@@ -148,13 +156,15 @@ static int pnat_disable_interface(u32 sw_if_index,
         return 0;
 
     if (interface->enabled[attachment] && attachment == PNAT_IP4_INPUT) {
-        ip4_sv_reass_enable_disable_with_refcnt(sw_if_index, 0);
+        if (ip4_sv_reass_enable_disable_with_refcnt(sw_if_index, 0) != 0)
+            return -1;
         if (vnet_feature_enable_disable("ip4-unicast", "pnat-input",
                                         sw_if_index, 0, 0, 0) != 0)
             return -1;
     }
     if (interface->enabled[attachment] && attachment == PNAT_IP4_OUTPUT) {
-        ip4_sv_reass_output_enable_disable_with_refcnt(sw_if_index, 0);
+        if (ip4_sv_reass_output_enable_disable_with_refcnt(sw_if_index, 0) != 0)
+            return -1;
         if (vnet_feature_enable_disable("ip4-output", "pnat-output",
                                         sw_if_index, 0, 0, 0) != 0)
             return -1;
@@ -176,7 +186,7 @@ static int pnat_disable_interface(u32 sw_if_index,
  */
 static inline void pnat_calc_key_from_5tuple(u32 sw_if_index,
                                              pnat_attachment_point_t attachment,
-                                             pnat_5tuple_t *match,
+                                             pnat_match_tuple_t *match,
                                              clib_bihash_kv_16_8_t *kv) {
     pnat_mask_fast_t mask = pnat_mask2fast(match->mask);
     ip4_address_t src, dst;
@@ -200,6 +210,10 @@ pnat_instructions_t pnat_instructions_from_mask(pnat_mask_t m) {
         i |= PNAT_INSTR_SOURCE_PORT;
     if (m & PNAT_DPORT)
         i |= PNAT_INSTR_DESTINATION_PORT;
+    if (m & PNAT_COPY_BYTE)
+        i |= PNAT_INSTR_COPY_BYTE;
+    if (m & PNAT_CLEAR_BYTE)
+        i |= PNAT_INSTR_CLEAR_BYTE;
     return i;
 }
 
@@ -249,7 +263,15 @@ static int pnat_interface_check_mask(u32 sw_if_index,
     return 0;
 }
 
-int pnat_binding_add(pnat_5tuple_t *match, pnat_5tuple_t *rewrite, u32 *index) {
+/*
+ * Add a binding to the binding table.
+ * Returns 0 on success.
+ *  -1: Invalid mask
+ *  -2: Only matches ports for UDP or TCP
+ *
+ */
+int pnat_binding_add(pnat_match_tuple_t *match, pnat_rewrite_tuple_t *rewrite,
+                     u32 *index) {
     pnat_main_t *pm = &pnat_main;
 
     *index = -1;
@@ -270,21 +292,25 @@ int pnat_binding_add(pnat_5tuple_t *match, pnat_5tuple_t *rewrite, u32 *index) {
     memcpy(&t->post_sa, &rewrite->src, 4);
     t->post_sp = rewrite->sport;
     t->post_dp = rewrite->dport;
+    t->from_offset = rewrite->from_offset;
+    t->to_offset = rewrite->to_offset;
+    t->clear_offset = rewrite->clear_offset;
     t->instructions = pnat_instructions_from_mask(rewrite->mask);
 
     /* These are only used for show commands and trace */
     t->match = *match;
-
-    /* Rewrite of protocol is not supported, ignore. */
     t->rewrite = *rewrite;
-    t->rewrite.proto = 0;
 
     *index = t - pm->translations;
 
     return 0;
 }
+
+/*
+ * Looks a match flow in the flow cache, returns the index  in the binding table
+ */
 u32 pnat_flow_lookup(u32 sw_if_index, pnat_attachment_point_t attachment,
-                     pnat_5tuple_t *match) {
+                     pnat_match_tuple_t *match) {
     pnat_main_t *pm = &pnat_main;
     clib_bihash_kv_16_8_t kv, value;
     pnat_calc_key_from_5tuple(sw_if_index, attachment, match, &kv);
@@ -294,6 +320,14 @@ u32 pnat_flow_lookup(u32 sw_if_index, pnat_attachment_point_t attachment,
     return ~0;
 }
 
+/*
+ * Attach a binding to an interface / direction.
+ * Returns 0 on success.
+ * -1: Binding does not exist
+ * -2: Interface mask does not match
+ * -3: Existing match entry in flow table
+ * -4: Adding flow table entry failed
+ */
 int pnat_binding_attach(u32 sw_if_index, pnat_attachment_point_t attachment,
                         u32 binding_index) {
     pnat_main_t *pm = &pnat_main;

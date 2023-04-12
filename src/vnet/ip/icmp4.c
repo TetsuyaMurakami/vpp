@@ -40,12 +40,11 @@
 #include <vlib/vlib.h>
 #include <vnet/ip/ip.h>
 #include <vnet/pg/pg.h>
+#include <vnet/ip/ip_sas.h>
+#include <vnet/util/throttle.h>
 
-static char *icmp_error_strings[] = {
-#define _(f,s) s,
-  foreach_icmp4_error
-#undef _
-};
+/** ICMP throttling */
+static throttle_t icmp_throttle;
 
 static u8 *
 format_ip4_icmp_type_and_code (u8 * s, va_list * args)
@@ -176,7 +175,7 @@ ip4_icmp_input (vlib_main_t * vm,
 	      vlib_prefetch_buffer_with_index (vm, from[2], LOAD);
 	      p0 = vlib_get_buffer (vm, from[1]);
 	      ip0 = vlib_buffer_get_current (p0);
-	      CLIB_PREFETCH (ip0, CLIB_CACHE_LINE_BYTES, LOAD);
+	      clib_prefetch_load (ip0);
 	    }
 
 	  bi0 = to_next[0] = from[0];
@@ -214,8 +213,8 @@ VLIB_REGISTER_NODE (ip4_icmp_input_node) = {
 
   .format_trace = format_icmp_input_trace,
 
-  .n_errors = ARRAY_LEN (icmp_error_strings),
-  .error_strings = icmp_error_strings,
+  .n_errors = ICMP4_N_ERROR,
+  .error_counters = icmp4_error_counters,
 
   .n_next_nodes = 1,
   .next_nodes = {
@@ -254,12 +253,13 @@ ip4_icmp_error (vlib_main_t * vm,
   u32 *from, *to_next;
   uword n_left_from, n_left_to_next;
   ip4_icmp_error_next_t next_index;
-  ip4_main_t *im = &ip4_main;
-  ip_lookup_main_t *lm = &im->lookup_main;
+  u32 thread_index = vm->thread_index;
 
   from = vlib_frame_vector_args (frame);
   n_left_from = frame->n_vectors;
   next_index = node->cached_next_index;
+
+  u64 seed = throttle_seed (&icmp_throttle, thread_index, vlib_time_now (vm));
 
   if (node->flags & VLIB_NODE_FLAG_TRACE)
     vlib_trace_frame_buffers_only (vm, node, from, frame->n_vectors,
@@ -286,10 +286,25 @@ ip4_icmp_error (vlib_main_t * vm,
 	  vlib_buffer_t *p0, *org_p0;
 	  ip4_header_t *ip0, *out_ip0;
 	  icmp46_header_t *icmp0;
-	  u32 sw_if_index0, if_add_index0;
+	  u32 sw_if_index0;
 	  ip_csum_t sum;
 
 	  org_p0 = vlib_get_buffer (vm, org_pi0);
+	  ip0 = vlib_buffer_get_current (org_p0);
+
+	  /* Rate limit based on the src,dst addresses in the original packet
+	   */
+	  u64 r0 =
+	    (u64) ip0->dst_address.as_u32 << 32 | ip0->src_address.as_u32;
+
+	  if (throttle_check (&icmp_throttle, thread_index, r0, seed))
+	    {
+	      vlib_error_count (vm, node->node_index, ICMP4_ERROR_DROP, 1);
+	      from += 1;
+	      n_left_from -= 1;
+	      continue;
+	    }
+
 	  p0 = vlib_buffer_copy_no_chain (vm, org_p0, &pi0);
 	  if (!p0 || pi0 == ~0)	/* Out of buffers */
 	    continue;
@@ -301,8 +316,9 @@ ip4_icmp_error (vlib_main_t * vm,
 	  n_left_from -= 1;
 	  n_left_to_next -= 1;
 
-	  ip0 = vlib_buffer_get_current (p0);
 	  sw_if_index0 = vnet_buffer (p0)->sw_if_index[VLIB_RX];
+
+	  vlib_buffer_copy_trace_flag (vm, org_p0, pi0);
 
 	  /* Add IP header and ICMPv4 header including a 4 byte data field */
 	  vlib_buffer_advance (p0,
@@ -323,25 +339,14 @@ ip4_icmp_error (vlib_main_t * vm,
 	  out_ip0->ttl = 0xff;
 	  out_ip0->protocol = IP_PROTOCOL_ICMP;
 	  out_ip0->dst_address = ip0->src_address;
-	  if_add_index0 = ~0;
-	  if (PREDICT_TRUE (vec_len (lm->if_address_pool_index_by_sw_if_index)
-			    > sw_if_index0))
-	    if_add_index0 =
-	      lm->if_address_pool_index_by_sw_if_index[sw_if_index0];
-	  if (PREDICT_TRUE (if_add_index0 != ~0))
-	    {
-	      ip_interface_address_t *if_add =
-		pool_elt_at_index (lm->if_address_pool, if_add_index0);
-	      ip4_address_t *if_ip =
-		ip_interface_address_get_address (lm, if_add);
-	      out_ip0->src_address = *if_ip;
-	    }
-	  else
-	    {
-	      /* interface has no IP4 address - should not happen */
+	  /* Prefer a source address from "offending interface" */
+	  if (!ip4_sas_by_sw_if_index (sw_if_index0, &out_ip0->dst_address,
+				       &out_ip0->src_address))
+	    { /* interface has no IP6 address - should not happen */
 	      next0 = IP4_ICMP_ERROR_NEXT_DROP;
 	      error0 = ICMP4_ERROR_DROP;
 	    }
+
 	  out_ip0->checksum = ip4_header_checksum (out_ip0);
 
 	  /* Fill icmp header fields */
@@ -388,8 +393,8 @@ VLIB_REGISTER_NODE (ip4_icmp_error_node) = {
   .name = "ip4-icmp-error",
   .vector_size = sizeof (u32),
 
-  .n_errors = ARRAY_LEN (icmp_error_strings),
-  .error_strings = icmp_error_strings,
+  .n_errors = ICMP4_N_ERROR,
+  .error_counters = icmp4_error_counters,
 
   .n_next_nodes = IP4_ICMP_ERROR_N_NEXT,
   .next_nodes = {
@@ -581,6 +586,11 @@ icmp4_init (vlib_main_t * vm)
   clib_memset (cm->ip4_input_next_index_by_type,
 	       ICMP_INPUT_NEXT_ERROR,
 	       sizeof (cm->ip4_input_next_index_by_type));
+
+  vlib_thread_main_t *tm = &vlib_thread_main;
+  u32 n_vlib_mains = tm->n_vlib_mains;
+
+  throttle_init (&icmp_throttle, n_vlib_mains, THROTTLE_BITS, 1e-3);
 
   return 0;
 }

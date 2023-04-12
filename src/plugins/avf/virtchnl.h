@@ -62,43 +62,59 @@ enum
 #define AVF_AQ_F_EI  (1 << 14)
 #define AVF_AQ_F_FE  (1 << 15)
 
-
-#define foreach_virtchnl_op \
-  _(0, UNKNOWN)					\
-  _(1, VERSION)					\
-  _(2, RESET_VF)				\
-  _(3, GET_VF_RESOURCES)			\
-  _(4, CONFIG_TX_QUEUE)				\
-  _(5, CONFIG_RX_QUEUE)				\
-  _(6, CONFIG_VSI_QUEUES)			\
-  _(7, CONFIG_IRQ_MAP)				\
-  _(8, ENABLE_QUEUES)				\
-  _(9, DISABLE_QUEUES)				\
-  _(10, ADD_ETH_ADDR)				\
-  _(11, DEL_ETH_ADDR)				\
-  _(12, ADD_VLAN)				\
-  _(13, DEL_VLAN)				\
-  _(14, CONFIG_PROMISCUOUS_MODE)		\
-  _(15, GET_STATS)				\
-  _(16, RSVD)					\
-  _(17, EVENT)					\
-  _(18, UNDEF_18)				\
-  _(19, UNDEF_19)				\
-  _(20, IWARP)					\
-  _(21, CONFIG_IWARP_IRQ_MAP)			\
-  _(22, RELEASE_IWARP_IRQ_MAP)			\
-  _(23, CONFIG_RSS_KEY)				\
-  _(24, CONFIG_RSS_LUT)				\
-  _(25, GET_RSS_HENA_CAPS)			\
-  _(26, SET_RSS_HENA)				\
-  _(27, ENABLE_VLAN_STRIPPING)			\
-  _(28, DISABLE_VLAN_STRIPPING)			\
-  _(29, REQUEST_QUEUES)				\
-  _(30, ENABLE_CHANNELS)			\
-  _(31, DISABLE_CHANNELS)			\
-  _(32, ADD_CLOUD_FILTER)			\
-  _(33, DEL_CLOUD_FILTER)
-
+#define foreach_virtchnl_op                                                   \
+  _ (0, UNKNOWN)                                                              \
+  _ (1, VERSION)                                                              \
+  _ (2, RESET_VF)                                                             \
+  _ (3, GET_VF_RESOURCES)                                                     \
+  _ (4, CONFIG_TX_QUEUE)                                                      \
+  _ (5, CONFIG_RX_QUEUE)                                                      \
+  _ (6, CONFIG_VSI_QUEUES)                                                    \
+  _ (7, CONFIG_IRQ_MAP)                                                       \
+  _ (8, ENABLE_QUEUES)                                                        \
+  _ (9, DISABLE_QUEUES)                                                       \
+  _ (10, ADD_ETH_ADDR)                                                        \
+  _ (11, DEL_ETH_ADDR)                                                        \
+  _ (12, ADD_VLAN)                                                            \
+  _ (13, DEL_VLAN)                                                            \
+  _ (14, CONFIG_PROMISCUOUS_MODE)                                             \
+  _ (15, GET_STATS)                                                           \
+  _ (16, RSVD)                                                                \
+  _ (17, EVENT)                                                               \
+  _ (18, UNDEF_18)                                                            \
+  _ (19, UNDEF_19)                                                            \
+  _ (20, IWARP)                                                               \
+  _ (21, CONFIG_IWARP_IRQ_MAP)                                                \
+  _ (22, RELEASE_IWARP_IRQ_MAP)                                               \
+  _ (23, CONFIG_RSS_KEY)                                                      \
+  _ (24, CONFIG_RSS_LUT)                                                      \
+  _ (25, GET_RSS_HENA_CAPS)                                                   \
+  _ (26, SET_RSS_HENA)                                                        \
+  _ (27, ENABLE_VLAN_STRIPPING)                                               \
+  _ (28, DISABLE_VLAN_STRIPPING)                                              \
+  _ (29, REQUEST_QUEUES)                                                      \
+  _ (30, ENABLE_CHANNELS)                                                     \
+  _ (31, DISABLE_CHANNELS)                                                    \
+  _ (32, ADD_CLOUD_FILTER)                                                    \
+  _ (33, DEL_CLOUD_FILTER)                                                    \
+  _ (45, ADD_RSS_CFG)                                                         \
+  _ (46, DEL_RSS_CFG)                                                         \
+  _ (47, ADD_FDIR_FILTER)                                                     \
+  _ (48, DEL_FDIR_FILTER)                                                     \
+  _ (49, QUERY_FDIR_FILTER)                                                   \
+  _ (50, GET_MAX_RSS_QREGION)                                                 \
+  _ (51, GET_OFFLOAD_VLAN_V2_CAPS)                                            \
+  _ (52, ADD_VLAN_V2)                                                         \
+  _ (53, DEL_VLAN_V2)                                                         \
+  _ (54, ENABLE_VLAN_STRIPPING_V2)                                            \
+  _ (55, DISABLE_VLAN_STRIPPING_V2)                                           \
+  _ (56, ENABLE_VLAN_INSERTION_V2)                                            \
+  _ (57, DISABLE_VLAN_INSERTION_V2)                                           \
+  _ (58, ENABLE_VLAN_FILTERING_V2)                                            \
+  _ (59, DISABLE_VLAN_FILTERING_V2)                                           \
+  _ (107, ENABLE_QUEUES_V2)                                                   \
+  _ (108, DISABLE_QUEUES_V2)                                                  \
+  _ (111, MAP_QUEUE_VECTOR)
 
 typedef enum
 {
@@ -120,23 +136,31 @@ typedef enum
   VIRTCHNL_STATUS_NOT_SUPPORTED = -64,
 } virtchnl_status_code_t;
 
-#define foreach_avf_vf_cap_flag \
-  _( 0, OFFLOAD_L2, "l2") \
-  _( 1, OFFLOAD_IWARP, "iwarp") \
-  _( 2, OFFLOAD_RSVD, "rsvd") \
-  _( 3, OFFLOAD_RSS_AQ, "rss-aq") \
-  _( 4, OFFLOAD_RSS_REG, "rss-reg") \
-  _( 5, OFFLOAD_WB_ON_ITR, "wb-on-itr") \
-  _( 6, OFFLOAD_REQ_QUEUES, "req-queues") \
-  _( 7, CAP_ADV_LINK_SPEED, "adv-link-speed") \
-  _(16, OFFLOAD_VLAN, "vlan") \
-  _(17, OFFLOAD_RX_POLLING, "rx-polling") \
-  _(18, OFFLOAD_RSS_PCTYPE_V2, "rss-pctype-v2") \
-  _(19, OFFLOAD_RSS_PF, "rss-pf") \
-  _(20, OFFLOAD_ENCAP, "encap") \
-  _(21, OFFLOAD_ENCAP_CSUM, "encap-csum") \
-  _(22, OFFLOAD_RX_ENCAP_CSUM, "rx-encap-csum") \
-  _(23, OFFLOAD_ADQ, "offload-adq")
+#define foreach_avf_vf_cap_flag                                               \
+  _ (0, OFFLOAD_L2, "l2")                                                     \
+  _ (1, OFFLOAD_IWARP, "iwarp")                                               \
+  _ (2, OFFLOAD_RSVD, "rsvd")                                                 \
+  _ (3, OFFLOAD_RSS_AQ, "rss-aq")                                             \
+  _ (4, OFFLOAD_RSS_REG, "rss-reg")                                           \
+  _ (5, OFFLOAD_WB_ON_ITR, "wb-on-itr")                                       \
+  _ (6, OFFLOAD_REQ_QUEUES, "req-queues")                                     \
+  _ (7, CAP_ADV_LINK_SPEED, "adv-link-speed")                                 \
+  _ (9, LARGE_NUM_QPAIRS, "large-num-qpairs")                                 \
+  _ (15, OFFLOAD_VLAN_V2, "vlan-v2")                                          \
+  _ (16, OFFLOAD_VLAN, "vlan")                                                \
+  _ (17, OFFLOAD_RX_POLLING, "rx-polling")                                    \
+  _ (18, OFFLOAD_RSS_PCTYPE_V2, "rss-pctype-v2")                              \
+  _ (19, OFFLOAD_RSS_PF, "rss-pf")                                            \
+  _ (20, OFFLOAD_ENCAP, "encap")                                              \
+  _ (21, OFFLOAD_ENCAP_CSUM, "encap-csum")                                    \
+  _ (22, OFFLOAD_RX_ENCAP_CSUM, "rx-encap-csum")                              \
+  _ (23, OFFLOAD_ADQ, "offload-adq")                                          \
+  _ (24, OFFLOAD_ADQ_v2, "offload-adq-v2")                                    \
+  _ (25, OFFLOAD_USO, "offload-uso")                                          \
+  _ (26, OFFLOAD_RX_FLEX_DESC, "offload-rx-flex-desc")                        \
+  _ (27, OFFLOAD_ADV_RSS_PF, "offload-adv-rss-pf")                            \
+  _ (28, OFFLOAD_FDIR_PF, "offload-fdir-pf")                                  \
+  _ (30, CAP_DCF, "dcf")
 
 typedef enum
 {
@@ -173,7 +197,7 @@ typedef struct
   u16 num_queue_pairs;
   u16 max_vectors;
   u16 max_mtu;
-  u32 vf_offload_flags;
+  u32 vf_cap_flags;
   u32 rss_key_size;
   u32 rss_lut_size;
   virtchnl_vsi_resource_t vsi_res[1];
@@ -398,6 +422,64 @@ typedef struct
 {
   u16 num_queue_pairs;
 } virtchnl_vf_res_request_t;
+
+typedef struct
+{
+  u32 outer;
+  u32 inner;
+} virtchnl_vlan_supported_caps_t;
+
+typedef struct
+{
+  virtchnl_vlan_supported_caps_t filtering_support;
+  u32 ethertype_init;
+  u16 max_filters;
+  u8 pad[2];
+} virtchnl_vlan_filtering_caps_t;
+
+typedef struct virtchnl_vlan_offload_caps
+{
+  virtchnl_vlan_supported_caps_t stripping_support;
+  virtchnl_vlan_supported_caps_t insertion_support;
+  u32 ethertype_init;
+  u8 ethertype_match;
+  u8 pad[3];
+} virtchnl_vlan_offload_caps_t;
+
+typedef struct
+{
+  virtchnl_vlan_filtering_caps_t filtering;
+  virtchnl_vlan_offload_caps_t offloads;
+} virtchnl_vlan_caps_t;
+
+#define foreach_virtchnl_vlan_support_bit                                     \
+  _ (0, ETHERTYPE_8100, "dot1Q")                                              \
+  _ (1, ETHERTYPE_88A8, "dot1AD")                                             \
+  _ (2, ETHERTYPE_9100, "QinQ")                                               \
+  _ (8, TAG_LOCATION_L2TAG1, "l2tag1")                                        \
+  _ (9, TAG_LOCATION_L2TAG2, "l2tag2")                                        \
+  _ (10, TAG_LOCATION_L2TAG2_2, "l2tag2_2")                                   \
+  _ (24, PRIO, "prio")                                                        \
+  _ (28, FILTER_MASK, "filter-mask")                                          \
+  _ (29, ETHERTYPE_AND, "etype-and")                                          \
+  _ (30, ETHERTYPE_XOR, "etype-xor")                                          \
+  _ (31, TOGGLE, "toggle")
+
+typedef enum
+{
+  VIRTCHNL_VLAN_UNSUPPORTED = 0,
+#define _(a, b, c) VIRTCHNL_VLAN_##b = (1 << a),
+  foreach_virtchnl_vlan_support_bit
+#undef _
+} virtchnl_vlan_support_t;
+
+typedef struct
+{
+  u32 outer_ethertype_setting;
+  u32 inner_ethertype_setting;
+  u16 vport_id;
+  u8 pad[6];
+} virtchnl_vlan_setting_t;
 
 #endif /* AVF_VIRTCHNL_H */
 

@@ -160,13 +160,7 @@ typedef struct
 always_inline heap_header_t *
 heap_header (void *v)
 {
-  return vec_header (v, sizeof (heap_header_t));
-}
-
-always_inline uword
-heap_header_bytes ()
-{
-  return vec_header_bytes (sizeof (heap_header_t));
+  return vec_header (v);
 }
 
 always_inline void
@@ -191,6 +185,9 @@ always_inline void *
 _heap_dup (void *v_old, uword v_bytes)
 {
   heap_header_t *h_old, *h_new;
+  vec_attr_t va = { .align = HEAP_DATA_ALIGN,
+		    .hdr_sz = sizeof (heap_header_t),
+		    .elt_sz = 1 };
   void *v_new;
 
   h_old = heap_header (v_old);
@@ -198,10 +195,7 @@ _heap_dup (void *v_old, uword v_bytes)
   if (!v_old)
     return v_old;
 
-  v_new = 0;
-  v_new =
-    _vec_resize (v_new, _vec_len (v_old), v_bytes, sizeof (heap_header_t),
-		 HEAP_DATA_ALIGN);
+  v_new = _vec_alloc_internal (_vec_len (v_old), &va);
   h_new = heap_header (v_new);
   heap_dup_header (h_old, h_new);
   clib_memcpy_fast (v_new, v_old, v_bytes);
@@ -220,9 +214,10 @@ uword heap_bytes (void *v);
 always_inline void *
 _heap_new (u32 len, u32 n_elt_bytes)
 {
-  void *v = _vec_resize ((void *) 0, len, (uword) len * n_elt_bytes,
-			 sizeof (heap_header_t),
-			 HEAP_DATA_ALIGN);
+  vec_attr_t va = { .align = HEAP_DATA_ALIGN,
+		    .hdr_sz = sizeof (heap_header_t),
+		    .elt_sz = n_elt_bytes };
+  void *v = _vec_alloc_internal (len, &va);
   heap_header (v)->elt_bytes = n_elt_bytes;
   return v;
 }
@@ -247,27 +242,6 @@ always_inline uword
 heap_get_max_len (void *v)
 {
   return v ? heap_header (v)->max_len : 0;
-}
-
-/* Create fixed size heap with given block of memory. */
-always_inline void *
-heap_create_from_memory (void *memory, uword max_len, uword elt_bytes)
-{
-  heap_header_t *h;
-  void *v;
-
-  if (max_len * elt_bytes < sizeof (h[0]))
-    return 0;
-
-  h = memory;
-  clib_memset (h, 0, sizeof (h[0]));
-  h->max_len = max_len;
-  h->elt_bytes = elt_bytes;
-  h->flags = HEAP_IS_STATIC;
-
-  v = (void *) (memory + heap_header_bytes ());
-  _vec_len (v) = 0;
-  return v;
 }
 
 /* Execute BODY for each allocated heap element. */

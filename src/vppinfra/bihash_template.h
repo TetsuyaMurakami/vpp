@@ -34,7 +34,6 @@
 #endif
 
 #ifdef BIHASH_32_64_SVM
-#undef HAVE_MEMFD_CREATE
 #include <vppinfra/linux/syscall.h>
 #include <fcntl.h>
 #define F_LINUX_SPECIFIC_BASE 1024
@@ -171,6 +170,7 @@ BVS (clib_bihash)
 
   u64 alloc_arena;		/* Base of the allocation arena */
   volatile u8 instantiated;
+  u8 dont_add_to_all_bihash_list;
 
   /**
     * A custom format function to print the Key and Value of bihash_key instead of default hexdump
@@ -356,12 +356,19 @@ void BV (clib_bihash_free) (BVT (clib_bihash) * h);
 
 int BV (clib_bihash_add_del) (BVT (clib_bihash) * h,
 			      BVT (clib_bihash_kv) * add_v, int is_add);
+
+int BV (clib_bihash_add_del_with_hash) (BVT (clib_bihash) * h,
+					BVT (clib_bihash_kv) * add_v, u64 hash,
+					int is_add);
 int BV (clib_bihash_add_or_overwrite_stale) (BVT (clib_bihash) * h,
 					     BVT (clib_bihash_kv) * add_v,
 					     int (*is_stale_cb) (BVT
 								 (clib_bihash_kv)
 								 *, void *),
 					     void *arg);
+int BV (clib_bihash_add_with_overwrite_cb) (
+  BVT (clib_bihash) * h, BVT (clib_bihash_kv) * add_v,
+  void (*overwrite_cb) (BVT (clib_bihash_kv) *, void *), void *arg);
 int BV (clib_bihash_search) (BVT (clib_bihash) * h,
 			     BVT (clib_bihash_kv) * search_v,
 			     BVT (clib_bihash_kv) * return_v);
@@ -403,6 +410,7 @@ BV (clib_bihash_get_bucket) (BVT (clib_bihash) * h, u64 hash)
 static inline int BV (clib_bihash_search_inline_with_hash)
   (BVT (clib_bihash) * h, u64 hash, BVT (clib_bihash_kv) * key_result)
 {
+  BVT (clib_bihash_kv) rv;
   BVT (clib_bihash_value) * v;
   BVT (clib_bihash_bucket) * b;
   int i, limit;
@@ -448,7 +456,10 @@ static inline int BV (clib_bihash_search_inline_with_hash)
     {
       if (BV (clib_bihash_key_compare) (v->kvp[i].key, key_result->key))
 	{
-	  *key_result = v->kvp[i];
+	  rv = v->kvp[i];
+	  if (BV (clib_bihash_is_free) (&rv))
+	    return -1;
+	  *key_result = rv;
 	  return 0;
 	}
     }
@@ -502,6 +513,7 @@ static inline int BV (clib_bihash_search_inline_2_with_hash)
   (BVT (clib_bihash) * h,
    u64 hash, BVT (clib_bihash_kv) * search_key, BVT (clib_bihash_kv) * valuep)
 {
+  BVT (clib_bihash_kv) rv;
   BVT (clib_bihash_value) * v;
   BVT (clib_bihash_bucket) * b;
   int i, limit;
@@ -549,7 +561,10 @@ static inline int BV (clib_bihash_search_inline_2_with_hash)
     {
       if (BV (clib_bihash_key_compare) (v->kvp[i].key, search_key->key))
 	{
-	  *valuep = v->kvp[i];
+	  rv = v->kvp[i];
+	  if (BV (clib_bihash_is_free) (&rv))
+	    return -1;
+	  *valuep = rv;
 	  return 0;
 	}
     }
