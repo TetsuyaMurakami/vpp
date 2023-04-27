@@ -102,6 +102,7 @@
 #define foreach_dpdk_pkt_tx_offload_flag                                \
   _ (PKT_TX_VLAN_PKT, "TX packet is a 802.1q VLAN packet")              \
   _ (PKT_TX_IP_CKSUM, "IP cksum of TX pkt. computed by NIC")            \
+  _ (PKT_TX_UDP_CKSUM, "UDP cksum of TX pkt. computed by NIC")          \
   _ (PKT_TX_TCP_CKSUM, "TCP cksum of TX pkt. computed by NIC")          \
   _ (PKT_TX_SCTP_CKSUM, "SCTP cksum of TX pkt. computed by NIC")        \
   _ (PKT_TX_IEEE1588_TMST, "TX IEEE1588 packet to timestamp")

@@ -1672,8 +1672,9 @@ VLIB_NODE_FN (srv6_end_m_gtp6_e) (vlib_main_t * vm,
           if (ls_param->cksum)
             {
               b0->flags |= VNET_BUFFER_F_OFFLOAD_UDP_CKSUM;
+              vnet_buffer (b0)->l3_hdr_offset = (u8 *) hdr0 - b0->data;
               vnet_buffer (b0)->l4_hdr_offset = (u8 *) &hdr0->udp - b0->data;
-              b0->flags |= VNET_BUFFER_F_L4_HDR_OFFSET_VALID;
+              b0->flags |= (VNET_BUFFER_F_L3_HDR_OFFSET_VALID | VNET_BUFFER_F_L4_HDR_OFFSET_VALID);
             }
 
           good_n++;
