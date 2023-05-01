@@ -83,6 +83,7 @@ clb_unformat_srv6_end_m_gtp6_e (unformat_input_t * input, va_list * args)
   u32 fib_table;
   bool config = false;
   bool is_cksum = false;
+  bool is_swcksum = false;
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
     {
@@ -93,6 +94,10 @@ clb_unformat_srv6_end_m_gtp6_e (unformat_input_t * input, va_list * args)
       else if (unformat (input, "checksum"))
         {
           is_cksum = true;
+        }
+      else if (unformat (input, "software-checksum"))
+        {
+          is_swcksum = true;
         }
       else
         {
@@ -112,6 +117,7 @@ clb_unformat_srv6_end_m_gtp6_e (unformat_input_t * input, va_list * args)
   ls_mem->fib6_index = ip6_fib_index_from_table_id (fib_table);
 
   ls_mem->cksum = is_cksum;
+  ls_mem->swcksum = is_swcksum;
 
   return 1;
 }
