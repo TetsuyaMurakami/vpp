@@ -70,7 +70,9 @@ clb_format_srv6_end_m_gtp6_e (u8 * s, va_list * args)
 
   s = format (s, "SRv6 End.M.GTP6.E function.");
 
-  s = format (s, "\tFib Table %d, Checksum %s\n", ls_mem->fib_table, ls_mem->cksum ? "Enable" : "Disable");
+  s = format (s, "\tFib Table %d, Checksum offload %s, Software-based Checksum %s\n", 
+        ls_mem->fib_table, ls_mem->cksum ? "Enable" : "Disable",
+        ls_mem->swcksum ? "Enable" : "Disable");
 
   return s;
 }
