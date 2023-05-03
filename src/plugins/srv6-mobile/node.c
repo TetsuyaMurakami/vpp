@@ -1679,6 +1679,10 @@ VLIB_NODE_FN (srv6_end_m_gtp6_e) (vlib_main_t * vm,
           else if (ls_param->swcksum)
             {
               int bogus;
+              b0->flags &= ~VNET_BUFFER_F_OFFLOAD_UDP_CKSUM;
+              vnet_buffer (b0)->l3_hdr_offset = 0;
+              vnet_buffer (b0)->l4_hdr_offset = 0;
+              b0->flags &= ~(VNET_BUFFER_F_L3_HDR_OFFSET_VALID | VNET_BUFFER_F_L4_HDR_OFFSET_VALID);
               hdr0->udp.checksum = 0;
               hdr0->udp.checksum = ip6_tcp_udp_icmp_compute_checksum (vm, b0, &hdr0->ip6, &bogus);
             }
