@@ -419,7 +419,7 @@ sr_steer_policy_command_fn (vlib_main_t * vm, unformat_input_t * input,
     {
       u32 mask =
 	(dst_mask_width ? (0xFFFFFFFFu >> (32 - dst_mask_width)) : 0);
-      prefix.ip4.as_u32 &= mask;
+      prefix.ip4.as_u32 &= clib_host_to_net_u16(mask);
     }
   else if (traffic_type == SR_STEER_IPV6)
     {
