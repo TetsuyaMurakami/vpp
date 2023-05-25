@@ -417,9 +417,8 @@ sr_steer_policy_command_fn (vlib_main_t * vm, unformat_input_t * input,
   /* Make sure that the prefixes are clean */
   if (traffic_type == SR_STEER_IPV4)
     {
-      u32 mask =
-	(dst_mask_width ? (0xFFFFFFFFu >> (32 - dst_mask_width)) : 0);
-      prefix.ip4.as_u32 &= clib_host_to_net_u16(mask);
+      u32 mask = (0xFFFFFFFFu << (32 - dst_mask_width));
+      prefix.ip4.as_u32 &= clib_host_to_net_u32(mask);
     }
   else if (traffic_type == SR_STEER_IPV6)
     {
