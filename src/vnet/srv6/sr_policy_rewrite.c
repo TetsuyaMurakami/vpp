@@ -113,6 +113,30 @@ u8 sr_pr_encaps_hop_limit = IPv6_DEFAULT_HOP_LIMIT;
 /* Note:  This is temporal. We don't know whether to follow this path or
           take the ip address of a loopback interface or even the OIF         */
 
+static inline u32
+hash_uword_to_u32 (uword * key)
+{
+  u32 *val;
+  val = (u32 *) key;
+#if uword_bits == 64
+  return val[0] ^ val[1];
+#else
+  return val[0];
+#endif
+}
+
+static inline u16
+hash_uword_to_u16 (uword * key)
+{
+  u16 *val;
+  val = (u16 *) key;
+#if uword_bits == 64
+  return val[0] ^ val[1] ^ val[2] ^ val[3];
+#else
+  return val[0] ^ val[1];
+#endif
+}
+
 void
 sr_set_source (ip6_address_t * address)
 {
@@ -1495,6 +1519,8 @@ encaps_processing_v4 (vlib_node_runtime_t * node,
 {
   u32 new_l0;
   ip6_sr_header_t *sr0;
+  void *p;
+  uword key;
 
   u32 checksum0;
 
@@ -1510,6 +1536,12 @@ encaps_processing_v4 (vlib_node_runtime_t * node,
   ip0->ip_version_traffic_class_and_flow_label =
     clib_host_to_net_u32 (0 | ((6 & 0xF) << 28) |
 			  ((ip0_encap->tos & 0xFF) << 20));
+
+  /* Hash value */
+  p = (void *)ip0_encap;
+  key = hash_memory (p, 24, 0);
+  ip0->dst_address.as_u32[3] = hash_uword_to_u32(&key);
+
   if (ip0->protocol == IP_PROTOCOL_IPV6_ROUTE)
     {
       sr0 = (void *) (ip0 + 1);
