@@ -26,6 +26,21 @@ list(APPEND VNET_SOURCES
   config.c
   devices/devices.c
   devices/netlink.c
+  dev/api.c
+  dev/args.c
+  dev/cli.c
+  dev/config.c
+  dev/counters.c
+  dev/dev.c
+  dev/dev_api.c
+  dev/error.c
+  dev/format.c
+  dev/handlers.c
+  dev/pci.c
+  dev/port.c
+  dev/process.c
+  dev/queue.c
+  dev/runtime.c
   error.c
   flow/flow.c
   flow/flow_cli.c
@@ -59,6 +74,7 @@ list(APPEND VNET_HEADERS
   config.h
   devices/devices.h
   devices/netlink.h
+  dev/dev.h
   flow/flow.h
   global_funcs.h
   interface/rx_queue_funcs.h
@@ -83,6 +99,7 @@ list(APPEND VNET_HEADERS
 )
 
 list(APPEND VNET_API_FILES
+  dev/dev.api
   interface.api
   interface_types.api
   ip/ip_types.api
@@ -668,26 +685,9 @@ list(APPEND VNET_API_FILES udp/udp.api)
 ##############################################################################
 # Tunnel protocol: gre
 ##############################################################################
-list(APPEND VNET_SOURCES
-  gre/gre.c
-  gre/node.c
-  gre/interface.c
-  gre/pg.c
-  gre/gre_api.c
-)
-
-list(APPEND VNET_MULTIARCH_SOURCES
-  gre/node.c
-  gre/gre.c
-)
-
 list(APPEND VNET_HEADERS
-  gre/gre.h
   gre/packet.h
-  gre/error.def
 )
-
-list(APPEND VNET_API_FILES gre/gre.api)
 
 ##############################################################################
 # Tunnel protocol: ipip
@@ -1035,6 +1035,7 @@ list(APPEND VNET_SOURCES
   session/session_rules_table.c
   session/session_lookup.c
   session/session_node.c
+  session/session_input.c
   session/transport.c
   session/application.c
   session/application_worker.c

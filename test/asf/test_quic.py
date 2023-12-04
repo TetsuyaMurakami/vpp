@@ -3,11 +3,9 @@
 
 import unittest
 import os
-import subprocess
 import signal
 from config import config
-from framework import tag_fixme_vpp_workers
-from framework import VppTestCase, VppTestRunner, Worker
+from asfframework import VppAsfTestCase, VppTestRunner, Worker, tag_fixme_vpp_workers
 from vpp_ip_route import VppIpTable, VppIpRoute, VppRoutePath
 
 
@@ -52,7 +50,8 @@ class QUICAppWorker(Worker):
         return False
 
 
-class QUICTestCase(VppTestCase):
+@unittest.skipIf("quic" in config.excluded_plugins, "Exclude QUIC plugin tests")
+class QUICTestCase(VppAsfTestCase):
     """QUIC Test Case"""
 
     timeout = 20
@@ -87,12 +86,12 @@ class QUICTestCase(VppTestCase):
             table_id += 1
 
         # Configure namespaces
-        self.vapi.app_namespace_add_del(
+        self.vapi.app_namespace_add_del_v4(
             namespace_id=self.server_appns,
             secret=self.server_appns_secret,
             sw_if_index=self.loop0.sw_if_index,
         )
-        self.vapi.app_namespace_add_del(
+        self.vapi.app_namespace_add_del_v4(
             namespace_id=self.client_appns,
             secret=self.client_appns_secret,
             sw_if_index=self.loop1.sw_if_index,
@@ -133,14 +132,14 @@ class QUICEchoIntTestCase(QUICTestCase):
     """QUIC Echo Internal Test Case"""
 
     test_bytes = " test-bytes"
-    extra_vpp_punt_config = ["session", "{", "enable", "poll-main", "}"]
+    extra_vpp_config = ["session", "{", "enable", "poll-main", "}"]
 
     def setUp(self):
         super(QUICEchoIntTestCase, self).setUp()
         self.client_args = (
-            f"uri {self.uri} fifo-size 64{self.test_bytes} appns {self.client_appns} "
+            f"uri {self.uri} fifo-size 64k{self.test_bytes} appns {self.client_appns} "
         )
-        self.server_args = f"uri {self.uri} fifo-size 64 appns {self.server_appns} "
+        self.server_args = f"uri {self.uri} fifo-size 64k appns {self.server_appns} "
 
     def tearDown(self):
         super(QUICEchoIntTestCase, self).tearDown()
@@ -167,7 +166,7 @@ class QUICEchoIntTransferTestCase(QUICEchoIntTestCase):
     def test_quic_int_transfer(self):
         """QUIC internal transfer"""
         self.server()
-        self.client("no-output", "mbytes", "2")
+        self.client("mbytes", "2")
 
 
 @tag_fixme_vpp_workers
@@ -177,11 +176,11 @@ class QUICEchoIntSerialTestCase(QUICEchoIntTestCase):
     def test_quic_serial_int_transfer(self):
         """QUIC serial internal transfer"""
         self.server()
-        self.client("no-output", "mbytes", "2")
-        self.client("no-output", "mbytes", "2")
-        self.client("no-output", "mbytes", "2")
-        self.client("no-output", "mbytes", "2")
-        self.client("no-output", "mbytes", "2")
+        self.client("mbytes", "2")
+        self.client("mbytes", "2")
+        self.client("mbytes", "2")
+        self.client("mbytes", "2")
+        self.client("mbytes", "2")
 
 
 @tag_fixme_vpp_workers
@@ -191,7 +190,7 @@ class QUICEchoIntMStreamTestCase(QUICEchoIntTestCase):
     def test_quic_int_multistream_transfer(self):
         """QUIC internal multi-stream transfer"""
         self.server()
-        self.client("nclients", "10", "mbytes", "1", "no-output")
+        self.client("nclients", "10", "mbytes", "1")
 
 
 class QUICEchoExtTestCase(QUICTestCase):
@@ -204,7 +203,7 @@ class QUICEchoExtTestCase(QUICTestCase):
     vpp_worker_count = 1
     server_fifo_size = "1M"
     client_fifo_size = "4M"
-    extra_vpp_punt_config = [
+    extra_vpp_config = [
         "session",
         "{",
         "enable",
@@ -299,6 +298,7 @@ class QUICEchoExtTestCase(QUICTestCase):
 
     def validate_ext_test_results(self):
         server_result = self.worker_server.result
+        self.logger.debug(self.vapi.cli(f"show session verbose 2"))
         client_result = self.worker_client.result
         self.logger.info(f"Server worker result is `{server_result}'")
         self.logger.info(f"Client worker result is `{client_result}'")

@@ -420,7 +420,7 @@ static inline void
 tcp_make_ack_i (tcp_connection_t * tc, vlib_buffer_t * b, tcp_state_t state,
 		u8 flags)
 {
-  tcp_options_t _snd_opts, *snd_opts = &_snd_opts;
+  tcp_options_t _snd_opts = {}, *snd_opts = &_snd_opts;
   u8 tcp_opts_len, tcp_hdr_opts_len;
   tcp_header_t *th;
   u16 wnd;
@@ -656,8 +656,8 @@ tcp_send_reset_w_pkt (tcp_connection_t * tc, vlib_buffer_t * pkt,
   u8 tcp_hdr_len, flags = 0;
   tcp_header_t *th, *pkt_th;
   u32 seq, ack, bi;
-  ip4_header_t *ih4, *pkt_ih4;
-  ip6_header_t *ih6, *pkt_ih6;
+  ip4_header_t *pkt_ih4;
+  ip6_header_t *pkt_ih6;
 
   if (PREDICT_FALSE (!vlib_buffer_alloc (vm, &bi, 1)))
     {
@@ -667,6 +667,7 @@ tcp_send_reset_w_pkt (tcp_connection_t * tc, vlib_buffer_t * pkt,
 
   b = vlib_get_buffer (vm, bi);
   tcp_init_buffer (vm, b);
+  vnet_buffer (b)->tcp.connection_index = tc->c_c_index;
 
   /* Make and write options */
   tcp_hdr_len = sizeof (tcp_header_t);
@@ -698,28 +699,7 @@ tcp_send_reset_w_pkt (tcp_connection_t * tc, vlib_buffer_t * pkt,
 
   th = vlib_buffer_push_tcp_net_order (b, pkt_th->dst_port, pkt_th->src_port,
 				       seq, ack, tcp_hdr_len, flags, 0);
-
-  /* Swap src and dst ip */
-  if (is_ip4)
-    {
-      ASSERT ((pkt_ih4->ip_version_and_header_length & 0xF0) == 0x40);
-      ih4 = vlib_buffer_push_ip4 (vm, b, &pkt_ih4->dst_address,
-				  &pkt_ih4->src_address, IP_PROTOCOL_TCP,
-				  tcp_csum_offload (tc));
-      th->checksum = ip4_tcp_udp_compute_checksum (vm, b, ih4);
-    }
-  else
-    {
-      int bogus = ~0;
-      ASSERT ((pkt_ih6->ip_version_traffic_class_and_flow_label & 0xF0) ==
-	      0x60);
-      ih6 = vlib_buffer_push_ip6_custom (vm, b, &pkt_ih6->dst_address,
-					 &pkt_ih6->src_address,
-					 IP_PROTOCOL_TCP,
-					 tc->ipv6_flow_label);
-      th->checksum = ip6_tcp_udp_icmp_compute_checksum (vm, b, ih6, &bogus);
-      ASSERT (!bogus);
-    }
+  th->checksum = tcp_compute_checksum (tc, b);
 
   tcp_enqueue_half_open (wrk, tc, b, bi);
   TCP_EVT (TCP_EVT_RST_SENT, tc);
@@ -1137,7 +1117,7 @@ tcp_prepare_segment (tcp_worker_ctx_t * wrk, tcp_connection_t * tc,
       data = tcp_init_buffer (vm, *b);
       n_bytes = session_tx_fifo_peek_bytes (&tc->connection, data, offset,
 					    max_deq_bytes);
-      ASSERT (n_bytes == max_deq_bytes);
+      ASSERT (n_bytes > 0);
       b[0]->current_length = n_bytes;
       tcp_push_hdr_i (tc, *b, tc->snd_una + offset, /* compute opts */ 0,
 		      /* burst */ 0, /* update_snd_nxt */ 0);
@@ -1299,6 +1279,7 @@ tcp_cc_init_rxt_timeout (tcp_connection_t * tc)
   tc->cwnd_acc_bytes = 0;
   tc->tr_occurences += 1;
   tc->sack_sb.reorder = TCP_DUPACK_THRESHOLD;
+  tc->sack_sb.rescue_rxt = tc->snd_una - 1;
   tcp_recovery_on (tc);
 }
 
@@ -1781,7 +1762,7 @@ tcp_retransmit_sack (tcp_worker_ctx_t * wrk, tcp_connection_t * tc,
       if (!hole)
 	{
 	  /* We are out of lost holes to retransmit so send some new data. */
-	  if (max_deq > tc->snd_mss)
+	  if (max_deq)
 	    {
 	      u32 n_segs_new;
 	      int av_wnd;
@@ -1791,7 +1772,10 @@ tcp_retransmit_sack (tcp_worker_ctx_t * wrk, tcp_connection_t * tc,
 	      av_wnd = (int) tc->snd_wnd - (tc->snd_nxt - tc->snd_una);
 	      av_wnd = clib_max (av_wnd - tc->snd_mss, 0);
 	      snd_space = clib_min (snd_space, av_wnd);
-	      snd_space = clib_min (max_deq, snd_space);
+	      /* Low bound max_deq to mss to be able to send a segment even
+	       * when it is less than mss */
+	      snd_space =
+		clib_min (clib_max (max_deq, tc->snd_mss), snd_space);
 	      burst_size = clib_min (burst_size - n_segs,
 				     snd_space / tc->snd_mss);
 	      burst_size = clib_min (burst_size, TCP_RXT_MAX_BURST);
@@ -1803,8 +1787,7 @@ tcp_retransmit_sack (tcp_worker_ctx_t * wrk, tcp_connection_t * tc,
 	      goto done;
 	    }
 
-	  if (tcp_in_recovery (tc) || !can_rescue
-	      || scoreboard_rescue_rxt_valid (sb, tc))
+	  if (!can_rescue || scoreboard_rescue_rxt_valid (sb, tc))
 	    break;
 
 	  /* If rescue rxt undefined or less than snd_una then one segment of

@@ -328,15 +328,54 @@ vlib_node_get_preferred_node_fn_variant (vlib_main_t *vm,
   return fn;
 }
 
+static void
+vlib_node_add_to_sibling_bitmap (vlib_main_t *vm, vlib_node_t *n,
+				 vlib_node_t *sib)
+{
+  vlib_node_main_t *nm = &vm->node_main;
+  u32 si;
+
+  clib_bitmap_foreach (si, sib->sibling_bitmap)
+    {
+      vlib_node_t *m = vec_elt (nm->nodes, si);
+
+      /* Connect all of sibling's siblings to us. */
+      m->sibling_bitmap = clib_bitmap_ori (m->sibling_bitmap, n->index);
+
+      /* Connect us to all of sibling's siblings. */
+      n->sibling_bitmap = clib_bitmap_ori (n->sibling_bitmap, si);
+    }
+
+  /* Connect sibling to us. */
+  sib->sibling_bitmap = clib_bitmap_ori (sib->sibling_bitmap, n->index);
+
+  /* Connect us to sibling. */
+  n->sibling_bitmap = clib_bitmap_ori (n->sibling_bitmap, sib->index);
+}
+
 u32
 vlib_register_node (vlib_main_t *vm, vlib_node_registration_t *r, char *fmt,
 		    ...)
 {
   vlib_node_main_t *nm = &vm->node_main;
-  vlib_node_t *n;
+  vlib_node_t *n, *sib = 0;
   va_list va;
   u32 size;
   int i;
+
+  if (r->sibling_of)
+    {
+      if (r->n_next_nodes > 0)
+	clib_error ("sibling node should not have any next nodes `%v'",
+		    r->name);
+      if (nm->flags & VLIB_NODE_MAIN_RUNTIME_STARTED)
+	{
+	  sib = vlib_get_node_by_name (vm, (u8 *) r->sibling_of);
+
+	  if (sib == 0)
+	    clib_error ("unknown sibling node '%s'", r->sibling_of);
+	}
+    }
 
   if (CLIB_DEBUG > 0)
     {
@@ -387,11 +426,6 @@ vlib_register_node (vlib_main_t *vm, vlib_node_registration_t *r, char *fmt,
 
   r->index = n->index;		/* save index in registration */
   n->function = r->function;
-
-  /* Node index of next sibling will be filled in by vlib_node_main_init. */
-  n->sibling_of = r->sibling_of;
-  if (r->sibling_of && r->n_next_nodes > 0)
-    clib_error ("sibling node should not have any next nodes `%v'", n->name);
 
   if (r->type == VLIB_NODE_TYPE_INTERNAL)
     ASSERT (r->vector_size > 0);
@@ -530,7 +564,10 @@ vlib_register_node (vlib_main_t *vm, vlib_node_registration_t *r, char *fmt,
 	vec_add2_aligned (nm->nodes_by_type[n->type], rt, 1,
 			  /* align */ CLIB_CACHE_LINE_BYTES);
 	if (n->type == VLIB_NODE_TYPE_INPUT)
-	  clib_interrupt_resize (&nm->interrupts,
+	  clib_interrupt_resize (&nm->input_node_interrupts,
+				 vec_len (nm->nodes_by_type[n->type]));
+	else if (n->type == VLIB_NODE_TYPE_PRE_INPUT)
+	  clib_interrupt_resize (&nm->pre_input_node_interrupts,
 				 vec_len (nm->nodes_by_type[n->type]));
 	n->runtime_index = rt - nm->nodes_by_type[n->type];
       }
@@ -566,6 +603,24 @@ vlib_register_node (vlib_main_t *vm, vlib_node_registration_t *r, char *fmt,
     vec_free (n->runtime_data);
   }
 #undef _
+
+  if (sib)
+    {
+      u32 slot, i;
+
+      vec_foreach_index (i, sib->next_nodes)
+	{
+	  slot =
+	    vlib_node_add_next_with_slot (vm, n->index, sib->next_nodes[i], i);
+	  ASSERT (slot == i);
+	}
+
+      vlib_node_add_to_sibling_bitmap (vm, n, sib);
+
+      r->n_next_nodes = vec_len (n->next_nodes);
+    }
+  n->sibling_of = r->sibling_of;
+
   return r->index;
 }
 
@@ -720,7 +775,6 @@ vlib_node_main_init (vlib_main_t * vm)
   /* Generate sibling relationships */
   {
     vlib_node_t *n, *sib;
-    uword si;
 
     for (ni = 0; ni < vec_len (nm->nodes); ni++)
       {
@@ -737,23 +791,7 @@ vlib_node_main_init (vlib_main_t * vm)
 	    goto done;
 	  }
 
-        /* *INDENT-OFF* */
-	clib_bitmap_foreach (si, sib->sibling_bitmap)  {
-	      vlib_node_t * m = vec_elt (nm->nodes, si);
-
-	      /* Connect all of sibling's siblings to us. */
-	      m->sibling_bitmap = clib_bitmap_ori (m->sibling_bitmap, n->index);
-
-	      /* Connect us to all of sibling's siblings. */
-	      n->sibling_bitmap = clib_bitmap_ori (n->sibling_bitmap, si);
-	    }
-        /* *INDENT-ON* */
-
-	/* Connect sibling to us. */
-	sib->sibling_bitmap = clib_bitmap_ori (sib->sibling_bitmap, n->index);
-
-	/* Connect us to sibling. */
-	n->sibling_bitmap = clib_bitmap_ori (n->sibling_bitmap, sib->index);
+	vlib_node_add_to_sibling_bitmap (vm, n, sib);
       }
   }
 

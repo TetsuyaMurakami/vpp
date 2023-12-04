@@ -25,6 +25,8 @@ static struct
 static clib_error_t *
 statseg_sw_interface_add_del (vnet_main_t *vnm, u32 sw_if_index, u32 is_add)
 {
+  u8 *name = 0;
+
   if (if_names == 0)
     {
       if_names = vlib_stats_add_string_vector ("/if/names");
@@ -42,7 +44,6 @@ statseg_sw_interface_add_del (vnet_main_t *vnm, u32 sw_if_index, u32 is_add)
     {
       vnet_sw_interface_t *si, *si_sup;
       vnet_hw_interface_t *hi_sup;
-      u8 *name;
 
       si = vnet_get_sw_interface (vnm, sw_if_index);
       si_sup = vnet_get_sup_sw_interface (vnm, si->sw_if_index);
@@ -63,15 +64,17 @@ statseg_sw_interface_add_del (vnet_main_t *vnm, u32 sw_if_index, u32 is_add)
 	  ASSERT (index != ~0);
 	  vec_add1 (dir_entry_indices[sw_if_index], index);
 	}
-
-      vec_free (name);
     }
   else
     {
+      name = format (0, "%s", "deleted");
+      vlib_stats_set_string_vector (&if_names, sw_if_index, "%v", name);
       for (u32 i = 0; i < vec_len (dir_entry_indices[sw_if_index]); i++)
 	vlib_stats_remove_entry (dir_entry_indices[sw_if_index][i]);
       vec_free (dir_entry_indices[sw_if_index]);
     }
+
+  vec_free (name);
 
   vlib_stats_segment_unlock ();
 

@@ -74,6 +74,8 @@ typedef struct session_cb_vft_
   /** Delegate fifo-tuning-logic to application */
   int (*fifo_tuning_callback) (session_t * s, svm_fifo_t * f,
 			       session_ft_action_t act, u32 bytes);
+  /** Custom fifo allocation for proxy */
+  int (*proxy_alloc_session_fifos) (session_t *s);
 
 } session_cb_vft_t;
 
@@ -233,7 +235,8 @@ typedef enum
   _ (USE_LOCAL_SCOPE, "App can use local session scope")                      \
   _ (EVT_MQ_USE_EVENTFD, "Use eventfds for signaling")                        \
   _ (MEMFD_FOR_BUILTIN, "Use memfd for builtin app segs")                     \
-  _ (USE_HUGE_PAGE, "Use huge page for FIFO")
+  _ (USE_HUGE_PAGE, "Use huge page for FIFO")                                 \
+  _ (GET_ORIGINAL_DST, "Get original dst enabled")
 
 typedef enum _app_options
 {
@@ -270,18 +273,18 @@ typedef enum session_fd_flag_
 #undef _
 } session_fd_flag_t;
 
-int parse_uri (char *uri, session_endpoint_cfg_t * sep);
-int vnet_bind_uri (vnet_listen_args_t *);
-int vnet_unbind_uri (vnet_unlisten_args_t * a);
-int vnet_connect_uri (vnet_connect_args_t * a);
+session_error_t parse_uri (char *uri, session_endpoint_cfg_t *sep);
+session_error_t vnet_bind_uri (vnet_listen_args_t *);
+session_error_t vnet_unbind_uri (vnet_unlisten_args_t *a);
+session_error_t vnet_connect_uri (vnet_connect_args_t *a);
 
-int vnet_application_attach (vnet_app_attach_args_t * a);
-int vnet_application_detach (vnet_app_detach_args_t * a);
-int vnet_listen (vnet_listen_args_t * a);
-int vnet_connect (vnet_connect_args_t * a);
-int vnet_unlisten (vnet_unlisten_args_t * a);
-int vnet_shutdown_session (vnet_shutdown_args_t *a);
-int vnet_disconnect_session (vnet_disconnect_args_t * a);
+session_error_t vnet_application_attach (vnet_app_attach_args_t *a);
+session_error_t vnet_application_detach (vnet_app_detach_args_t *a);
+session_error_t vnet_listen (vnet_listen_args_t *a);
+session_error_t vnet_connect (vnet_connect_args_t *a);
+session_error_t vnet_unlisten (vnet_unlisten_args_t *a);
+session_error_t vnet_shutdown_session (vnet_shutdown_args_t *a);
+session_error_t vnet_disconnect_session (vnet_disconnect_args_t *a);
 
 int vnet_app_add_cert_key_pair (vnet_app_add_cert_key_pair_args_t * a);
 int vnet_app_del_cert_key_pair (u32 index);
@@ -299,15 +302,15 @@ typedef struct app_session_transport_
   u8 is_ip4;			/**< set if uses ip4 networking */
 } app_session_transport_t;
 
-#define foreach_app_session_field					\
-  _(svm_fifo_t, *rx_fifo)		/**< rx fifo */			\
-  _(svm_fifo_t, *tx_fifo)		/**< tx fifo */			\
-  _(session_type_t, session_type)	/**< session type */		\
-  _(volatile u8, session_state)		/**< session state */		\
-  _(u32, session_index)			/**< index in owning pool */	\
-  _(app_session_transport_t, transport)	/**< transport info */		\
-  _(svm_msg_q_t, *vpp_evt_q)		/**< vpp event queue  */	\
-  _(u8, is_dgram)			/**< flag for dgram mode */	\
+#define foreach_app_session_field                                             \
+  _ (svm_fifo_t, *rx_fifo)		 /**< rx fifo */                      \
+  _ (svm_fifo_t, *tx_fifo)		 /**< tx fifo */                      \
+  _ (session_type_t, session_type)	 /**< session type */                 \
+  _ (volatile u8, session_state)	 /**< session state */                \
+  _ (u32, session_index)		 /**< index in owning pool */         \
+  _ (app_session_transport_t, transport) /**< transport info */               \
+  _ (svm_msg_q_t, *vpp_evt_q)		 /**< vpp event queue  */             \
+  _ (u8, is_dgram)			 /**< flag for dgram mode */
 
 typedef struct
 {
@@ -386,6 +389,8 @@ typedef struct session_accepted_msg_
   transport_endpoint_t lcl;
   transport_endpoint_t rmt;
   u8 flags;
+  u32 original_dst_ip4;
+  u16 original_dst_port;
 } __clib_packed session_accepted_msg_t;
 
 typedef struct session_accepted_reply_msg_

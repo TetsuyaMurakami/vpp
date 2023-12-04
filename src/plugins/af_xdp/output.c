@@ -1,5 +1,5 @@
-#include <poll.h>
 #include <string.h>
+#include <vppinfra/clib.h>
 #include <vlib/vlib.h>
 #include <vlib/unix/unix.h>
 #include <vnet/ethernet/ethernet.h>
@@ -101,11 +101,19 @@ af_xdp_device_output_tx_db (vlib_main_t * vm,
 
   if (xsk_ring_prod__needs_wakeup (&txq->tx))
     {
-      struct pollfd fd = { .fd = txq->xsk_fd, .events = POLLIN | POLLOUT };
-      int ret = poll (&fd, 1, 0);
+      const struct msghdr msg = {};
+      int ret;
+      /* On tx, xsk socket will only tx up to TX_BATCH_SIZE, as defined in
+       * kernel net/xdp/xsk.c. Unfortunately we do not know how much this is,
+       * our only option is to retry until everything is sent... */
+      do
+	{
+	  ret = sendmsg (txq->xsk_fd, &msg, MSG_DONTWAIT);
+	}
+      while (ret < 0 && EAGAIN == errno);
       if (PREDICT_FALSE (ret < 0))
 	{
-	  /* something bad is happening */
+	  /* not EAGAIN: something bad is happening */
 	  vlib_error_count (vm, node->node_index,
 			    AF_XDP_TX_ERROR_SYSCALL_FAILURES, 1);
 	  af_xdp_device_error (ad, "tx poll() failed");
@@ -147,6 +155,14 @@ wrap_around:
 
   while (n >= 8)
     {
+      if (PREDICT_FALSE (b[0]->flags & VLIB_BUFFER_NEXT_PRESENT ||
+			 b[1]->flags & VLIB_BUFFER_NEXT_PRESENT ||
+			 b[2]->flags & VLIB_BUFFER_NEXT_PRESENT ||
+			 b[3]->flags & VLIB_BUFFER_NEXT_PRESENT))
+	{
+	  break;
+	}
+
       vlib_prefetch_buffer_header (b[4], LOAD);
       offset =
 	(sizeof (vlib_buffer_t) +
@@ -186,6 +202,17 @@ wrap_around:
 
   while (n >= 1)
     {
+      if (PREDICT_FALSE (b[0]->flags & VLIB_BUFFER_NEXT_PRESENT))
+	{
+	  if (vlib_buffer_chain_linearize (vm, b[0]) != 1)
+	    {
+	      af_xdp_log (VLIB_LOG_LEVEL_ERR, ad,
+			  "vlib_buffer_chain_linearize failed");
+	      vlib_buffer_free_one (vm, vlib_get_buffer_index (vm, b[0]));
+	      continue;
+	    }
+	}
+
       offset =
 	(sizeof (vlib_buffer_t) +
 	 b[0]->current_data) << XSK_UNALIGNED_BUF_OFFSET_SHIFT;

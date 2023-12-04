@@ -190,6 +190,9 @@ vlib_api_init (void)
   foreach_vlib_api_msg;
 #undef _
 
+  /* Mark messages as mp safe */
+  vl_api_set_msg_thread_safe (am, VL_API_GET_FIRST_MSG_ID, 1);
+  vl_api_set_msg_thread_safe (am, VL_API_API_VERSIONS, 1);
   vl_api_set_msg_thread_safe (am, VL_API_CONTROL_PING, 1);
   vl_api_set_msg_thread_safe (am, VL_API_CONTROL_PING_REPLY, 1);
 
@@ -726,6 +729,7 @@ rpc_api_hookup (vlib_main_t *vm)
     .id = VL_API_##N,                                                         \
     .name = #n,                                                               \
     .handler = vl_api_##n##_t_handler,                                        \
+    .endian = vl_api_##n##_t_endian,                                          \
     .format_fn = vl_api_##n##_t_format,                                       \
     .size = sizeof (vl_api_##n##_t),                                          \
     .traced = 1,                                                              \

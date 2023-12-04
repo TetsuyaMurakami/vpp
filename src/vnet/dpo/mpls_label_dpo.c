@@ -84,6 +84,7 @@ mpls_label_dpo_create (fib_mpls_label_t *label_stack,
 
     mld = mpls_label_dpo_alloc();
     mld->mld_flags = flags;
+    mld->mld_payload_proto = payload_proto;
     dtype = mpls_label_dpo_types[flags];
 
     if (MPLS_LABEL_DPO_MAX_N_LABELS < vec_len(label_stack))
@@ -92,13 +93,12 @@ mpls_label_dpo_create (fib_mpls_label_t *label_stack,
         dpo_stack(dtype,
                   mld->mld_payload_proto,
                   &mld->mld_dpo,
-                  drop_dpo_get(DPO_PROTO_MPLS));
+                  drop_dpo_get(mld->mld_payload_proto));
     }
     else
     {
         mld->mld_n_labels = vec_len(label_stack);
         mld->mld_n_hdr_bytes = mld->mld_n_labels * sizeof(mld->mld_hdr[0]);
-        mld->mld_payload_proto = payload_proto;
 
         /*
          * construct label rewrite headers for each value passed.
@@ -398,22 +398,22 @@ mpls_label_imposition_inline (vlib_main_t * vm,
 
             /* Prefetch next iteration. */
             {
-                vlib_buffer_t * p2, * p3, *p4, *p5;
+	      vlib_buffer_t *p4, *p5, *p6, *p7;
 
-                p2 = vlib_get_buffer (vm, from[2]);
-                p3 = vlib_get_buffer (vm, from[3]);
-                p4 = vlib_get_buffer (vm, from[4]);
-                p5 = vlib_get_buffer (vm, from[5]);
+	      p4 = vlib_get_buffer (vm, from[4]);
+	      p5 = vlib_get_buffer (vm, from[5]);
+	      p6 = vlib_get_buffer (vm, from[6]);
+	      p7 = vlib_get_buffer (vm, from[7]);
 
-                vlib_prefetch_buffer_header (p2, STORE);
-                vlib_prefetch_buffer_header (p3, STORE);
-                vlib_prefetch_buffer_header (p4, STORE);
-                vlib_prefetch_buffer_header (p5, STORE);
+	      vlib_prefetch_buffer_header (p4, STORE);
+	      vlib_prefetch_buffer_header (p5, STORE);
+	      vlib_prefetch_buffer_header (p6, STORE);
+	      vlib_prefetch_buffer_header (p7, STORE);
 
-                CLIB_PREFETCH (p2->data, sizeof (hdr0[0]), STORE);
-                CLIB_PREFETCH (p3->data, sizeof (hdr0[0]), STORE);
-                CLIB_PREFETCH (p4->data, sizeof (hdr0[0]), STORE);
-                CLIB_PREFETCH (p5->data, sizeof (hdr0[0]), STORE);
+	      CLIB_PREFETCH (p4->data, sizeof (hdr0[0]), STORE);
+	      CLIB_PREFETCH (p5->data, sizeof (hdr0[0]), STORE);
+	      CLIB_PREFETCH (p6->data, sizeof (hdr0[0]), STORE);
+	      CLIB_PREFETCH (p7->data, sizeof (hdr0[0]), STORE);
             }
 
             from += 4;

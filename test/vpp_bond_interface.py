@@ -1,4 +1,3 @@
-from vpp_object import VppObject
 from vpp_interface import VppInterface
 
 
@@ -16,7 +15,6 @@ class VppBondInterface(VppInterface):
         mac_address="",
         id=0xFFFFFFFF,
     ):
-
         """Create VPP Bond interface"""
         super(VppBondInterface, self).__init__(test)
         self.mode = mode

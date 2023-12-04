@@ -88,6 +88,7 @@ ipsec_sa_add_del_command_fn (vlib_main_t * vm,
   unformat_input_t _line_input, *line_input = &_line_input;
   ipsec_crypto_alg_t crypto_alg;
   ipsec_integ_alg_t integ_alg;
+  u32 anti_replay_window_size;
   ipsec_protocol_t proto;
   ipsec_sa_flags_t flags;
   clib_error_t *error;
@@ -105,6 +106,7 @@ ipsec_sa_add_del_command_fn (vlib_main_t * vm,
   is_add = 0;
   flags = IPSEC_SA_FLAG_NONE;
   proto = IPSEC_PROTOCOL_ESP;
+  anti_replay_window_size = 0;
   integ_alg = IPSEC_INTEG_ALG_NONE;
   crypto_alg = IPSEC_CRYPTO_ALG_NONE;
   udp_src = udp_dst = IPSEC_UDP_PORT_NONE;
@@ -153,6 +155,9 @@ ipsec_sa_add_del_command_fn (vlib_main_t * vm,
 	udp_src = i;
       else if (unformat (line_input, "udp-dst-port %d", &i))
 	udp_dst = i;
+      else if (unformat (line_input, "anti-replay-size %d",
+			 &anti_replay_window_size))
+	flags |= IPSEC_SA_FLAG_USE_ANTI_REPLAY;
       else if (unformat (line_input, "inbound"))
 	flags |= IPSEC_SA_FLAG_IS_INBOUND;
       else if (unformat (line_input, "use-anti-replay"))
@@ -184,9 +189,10 @@ ipsec_sa_add_del_command_fn (vlib_main_t * vm,
 	  error = clib_error_return (0, "missing spi");
 	  goto done;
 	}
-      rv = ipsec_sa_add_and_lock (id, spi, proto, crypto_alg, &ck, integ_alg,
-				  &ik, flags, clib_host_to_net_u32 (salt),
-				  udp_src, udp_dst, &tun, &sai);
+      rv =
+	ipsec_sa_add_and_lock (id, spi, proto, crypto_alg, &ck, integ_alg, &ik,
+			       flags, clib_host_to_net_u32 (salt), udp_src,
+			       udp_dst, anti_replay_window_size, &tun, &sai);
     }
   else
     {
@@ -210,6 +216,71 @@ VLIB_CLI_COMMAND (ipsec_sa_add_del_command, static) = {
     .function = ipsec_sa_add_del_command_fn,
 };
 /* *INDENT-ON* */
+
+static clib_error_t *
+ipsec_sa_bind_cli (vlib_main_t *vm, unformat_input_t *input,
+		   vlib_cli_command_t *cmd)
+{
+  unformat_input_t _line_input, *line_input = &_line_input;
+  u32 id = ~0;
+  u32 worker = ~0;
+  bool bind = 1;
+  int rv;
+  clib_error_t *error = NULL;
+
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "unbind"))
+	bind = 0;
+      else if (id == ~0 && unformat (line_input, "%u", &id))
+	;
+      else if (unformat (line_input, "%u", &worker))
+	;
+      else
+	{
+	  error = clib_error_return (0, "parse error: '%U'",
+				     format_unformat_error, line_input);
+	  goto done;
+	}
+    }
+
+  if (id == ~0)
+    {
+      error = clib_error_return (0, "please specify SA ID");
+      goto done;
+    }
+
+  if (bind && ~0 == worker)
+    {
+      error = clib_error_return (0, "please specify worker to bind to");
+      goto done;
+    }
+
+  rv = ipsec_sa_bind (id, worker, bind);
+  switch (rv)
+    {
+    case VNET_API_ERROR_INVALID_VALUE:
+      error = clib_error_return (0, "please specify a valid SA ID");
+      break;
+    case VNET_API_ERROR_INVALID_WORKER:
+      error = clib_error_return (0, "please specify a valid worker index");
+      break;
+    }
+
+done:
+  unformat_free (line_input);
+
+  return error;
+}
+
+VLIB_CLI_COMMAND (ipsec_sa_bind_cmd, static) = {
+  .path = "ipsec sa bind",
+  .short_help = "ipsec sa [unbind] <sa-id> <worker>",
+  .function = ipsec_sa_bind_cli,
+};
 
 static clib_error_t *
 ipsec_spd_add_del_command_fn (vlib_main_t * vm,

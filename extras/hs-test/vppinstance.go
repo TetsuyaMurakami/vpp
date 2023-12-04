@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -55,6 +56,8 @@ plugins {
   plugin af_packet_plugin.so { enable }
   plugin hs_apps_plugin.so { enable }
   plugin http_plugin.so { enable }
+  plugin http_static_plugin.so { enable }
+  plugin prom_plugin.so { enable }
 }
 
 logging {
@@ -72,9 +75,10 @@ const (
 
 type VppInstance struct {
 	container        *Container
-	additionalConfig Stanza
+	additionalConfig []Stanza
 	connection       *core.Connection
 	apiChannel       api.Channel
+	cpus             []int
 }
 
 func (vpp *VppInstance) getSuite() *HstSuite {
@@ -113,7 +117,10 @@ func (vpp *VppInstance) start() error {
 		defaultApiSocketFilePath,
 		defaultLogFilePath,
 	)
-	configContent += vpp.additionalConfig.toString()
+	configContent += vpp.generateCpuConfig()
+	for _, c := range vpp.additionalConfig {
+		configContent += c.toString()
+	}
 	startupFileName := vpp.getEtcDir() + "/startup.conf"
 	vpp.container.createFile(startupFileName, configContent)
 
@@ -132,10 +139,9 @@ func (vpp *VppInstance) start() error {
 			cont <- true
 		}()
 
-		// Start VPP in GDB and wait for user to attach it
-		vpp.container.execServer("su -c \"gdb -ex run --args vpp -c " + startupFileName + " &> /proc/1/fd/1\"")
+		vpp.container.execServer("su -c \"vpp -c " + startupFileName + " &> /proc/1/fd/1\"")
 		fmt.Println("run following command in different terminal:")
-		fmt.Println("docker exec -it " + vpp.container.name + " gdb -ex \"attach $(docker exec " + vpp.container.name + " pidof gdb)\"")
+		fmt.Println("docker exec -it " + vpp.container.name + " gdb -ex \"attach $(docker exec " + vpp.container.name + " pidof vpp)\"")
 		fmt.Println("Afterwards press CTRL+C to continue")
 		<-cont
 		fmt.Println("continuing...")
@@ -188,6 +194,23 @@ func (vpp *VppInstance) vppctl(command string, arguments ...any) string {
 	return string(output)
 }
 
+func (vpp *VppInstance) GetSessionStat(stat string) int {
+	o := vpp.vppctl("show session stats")
+	vpp.getSuite().log(o)
+	for _, line := range strings.Split(o, "\n") {
+		if strings.Contains(line, stat) {
+			tokens := strings.Split(strings.TrimSpace(line), " ")
+			val, err := strconv.Atoi(tokens[0])
+			if err != nil {
+				vpp.getSuite().FailNow("failed to parse stat value %s", err)
+				return 0
+			}
+			return val
+		}
+	}
+	return 0
+}
+
 func (vpp *VppInstance) waitForApp(appName string, timeout int) {
 	for i := 0; i < timeout; i++ {
 		o := vpp.vppctl("show app")
@@ -232,7 +255,7 @@ func (vpp *VppInstance) createAfPacket(
 	if veth.addressWithPrefix() == (AddressWithPrefix{}) {
 		var err error
 		var ip4Address string
-		if ip4Address, err = veth.addresser.newIp4Address(veth.peer.networkNumber); err == nil {
+		if ip4Address, err = veth.ip4AddrAllocator.NewIp4InterfaceAddress(veth.peer.networkNumber); err == nil {
 			veth.ip4Address = ip4Address
 		} else {
 			return 0, err
@@ -340,4 +363,26 @@ func (vpp *VppInstance) saveLogs() {
 func (vpp *VppInstance) disconnect() {
 	vpp.connection.Disconnect()
 	vpp.apiChannel.Close()
+}
+
+func (vpp *VppInstance) generateCpuConfig() string {
+	var c Stanza
+	var s string
+	if len(vpp.cpus) < 1 {
+		return ""
+	}
+	c.newStanza("cpu").
+		append(fmt.Sprintf("main-core %d", vpp.cpus[0]))
+	workers := vpp.cpus[1:]
+
+	if len(workers) > 0 {
+		for i := 0; i < len(workers); i++ {
+			if i != 0 {
+				s = s + ", "
+			}
+			s = s + fmt.Sprintf("%d", workers[i])
+		}
+		c.append(fmt.Sprintf("corelist-workers %s", s))
+	}
+	return c.close().toString()
 }

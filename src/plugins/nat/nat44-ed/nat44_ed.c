@@ -1352,9 +1352,10 @@ nat44_ed_add_lb_static_mapping (ip4_address_t e_addr, u16 e_port,
 	FIB_PROTOCOL_IP4, locals[i].vrf_id, sm->fib_src_low);
       if (!is_sm_out2in_only (flags))
 	{
-	  if (nat44_ed_sm_o2i_add (sm, m, e_addr, e_port, 0, proto))
+	  if (nat44_ed_sm_i2o_add (sm, m, locals[i].addr, locals[i].port, 0,
+				   proto))
 	    {
-	      nat_log_err ("sm o2i key add failed");
+	      nat_log_err ("sm i2o key add failed");
 	      rc = VNET_API_ERROR_UNSPECIFIED;
 	      // here we continue with add operation so that it can be safely
 	      // reversed in delete path - otherwise we'd have to track what
@@ -1430,7 +1431,7 @@ nat44_ed_del_lb_static_mapping (ip4_address_t e_addr, u16 e_port,
 				   local->fib_index, m->proto))
 	    {
 	      nat_log_err ("sm i2o key del failed");
-	      return VNET_API_ERROR_UNSPECIFIED;
+	      // For the same reasons as above
 	    }
 	}
 
@@ -3044,7 +3045,9 @@ nat44_ed_get_in2out_worker_index (vlib_buffer_t *b, ip4_header_t *ip,
     }
 
   hash = ip->src_address.as_u32 + (ip->src_address.as_u32 >> 8) +
-    (ip->src_address.as_u32 >> 16) + (ip->src_address.as_u32 >> 24);
+	 (ip->src_address.as_u32 >> 16) + (ip->src_address.as_u32 >> 24) +
+	 rx_fib_index + (rx_fib_index >> 8) + (rx_fib_index >> 16) +
+	 (rx_fib_index >> 24);
 
   if (PREDICT_TRUE (is_pow2 (_vec_len (sm->workers))))
     next_worker_index += sm->workers[hash & (_vec_len (sm->workers) - 1)];
@@ -3237,16 +3240,12 @@ nat44_set_session_limit (u32 session_limit, u32 vrf_id)
 {
   snat_main_t *sm = &snat_main;
   u32 fib_index = fib_table_find (FIB_PROTOCOL_IP4, vrf_id);
-  u32 len = vec_len (sm->max_translations_per_fib);
 
-  if (len <= fib_index)
-    {
-      vec_validate (sm->max_translations_per_fib, fib_index + 1);
+  if (~0 == fib_index)
+    return -1;
 
-      for (; len < vec_len (sm->max_translations_per_fib); len++)
-	sm->max_translations_per_fib[len] = sm->max_translations_per_thread;
-    }
-
+  vec_validate_init_empty (sm->max_translations_per_fib, fib_index,
+			   sm->max_translations_per_thread);
   sm->max_translations_per_fib[fib_index] = session_limit;
   return 0;
 }
@@ -4102,7 +4101,49 @@ nat_syslog_nat44_sdel (u32 ssubix, u32 sfibix, ip4_address_t *isaddr,
 			 idaddr, idport, xdaddr, xdport, proto, 0,
 			 is_twicenat);
 }
+__clib_export void
+nat44_original_dst_lookup (ip4_address_t *i2o_src, u16 i2o_src_port,
+			   ip4_address_t *i2o_dst, u16 i2o_dst_port,
+			   ip_protocol_t proto, u32 *original_dst,
+			   u16 *original_dst_port)
+{
+  snat_main_per_thread_data_t *tsm;
+  snat_main_t *sm = &snat_main;
+  u32 fib_index = 0;
+  snat_session_t *s;
+  ip4_header_t ip;
 
+  ip.src_address.as_u32 = i2o_src->as_u32;
+  fib_index = fib_table_find (FIB_PROTOCOL_IP4, 0);
+
+  if (sm->num_workers > 1)
+    {
+      tsm = vec_elt_at_index (
+	sm->per_thread_data,
+	nat44_ed_get_in2out_worker_index (0, &ip, fib_index, 0));
+    }
+  else
+    {
+      tsm = vec_elt_at_index (sm->per_thread_data, sm->num_workers);
+    }
+
+  /* query */
+  clib_bihash_kv_16_8_t kv = { 0 }, value;
+  init_ed_k (&kv, i2o_src->as_u32, i2o_src_port, i2o_dst->as_u32, i2o_dst_port,
+	     fib_index, proto);
+  if (tsm->sessions == NULL ||
+      clib_bihash_search_16_8 (&sm->flow_hash, &kv, &value))
+    {
+      return;
+    }
+  s = pool_elt_at_index (tsm->sessions, ed_value_get_session_index (&value));
+  if (s)
+    {
+      *original_dst = s->i2o.rewrite.saddr.as_u32;
+      *original_dst_port = s->i2o.rewrite.sport;
+    }
+  return;
+}
 /*
  * fd.io coding-style-patch-verification: ON
  *

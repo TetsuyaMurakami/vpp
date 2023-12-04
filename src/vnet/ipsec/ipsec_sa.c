@@ -136,6 +136,13 @@ ipsec_sa_set_crypto_alg (ipsec_sa_t * sa, ipsec_crypto_alg_t crypto_alg)
     {
       ipsec_sa_set_IS_CTR (sa);
     }
+  else if (IPSEC_CRYPTO_ALG_IS_NULL_GMAC (crypto_alg))
+    {
+      sa->integ_icv_size = im->crypto_algs[crypto_alg].icv_size;
+      ipsec_sa_set_IS_CTR (sa);
+      ipsec_sa_set_IS_AEAD (sa);
+      ipsec_sa_set_IS_NULL_GMAC (sa);
+    }
 }
 
 void
@@ -322,7 +329,8 @@ ipsec_sa_add_and_lock (u32 id, u32 spi, ipsec_protocol_t proto,
 		       ipsec_crypto_alg_t crypto_alg, const ipsec_key_t *ck,
 		       ipsec_integ_alg_t integ_alg, const ipsec_key_t *ik,
 		       ipsec_sa_flags_t flags, u32 salt, u16 src_port,
-		       u16 dst_port, const tunnel_t *tun, u32 *sa_out_index)
+		       u16 dst_port, u32 anti_replay_window_size,
+		       const tunnel_t *tun, u32 *sa_out_index)
 {
   vlib_main_t *vm = vlib_get_main ();
   ipsec_main_t *im = &ipsec_main;
@@ -372,6 +380,9 @@ ipsec_sa_add_and_lock (u32 id, u32 spi, ipsec_protocol_t proto,
   ipsec_sa_set_crypto_alg (sa, crypto_alg);
   ipsec_sa_set_async_op_ids (sa);
 
+  if (ipsec_sa_is_set_USE_ANTI_REPLAY (sa) && anti_replay_window_size > 64)
+    ipsec_sa_set_ANTI_REPLAY_HUGE (sa);
+
   clib_memcpy (&sa->crypto_key, ck, sizeof (sa->crypto_key));
 
   sa->crypto_sync_key_index = vnet_crypto_key_add (
@@ -406,7 +417,6 @@ ipsec_sa_add_and_lock (u32 id, u32 spi, ipsec_protocol_t proto,
     }
   else if (ipsec_sa_is_set_IS_ASYNC (sa))
     {
-      vnet_crypto_request_async_mode (1);
       ipsec_sa_set_async_mode (sa, 1 /* is_enabled */);
     }
   else
@@ -417,7 +427,7 @@ ipsec_sa_add_and_lock (u32 id, u32 spi, ipsec_protocol_t proto,
   err = ipsec_check_support_cb (im, sa);
   if (err)
     {
-      clib_warning ("%s", err->what);
+      clib_warning ("%v", err->what);
       pool_put (ipsec_sa_pool, sa);
       return VNET_API_ERROR_UNIMPLEMENTED;
     }
@@ -482,6 +492,18 @@ ipsec_sa_add_and_lock (u32 id, u32 spi, ipsec_protocol_t proto,
 				 !ipsec_sa_is_set_IS_TUNNEL_V6 (sa));
     }
 
+  /* window size rounded up to next power of 2 */
+  if (ipsec_sa_is_set_ANTI_REPLAY_HUGE (sa))
+    {
+      anti_replay_window_size = 1 << max_log2 (anti_replay_window_size);
+      sa->replay_window_huge =
+	clib_bitmap_set_region (0, 0, 1, anti_replay_window_size);
+    }
+  else
+    {
+      sa->replay_window = ~0;
+    }
+
   hash_set (im->sa_index_by_sa_id, sa->id, sa_index);
 
   if (sa_out_index)
@@ -506,7 +528,6 @@ ipsec_sa_del (ipsec_sa_t * sa)
 
   if (ipsec_sa_is_set_IS_ASYNC (sa))
     {
-      vnet_crypto_request_async_mode (0);
       if (!ipsec_sa_is_set_IS_AEAD (sa))
 	vnet_crypto_key_del (vm, sa->crypto_async_key_index);
     }
@@ -520,7 +541,35 @@ ipsec_sa_del (ipsec_sa_t * sa)
   vnet_crypto_key_del (vm, sa->crypto_sync_key_index);
   if (sa->integ_alg != IPSEC_INTEG_ALG_NONE)
     vnet_crypto_key_del (vm, sa->integ_sync_key_index);
+  if (ipsec_sa_is_set_ANTI_REPLAY_HUGE (sa))
+    clib_bitmap_free (sa->replay_window_huge);
   pool_put (ipsec_sa_pool, sa);
+}
+
+int
+ipsec_sa_bind (u32 id, u32 worker, bool bind)
+{
+  ipsec_main_t *im = &ipsec_main;
+  uword *p;
+  ipsec_sa_t *sa;
+
+  p = hash_get (im->sa_index_by_sa_id, id);
+  if (!p)
+    return VNET_API_ERROR_INVALID_VALUE;
+
+  sa = ipsec_sa_get (p[0]);
+
+  if (!bind)
+    {
+      sa->thread_index = ~0;
+      return 0;
+    }
+
+  if (worker >= vlib_num_workers ())
+    return VNET_API_ERROR_INVALID_WORKER;
+
+  sa->thread_index = vlib_get_worker_thread_index (worker);
+  return 0;
 }
 
 void
@@ -620,19 +669,18 @@ ipsec_sa_fib_node_get (fib_node_index_t index)
 }
 
 static ipsec_sa_t *
-ipsec_sa_from_fib_node (fib_node_t * node)
+ipsec_sa_from_fib_node (fib_node_t *node)
 {
   ASSERT (FIB_NODE_TYPE_IPSEC_SA == node->fn_type);
-  return ((ipsec_sa_t *) (((char *) node) -
-			  STRUCT_OFFSET_OF (ipsec_sa_t, node)));
-
+  return (
+    (ipsec_sa_t *) (((char *) node) - STRUCT_OFFSET_OF (ipsec_sa_t, node)));
 }
 
 /**
  * Function definition to inform the FIB node that its last lock has gone.
  */
 static void
-ipsec_sa_last_lock_gone (fib_node_t * node)
+ipsec_sa_last_lock_gone (fib_node_t *node)
 {
   /*
    * The ipsec SA is a root of the graph. As such
@@ -645,7 +693,7 @@ ipsec_sa_last_lock_gone (fib_node_t * node)
  * Function definition to backwalk a FIB node
  */
 static fib_node_back_walk_rc_t
-ipsec_sa_back_walk (fib_node_t * node, fib_node_back_walk_ctx_t * ctx)
+ipsec_sa_back_walk (fib_node_t *node, fib_node_back_walk_ctx_t *ctx)
 {
   ipsec_sa_stack (ipsec_sa_from_fib_node (node));
 

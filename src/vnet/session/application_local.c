@@ -194,6 +194,12 @@ ct_set_invalid_app_wrk (ct_connection_t *ct, u8 is_client)
     }
 }
 
+static inline u64
+ct_client_seg_handle (u64 server_sh, u32 client_wrk_index)
+{
+  return (((u64) client_wrk_index << 56) | server_sh);
+}
+
 static void
 ct_session_dealloc_fifos (ct_connection_t *ct, svm_fifo_t *rx_fifo,
 			  svm_fifo_t *tx_fifo)
@@ -314,7 +320,8 @@ ct_session_dealloc_fifos (ct_connection_t *ct, svm_fifo_t *rx_fifo,
       segment_manager_t *csm;
       csm = app_worker_get_connect_segment_manager (app_wrk);
       if (!segment_manager_app_detached (csm))
-	app_worker_del_segment_notify (app_wrk, ct->segment_handle);
+	app_worker_del_segment_notify (
+	  app_wrk, ct_client_seg_handle (ct->segment_handle, ct->client_wrk));
     }
 
   /* Notify server app and free segment */
@@ -379,6 +386,7 @@ ct_session_connect_notify (session_t *ss, session_error_t err)
   session_set_state (cs, SESSION_STATE_CONNECTING);
   cs->app_wrk_index = client_wrk->wrk_index;
   cs->connection_index = cct->c_c_index;
+  cs->opaque = opaque;
   cct->c_s_index = cs->session_index;
 
   /* This will allocate fifos for the session. They won't be used for
@@ -454,11 +462,11 @@ ct_alloc_segment (ct_main_t *cm, app_worker_t *server_wrk, u64 table_handle,
 		  segment_manager_t *sm, u32 client_wrk_index)
 {
   u32 seg_ctx_index = ~0, sm_index, pair_bytes;
+  u64 seg_size, seg_handle, client_seg_handle;
   segment_manager_props_t *props;
   const u32 margin = 16 << 10;
   ct_segments_ctx_t *seg_ctx;
   app_worker_t *client_wrk;
-  u64 seg_size, seg_handle;
   application_t *server;
   ct_segment_t *ct_seg;
   uword *spp;
@@ -520,7 +528,11 @@ ct_alloc_segment (ct_main_t *cm, app_worker_t *server_wrk, u64 table_handle,
     goto error;
 
   client_wrk = app_worker_get (client_wrk_index);
-  if (app_worker_add_segment_notify (client_wrk, seg_handle))
+  /* Make sure client workers do not have overlapping segment handles.
+   * Ideally, we should attach fs to client worker segment manager and
+   * create a new handle but that's not currently possible. */
+  client_seg_handle = ct_client_seg_handle (seg_handle, client_wrk_index);
+  if (app_worker_add_segment_notify (client_wrk, client_seg_handle))
     {
       app_worker_del_segment_notify (server_wrk, seg_handle);
       goto error;
@@ -737,7 +749,8 @@ ct_accept_one (u32 thread_index, u32 ho_index)
   cct->client_tx_fifo = ss->rx_fifo;
   cct->client_rx_fifo->refcnt++;
   cct->client_tx_fifo->refcnt++;
-  cct->segment_handle = sct->segment_handle;
+  cct->segment_handle =
+    ct_client_seg_handle (sct->segment_handle, cct->client_wrk);
 
   session_set_state (ss, SESSION_STATE_ACCEPTING);
   if (app_worker_accept_notify (server_wrk, ss))
@@ -1028,6 +1041,17 @@ ct_close_is_reset (ct_connection_t *ct, session_t *s)
 }
 
 static void
+ct_session_cleanup_server_session (session_t *s)
+{
+  ct_connection_t *ct;
+
+  ct = (ct_connection_t *) session_get_transport (s);
+  ct_session_dealloc_fifos (ct, s->rx_fifo, s->tx_fifo);
+  session_free (s);
+  ct_connection_free (ct);
+}
+
+static void
 ct_session_postponed_cleanup (ct_connection_t *ct)
 {
   ct_connection_t *peer_ct;
@@ -1047,33 +1071,38 @@ ct_session_postponed_cleanup (ct_connection_t *ct)
     }
   session_transport_closed_notify (&ct->connection);
 
+  /* It would be cleaner to call session_transport_delete_notify
+   * but then we can't control session cleanup lower */
+  session_set_state (s, SESSION_STATE_TRANSPORT_DELETED);
+  if (app_wrk)
+    app_worker_cleanup_notify (app_wrk, s, SESSION_CLEANUP_TRANSPORT);
+
   if (ct->flags & CT_CONN_F_CLIENT)
     {
-      if (app_wrk)
-	app_worker_cleanup_notify (app_wrk, s, SESSION_CLEANUP_TRANSPORT);
-
       /* Normal free for client session as the fifos are allocated through
        * the connects segment manager in a segment that's not shared with
        * the server */
       ct_session_dealloc_fifos (ct, ct->client_rx_fifo, ct->client_tx_fifo);
-      session_free_w_fifos (s);
+      session_program_cleanup (s);
+      ct_connection_free (ct);
     }
   else
     {
       /* Manual session and fifo segment cleanup to avoid implicit
        * segment manager cleanups and notifications */
-      app_wrk = app_worker_get_if_valid (s->app_wrk_index);
       if (app_wrk)
 	{
-	  app_worker_cleanup_notify (app_wrk, s, SESSION_CLEANUP_TRANSPORT);
-	  app_worker_cleanup_notify (app_wrk, s, SESSION_CLEANUP_SESSION);
+	  /* Remove custom cleanup notify infra when/if switching to normal
+	   * session cleanup. Note that ct is freed in the cb function */
+	  app_worker_cleanup_notify_custom (app_wrk, s,
+					    SESSION_CLEANUP_SESSION,
+					    ct_session_cleanup_server_session);
 	}
-
-      ct_session_dealloc_fifos (ct, s->rx_fifo, s->tx_fifo);
-      session_free (s);
+      else
+	{
+	  ct_connection_free (ct);
+	}
     }
-
-  ct_connection_free (ct);
 }
 
 static void

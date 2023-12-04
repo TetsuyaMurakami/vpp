@@ -1,28 +1,14 @@
 #!/usr/bin/env python3
 
 import unittest
-import os
-from socket import AF_INET6, inet_pton, inet_ntop
+from socket import inet_pton, inet_ntop
 
-from framework import tag_fixme_vpp_workers
-from framework import VppTestCase, VppTestRunner
-from vpp_neighbor import VppNeighbor, find_nbr
-from vpp_ip_route import (
-    VppIpRoute,
-    VppRoutePath,
-    find_route,
-    VppIpTable,
-    DpoProto,
-    FibPathType,
-    VppIpInterfaceAddress,
-)
-from vpp_papi import VppEnum
+from framework import VppTestCase
+from asfframework import VppTestRunner
+
 from vpp_ip import VppIpPuntRedirect
 
-import scapy.compat
-from scapy.packet import Raw
-from scapy.layers.l2 import Ether, ARP, Dot1Q
-from scapy.layers.inet import IP, UDP, TCP
+from scapy.layers.l2 import Ether
 from scapy.layers.inet6 import (
     IPv6,
     ipv6nh,
@@ -33,7 +19,7 @@ from scapy.layers.inet6 import (
     ICMPv6EchoRequest,
     ICMPv6EchoReply,
 )
-from scapy.utils6 import in6_ptop, in6_getnsma, in6_getnsmac, in6_ismaddr
+from scapy.utils6 import in6_ptop, in6_getnsma, in6_getnsmac
 
 
 class TestNDPROXY(VppTestCase):
@@ -121,7 +107,7 @@ class TestNDPROXY(VppTestCase):
         rx = self.send_and_expect(self.pg1, [unicast_nd_req_from_host], self.pg0)
         self.assertEqual(rx[0][Ether].src, self.pg0.local_mac)
         self.assertEqual(rx[0][Ether].dst, in6_getnsmac(nsma))
-        self.assertEqual(rx[0][IPv6].src, self.pg0.local_ip6)
+        self.assertEqual(rx[0][IPv6].src, self.pg0.local_ip6_ll)
         self.assertEqual(rx[0][IPv6].dst, d)
         self.assertEqual(ipv6nh[rx[0][IPv6].nh], "ICMPv6")
         self.assertEqual(rx[0][ICMPv6ND_NS].tgt, self.pg0.remote_ip6)

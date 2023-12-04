@@ -74,13 +74,13 @@ V=0
 endif
 
 PYTHON_VERSION=$(shell $(PYTHON_INTERP) -c 'import sys; print(sys.version_info.major)')
-PIP_VERSION=22.0.4
+PIP_VERSION=23.3.1
 # Keep in sync with requirements.txt
-PIP_TOOLS_VERSION=6.6.0
-PIP_SETUPTOOLS_VERSION=62.1.0
+PIP_TOOLS_VERSION=7.3.0
+PIP_SETUPTOOLS_VERSION=68.1.0
 PYTHON_DEPENDS=requirements-$(PYTHON_VERSION).txt
 SCAPY_SOURCE=$(shell find $(VENV_PATH)/lib/python* -name site-packages)
-BUILD_COV_DIR=$(TEST_BR)/coverage
+BUILD_COV_DIR=$(BR)/test-coverage
 
 PIP_TOOLS_INSTALL_DONE=$(VENV_RUN_DIR)/pip-tools-install-$(PYTHON_VERSION)-$(PIP_TOOLS_VERSION).done
 PIP_INSTALL_DONE=$(VENV_RUN_DIR)/pip-install-$(PYTHON_VERSION)-$(PIP_VERSION).done
@@ -131,7 +131,7 @@ $(PAPI_INSTALL_DONE): $(PIP_PATCH_DONE)
 	@touch $@
 
 .PHONY: refresh-deps
-refresh-deps: clean-deps $(PYTHON_DEPENDS)
+refresh-deps: clean-deps $(PIP_INSTALL_DONE) $(PYTHON_DEPENDS)
 
 .PHONY: clean-deps
 clean-deps:
@@ -200,7 +200,7 @@ ARG6=--step
 endif
 
 ARG7=
-ifneq ($(findstring $(TESTS_GCOV),1 y yes),)
+ifneq ($(findstring $(TEST_GCOV),1 y yes),)
 ARG7=--gcov
 endif
 
@@ -254,9 +254,22 @@ ifneq ($(EXTERN_APIDIR),)
 ARG17=--extern-apidir=$(EXTERN_APIDIR)
 endif
 
-EXTRA_ARGS=$(ARG0) $(ARG1) $(ARG2) $(ARG3) $(ARG4) $(ARG5) $(ARG6) $(ARG7) $(ARG8) $(ARG9) $(ARG10) $(ARG11) $(ARG12) $(ARG13) $(ARG14) $(ARG15) $(ARG16) $(ARG17)
+ARG18=
+ifneq ($(findstring $(DECODE_PCAPS),1 y yes),)
+ARG18=--decode-pcaps
+endif
 
-RUN_TESTS_ARGS=--failed-dir=$(FAILED_DIR) --verbose=$(V) --jobs=$(TEST_JOBS) --filter=$(TEST) --retries=$(RETRIES) --venv-dir=$(VENV_PATH) --vpp-ws-dir=$(WS_ROOT) --vpp-tag=$(TAG) --rnd-seed=$(RND_SEED) --vpp-worker-count="$(VPP_WORKER_COUNT)" --keep-pcaps $(PLUGIN_PATH_ARGS) $(TEST_PLUGIN_PATH_ARGS) $(EXTRA_ARGS)
+EXC_PLUGINS_ARG=
+ifneq ($(VPP_EXCLUDED_PLUGINS),)
+# convert the comma-separated list into N invocations of the argument to exclude a plugin
+EXC_PLUGINS_ARG=$(shell echo "${VPP_EXCLUDED_PLUGINS}" | sed 's/\([^,]*\)/--excluded-plugin=\1/g; s/,/ /g')
+endif
+
+
+
+EXTRA_ARGS=$(ARG0) $(ARG1) $(ARG2) $(ARG3) $(ARG4) $(ARG5) $(ARG6) $(ARG7) $(ARG8) $(ARG9) $(ARG10) $(ARG11) $(ARG12) $(ARG13) $(ARG14) $(ARG15) $(ARG16) $(ARG17) $(ARG18)
+
+RUN_TESTS_ARGS=--failed-dir=$(FAILED_DIR) --verbose=$(V) --jobs=$(TEST_JOBS) --filter=$(TEST) --retries=$(RETRIES) --venv-dir=$(VENV_PATH) --vpp-ws-dir=$(WS_ROOT) --vpp-tag=$(TAG) --rnd-seed=$(RND_SEED) --vpp-worker-count="$(VPP_WORKER_COUNT)" --keep-pcaps $(PLUGIN_PATH_ARGS) $(EXC_PLUGINS_ARG) $(TEST_PLUGIN_PATH_ARGS) $(EXTRA_ARGS)
 RUN_SCRIPT_ARGS=--python-opts=$(PYTHON_OPTS)
 
 define retest-func
@@ -326,18 +339,41 @@ wipe: reset
 $(BUILD_COV_DIR):
 	@mkdir -p $@
 
-.PHONY: cov
-cov: wipe-cov test-dep ext $(BUILD_COV_DIR)
+.PHONY: cov-prep
+cov-prep: test-dep
 	@lcov --zerocounters --directory $(VPP_BUILD_DIR)
 	@test -z "$(EXTERN_COV_DIR)" || lcov --zerocounters --directory $(EXTERN_COV_DIR)
-	$(call retest-func)
-	@lcov --capture --directory $(VPP_BUILD_DIR) --output-file $(BUILD_COV_DIR)/coverage.info
-	@test -z "$(EXTERN_COV_DIR)" || lcov --capture --directory $(EXTERN_COV_DIR) --output-file $(BUILD_COV_DIR)/extern-coverage.info
-	@genhtml $(BUILD_COV_DIR)/coverage.info --output-directory $(BUILD_COV_DIR)/html
-	@test -z "$(EXTERN_COV_DIR)" || genhtml $(BUILD_COV_DIR)/extern-coverage.info --output-directory $(BUILD_COV_DIR)/extern-html
+
+.PHONY: cov-post
+cov-post: wipe-cov $(BUILD_COV_DIR)
+	@lcov --capture \
+		--directory $(VPP_BUILD_DIR) \
+		--output-file $(BUILD_COV_DIR)/coverage.info
+	@test -z "$(EXTERN_COV_DIR)" || \
+		lcov --capture \
+		--directory $(EXTERN_COV_DIR) \
+		--output-file $(BUILD_COV_DIR)/extern-coverage.info
+	@lcov --remove $(BUILD_COV_DIR)/coverage.info \
+		"/usr/include/*" "*/build-root/*" "/opt/*" "/usr/lib/*" \
+		"*_test.*" "*vat*" "*rdma*" "*/vpp-api/client/*" "*/plugins/af_packet/*" \
+		"*/plugins/af_xdp/*" "*/plugins/avf/*" "*/plugins/dma_intel/*" \
+		"*/plugins/hs_apps/*" "*/plugins/vmxnet3/*" "*/vnet/devices/virtio/*" \
+		"*/plugins/perfmon/arm*" "*/plugins/perfmon/intel/*" "*/vlib/vmbus/*" \
+		"*/vnet/dev/*" "*/plugins/dev_ena/*" "*/plugins/builtinurl/*" "*/vnet/flow/*" \
+		"*/plugins/http_static/builtinurl/*" "*/plugins/dev_iavf/*" \
+		-o $(BUILD_COV_DIR)/coverage-filtered.info
+	@genhtml $(BUILD_COV_DIR)/coverage-filtered.info \
+		--output-directory $(BUILD_COV_DIR)/html
+	@test -z "$(EXTERN_COV_DIR)" || \
+		genhtml $(BUILD_COV_DIR)/extern-coverage.info \
+			--output-directory $(BUILD_COV_DIR)/extern-html
 	@echo
 	@echo "Build finished. Code coverage report is in $(BUILD_COV_DIR)/html/index.html"
 	@test -z "$(EXTERN_COV_DIR)" || echo "Code coverage report for out-of-tree objects is in $(BUILD_COV_DIR)/extern-html/index.html"
+
+.PHONY: cov
+cov:
+	make -C . cov-prep test cov-post
 
 .PHONY: wipe-cov
 wipe-cov: wipe
@@ -388,14 +424,17 @@ help:
 	@echo ""
 	@echo " test                   - build and run (basic) functional tests"
 	@echo " test-debug             - build and run (basic) functional tests (debug build)"
+	@echo " test-cov               - generate code coverage report for functional tests"
+	@echo " test-cov-prep          - coverage phase #1 : prepare lcov"
+	@echo " test-cov-build         - coverage phase #2 : build gcov image & run tests against it (use TEST=)"
+	@echo " test-cov-post          - coverage phase #3 : generate lcov html report"
 	@echo " test-all               - build and run functional and extended tests"
 	@echo " test-all-debug         - build and run functional and extended tests (debug build)"
+	@echo " test-all-cov           - generate code coverage report for functional and extended tests"
 	@echo " retest                 - run functional tests"
 	@echo " retest-debug           - run functional tests (debug build)"
 	@echo " retest-all             - run functional and extended tests"
 	@echo " retest-all-debug       - run functional and extended tests (debug build)"
-	@echo " test-cov               - generate code coverage report for test framework"
-	@echo " test-gcov                      - build and run functional tests (gcov build)"
 	@echo " test-wipe              - wipe (temporary) files generated by unit tests"
 	@echo " test-wipe-cov          - wipe code coverage report for test framework"
 	@echo " test-wipe-papi         - rebuild vpp_papi sources"
@@ -404,59 +443,172 @@ help:
 	@echo " test-shell-debug       - enter shell with test environment (debug build)"
 	@echo " test-refresh-deps      - refresh the Python dependencies for the tests"
 	@echo ""
-	@echo "Arguments controlling test runs:"
+	@echo "Environment variables controlling test runs:"
 	@echo ""
-	@echo " V=[0|1|2]              - set test verbosity level"
-	@echo "                          0=ERROR, 1=INFO, 2=DEBUG"
-	@echo " TEST_JOBS=[<n>|auto]   - use at most <n> parallel python processes for test execution, if auto, set to number of available cpus (default: 1)"
-	@echo " MAX_VPP_CPUS=[<n>|auto]- use at most <n> cpus for running vpp main and worker threads, if auto, set to number of available cpus (default: auto)"
-	@echo " CACHE_OUTPUT=[0|n|no]  - disable cache VPP stdout/stderr and log as one block after test finishes (default: yes)"
-	@echo " FAILFAST=[1|y|yes]     - fail fast if 1, otherwise complete all tests"
-	@echo " TIMEOUT=<timeout>      - fail test suite if any single test takes longer than <timeout> (in seconds) to finish (default: 600)"
-	@echo " RETRIES=<n>            - retry failed tests <n> times"
-	@echo " DEBUG=<type>           - set VPP debugging kind"
-	@echo "    DEBUG=core          - detect coredump and load it in gdb on crash"
-	@echo "    DEBUG=gdb           - allow easy debugging by printing VPP PID"
-	@echo "                          and waiting for user input before running"
-	@echo "                          and tearing down a testcase"
-	@echo "    DEBUG=gdbserver     - run gdb inside a gdb server, otherwise"
-	@echo "                          same as above"
-	@echo "    DEBUG=attach        - attach test case to already running vpp in gdb (see test-start-vpp-in-gdb)"
-	@echo " STEP=[1|y|yes]         - enable stepping through a testcase (for testcase debugging)"
-	@echo " SANITY=[0|n|no]        - disable sanity import of vpp-api/sanity vpp run before running tests"
-	@echo " EXTENDED_TESTS=[1|y|yes] - run extended tests"
-	@echo " TEST=<filter>          - filter the set of tests:"
-	@echo "    by file-name        - only run tests from specified file, e.g. TEST=test_bfd selects all tests from test_bfd.py"
-	@echo "    by file-suffix      - same as file-name, but 'test_' is omitted e.g. TEST=bfd selects all tests from test_bfd.py"
-	@echo "    by wildcard         - wildcard filter is <file>.<class>.<test function>, each can be replaced by '*'"
-	@echo "                          e.g. TEST='test_bfd.*.*' is equivalent to above example of filter by file-name"
-	@echo "                               TEST='bfd.*.*' is equivalent to above example of filter by file-suffix"
-	@echo "                               TEST='bfd.BFDAPITestCase.*' selects all tests from test_bfd.py which are part of BFDAPITestCase class"
-	@echo "                               TEST='bfd.BFDAPITestCase.test_add_bfd' selects a single test named test_add_bfd from test_bfd.py/BFDAPITestCase"
-	@echo "                               TEST='*.*.test_add_bfd' selects all test functions named test_add_bfd from all files/classes"
-	@echo " VARIANT=<variant>      - specify which march node variant to unit test"
-	@echo "                          e.g. VARIANT=skx test the skx march variants"
-	@echo "                          e.g. VARIANT=icl test the icl march variants"
-	@echo " COREDUMP_SIZE=<size>   - pass <size> as unix { coredump-size <size> } argument to vpp"
-	@echo "                          e.g. COREDUMP_SIZE=4g"
-	@echo "                               COREDUMP_SIZE=unlimited"
-	@echo " COREDUMP_COMPRESS=[1|y|yes] - compress core files if not debugging them"
-	@echo " EXTERN_TESTS=<path>    - path to out-of-tree test_<name>.py files containing test cases"
-	@echo " EXTERN_PLUGINS=<path>  - path to out-of-tree plugins to be loaded by vpp under test"
-	@echo " EXTERN_COV_DIR=<path>  - path to out-of-tree prefix, where source, object and .gcda files can be found for coverage report"
-	@echo " PROFILE=[1|y|yes]      - enable profiling of test framework via cProfile module"
-	@echo " PROFILE_SORT_BY=opt    - sort profiling report by opt - consult cProfile documentation for possible values (default: cumtime)"
-	@echo " PROFILE_OUTPUT=file    - output profiling info to file - use absolute path (default: stdout)"
-	@echo " TEST_DEBUG=[1|y|yes]   - enable debugging of the test framework itself (expert)"
-	@echo " API_FUZZ=[1|y|yes]     - enable VPP api fuzz testing"
-	@echo " RND_SEED=<seed>        - Seed RND with given seed"
+	@echo "   V=[0|1|2]"
+	@echo "	      set test verbosity level: 0=ERROR, 1=INFO, 2=DEBUG"
+	@echo ""
+	@echo "   TEST_JOBS=[<n>|auto]"
+	@echo "       use at most <n> parallel python processes for test"
+	@echo "       execution, if auto, set to number of available cpus"
+	@echo "       (default: 1)"
+	@echo ""
+	@echo "   MAX_VPP_CPUS=[<n>|auto]"
+	@echo "       use at most <n> cpus for running vpp"
+	@echo "       'auto' sets to number of available cpus"
+	@echo "       (default: auto)"
+	@echo ""
+	@echo "   CACHE_OUTPUT=[0|n|no]"
+	@echo "       disable caching VPP stdout/stderr and logging it"
+	@echo "       as one block after test finishes"
+	@echo "       (default: yes)"
+	@echo ""
+	@echo "   FAILFAST=[1|y|yes]"
+	@echo "       if enabled, stop running tests on first failure"
+	@echo "       otherwise finish running whole suite"
+	@echo "       (default: no)"
+	@echo ""
+	@echo "   TIMEOUT=<timeout>"
+	@echo "       fail test suite if any single test takes longer"
+	@echo "       than <timeout> (in seconds) to finish"
+	@echo "       (default: 600)"
+	@echo ""
+	@echo "   RETRIES=<n>"
+	@echo "       retry failed tests <n> times"
+	@echo "       (default: 0)"
+	@echo ""
+	@echo "   DEBUG=<type>"
+	@echo "       configure VPP debugging:"
+	@echo "       DEBUG=core"
+	@echo "           detect coredump and load it in gdb on crash"
+	@echo ""
+	@echo "       DEBUG=gdb"
+	@echo "           print VPP PID and wait for user input before"
+	@echo "           running and tearing down a testcase, allowing"
+	@echo "           easy gdb attach"
+	@echo ""
+	@echo "       DEBUG=gdbserver"
+	@echo "           same as above, but run gdb inside a gdb server"
+	@echo ""
+	@echo "       DEBUG=attach"
+	@echo "           attach to existing vpp in running in gdb"
+	@echo "           (see test-start-vpp-in-gdb)"
+	@echo "       (default: none)"
+	@echo ""
+	@echo "   STEP=[1|y|yes]"
+	@echo "       enable stepping through a testcase"
+	@echo "       (default: no)"
+	@echo ""
+	@echo "   SANITY=[0|n|no]"
+	@echo "       disable sanity import of vpp-api/vpp sanity"
+	@echo "       run before running tests"
+	@echo "       (default: yes)"
+	@echo ""
+	@echo "   EXTENDED_TESTS=[1|y|yes]"
+	@echo "       run extended tests"
+	@echo "       (default: no)"
+	@echo ""
+	@echo "   TEST=<filter>,[<filter>],..."
+	@echo "       only run tests matching one or more comma-delimited"
+	@echo "       filter expressions"
+	@echo ""
+	@echo "       simple filter:"
+	@echo "           file name or file suffix select all tests from a file"
+	@echo "           examples:"
+	@echo "               TEST=test_bfd"
+	@echo "               TEST=bfd"
+	@echo "                    equivalent expressions selecting all"
+	@echo "                    tests defined in test_bfd.py"
+	@echo ""
+	@echo "       wildcard filter:"
+	@echo "           advanced filtering based on test file, test class"
+	@echo "           and test function"
+	@echo "           each filter expression is in the form of"
+	@echo "               <file>.<class>.<test function>"
+	@echo "           each of the tokens can be left empty or replaced"
+	@echo "           with '*' to select all objects available"
+	@echo "           examples:"
+	@echo "               TEST=test_bfd.*.*"
+	@echo "               TEST=test_bfd.."
+	@echo "               TEST=bfd.*.*"
+	@echo "               TEST=bfd.."
+	@echo "                    select all tests defined in test_bfd.py"
+	@echo "               TEST=bfd.BFDAPITestCase.*"
+	@echo "               TEST=bfd.BFDAPITestCase."
+	@echo "                    select all tests from test_bfd.py"
+	@echo "                    which are part of BFDAPITestCase class"
+	@echo "               TEST=bfd.BFDAPITestCase.test_add_bfd"
+	@echo "                    select a single test named test_add_bfd"
+	@echo "                    from test_bfd.py/BFDAPITestCase"
+	@echo "               TEST=..test_add_bfd"
+	@echo "               TEST=*.*.test_add_bfd"
+	@echo "                    select all test functions named test_add_bfd"
+	@echo "                    from all files/classes"
+	@echo "               TEST=bfd,ip4,..test_icmp_error"
+	@echo "                    select all test functions in test_bfd.py,"
+	@echo "                    test_ip4.py and all test functions named"
+	@echo "                    'test_icmp_error' in all files"
+	@echo "       (default: '')"
+	@echo ""
+	@echo "   VARIANT=<variant>"
+	@echo "       specify which march node variant to unit test"
+	@echo "           e.g. VARIANT=skx test the skx march variants"
+	@echo "           e.g. VARIANT=icl test the icl march variants"
+	@echo "       (default: '')"
+	@echo ""
+	@echo "   COREDUMP_SIZE=<size>"
+	@echo "       pass <size> as unix { coredump-size <size> } argument"
+	@echo "       to vpp, e.g. COREDUMP_SIZE=4g or COREDUMP_SIZE=unlimited"
+	@echo "       (default: '')"
+	@echo ""
+	@echo "   COREDUMP_COMPRESS=[1|y|yes]"
+	@echo "       if no debug option is set, compress any core files"
+	@echo "       (default: no)"
+	@echo ""
+	@echo "   EXTERN_TESTS=<path>"
+	@echo "       include out-of-tree test_*.py files under <path>"
+	@echo "       (default: '')"
+	@echo ""
+	@echo "   EXTERN_PLUGINS=<path>"
+	@echo "       load out-of-tree vpp plugins in <path>"
+	@echo "       (default: '')"
+	@echo ""
+	@echo "   EXTERN_COV_DIR=<path>"
+	@echo "       path to out-of-tree prefix, where source, object"
+	@echo "       and .gcda files can be found for coverage report"
+	@echo "       (default: '')"
+	@echo ""
+	@echo "   PROFILE=[1|y|yes]"
+	@echo "       enable profiling of test framework via cProfile module"
+	@echo "       (default: no)"
+	@echo ""
+	@echo "   PROFILE_SORT_BY=opt"
+	@echo "       sort profiling report by opt - see cProfile documentation"
+	@echo "       for possible values"
+	@echo "       (default: cumtime)"
+	@echo ""
+	@echo "   PROFILE_OUTPUT=file"
+	@echo "       output profiling info to file - use absolute path"
+	@echo "       (default: stdout)"
+	@echo ""
+	@echo "   TEST_DEBUG=[1|y|yes]"
+	@echo "       enable debugging of the test framework itself (expert)"
+	@echo "       (default: no)"
+	@echo ""
+	@echo "   TEST_GCOV=[1|y|yes]"
+	@echo "       enable tests specifically designed soley for code coverage"
+	@echo "       (default: no)"
+	@echo ""
+	@echo "   API_FUZZ=[1|y|yes]"
+	@echo "       enable VPP api fuzz testing"
+	@echo "       (default: no)"
+	@echo ""
+	@echo "   RND_SEED=<seed>"
+	@echo "       random seed used by test framework"
+	@echo "       (default: time.time())"
 	@echo ""
 	@echo "Starting VPP in GDB for use with DEBUG=attach:"
 	@echo ""
 	@echo " test-start-vpp-in-gdb       - start VPP in gdb (release)"
 	@echo " test-start-vpp-debug-in-gdb - start VPP in gdb (debug)"
 	@echo ""
-	@echo "Creating test code coverage report:"
-	@echo ""
-	@echo " test-cov               - generate code coverage report for test framework"
-	@echo " test-wipe-cov          - wipe code coverage report for test framework"

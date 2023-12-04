@@ -159,18 +159,29 @@ manage_route (private_kernel_vpp_net_t *this, bool add, chunk_t dst,
   vl_api_fib_path_t *apath;
   bool exists = FALSE;
 
-  this->mutex->lock (this->mutex);
-  enumerator = this->ifaces->create_enumerator (this->ifaces);
-  while (enumerator->enumerate (enumerator, &entry))
+  for (int i = 0; i < N_RETRY_GET_IF; i++)
     {
-      if (streq (name, entry->if_name))
+      this->mutex->lock (this->mutex);
+      enumerator = this->ifaces->create_enumerator (this->ifaces);
+      while (enumerator->enumerate (enumerator, &entry))
 	{
-	  exists = TRUE;
-	  break;
+	  if (streq (name, entry->if_name))
+	    {
+	      exists = TRUE;
+	      break;
+	    }
 	}
+      enumerator->destroy (enumerator);
+      this->mutex->unlock (this->mutex);
+
+      if (!exists)
+	{
+	  DBG1 (DBG_NET, "if_name %s not found", name);
+	  sleep (1);
+	}
+      else
+	break;
     }
-  enumerator->destroy (enumerator);
-  this->mutex->unlock (this->mutex);
 
   if (!exists)
     {
@@ -613,6 +624,7 @@ event_cb (char *data, int data_len, void *ctx)
 {
   private_kernel_vpp_net_t *this = ctx;
   vl_api_sw_interface_event_t *event;
+  vl_api_if_status_flags_t flags;
   iface_t *entry;
   enumerator_t *enumerator;
 
@@ -623,6 +635,7 @@ event_cb (char *data, int data_len, void *ctx)
     {
       if (entry->index == ntohl (event->sw_if_index))
 	{
+	  flags = ntohl (event->flags);
 	  if (event->deleted)
 	    {
 	      this->ifaces->remove_at (this->ifaces, enumerator);
@@ -630,10 +643,9 @@ event_cb (char *data, int data_len, void *ctx)
 		    entry->if_name);
 	      iface_destroy (entry);
 	    }
-	  else if (entry->up != (event->flags & IF_STATUS_API_FLAG_LINK_UP))
+	  else if (entry->up != (flags & IF_STATUS_API_FLAG_LINK_UP))
 	    {
-	      entry->up =
-		(event->flags & IF_STATUS_API_FLAG_LINK_UP) ? TRUE : FALSE;
+	      entry->up = (flags & IF_STATUS_API_FLAG_LINK_UP) ? TRUE : FALSE;
 	      DBG2 (DBG_NET, "interface state changed %u %s %s", entry->index,
 		    entry->if_name, entry->up ? "UP" : "DOWN");
 	    }
@@ -642,7 +654,6 @@ event_cb (char *data, int data_len, void *ctx)
     }
   enumerator->destroy (enumerator);
   this->mutex->unlock (this->mutex);
-  free (data);
 }
 
 /**
@@ -718,8 +729,10 @@ net_update_thread_fn (private_kernel_vpp_net_t *this)
 	  emp->_vl_msg_id = ntohs (msg_id);
 	  emp->enable_disable = 1;
 	  emp->pid = ntohl (am->our_pid);
+	  u16 msg_id_sw_interface_event =
+	    vl_msg_api_get_msg_index ((u8 *) "sw_interface_event_2d3d95a7");
 	  rv = vac->register_event (vac, (char *) emp, sizeof (*emp), event_cb,
-				    VL_API_SW_INTERFACE_EVENT, this);
+				    msg_id_sw_interface_event, this);
 	  if (!rv)
 	    this->events_on = TRUE;
 	}

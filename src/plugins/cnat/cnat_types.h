@@ -36,12 +36,14 @@
 
 #define CNAT_DEFAULT_SESSION_BUCKETS     1024
 #define CNAT_DEFAULT_TRANSLATION_BUCKETS 1024
+#define CNAT_DEFAULT_CLIENT_BUCKETS	 1024
 #define CNAT_DEFAULT_SNAT_BUCKETS        1024
 #define CNAT_DEFAULT_SNAT_IF_MAP_LEN	 4096
 
 #define CNAT_DEFAULT_SESSION_MEMORY      (1 << 20)
 #define CNAT_DEFAULT_TRANSLATION_MEMORY  (256 << 10)
-#define CNAT_DEFAULT_SNAT_MEMORY         (64 << 20)
+#define CNAT_DEFAULT_CLIENT_MEMORY	 (256 << 10)
+#define CNAT_DEFAULT_SNAT_MEMORY	 (64 << 10)
 
 /* Should be prime >~ 100 * numBackends */
 #define CNAT_DEFAULT_MAGLEV_LEN 1009
@@ -50,8 +52,10 @@
  * from fib_source.h */
 #define CNAT_FIB_SOURCE_PRIORITY  0x02
 
-/* Initial refcnt for timestamps (2 : session & rsession) */
-#define CNAT_TIMESTAMP_INIT_REFCNT 2
+/* Initial number of timestamps for a session
+ * this will be incremented when adding the reverse
+ * session in cnat_rsession_create */
+#define CNAT_TIMESTAMP_INIT_REFCNT 1
 
 #define MIN_SRC_PORT ((u16) 0xC000)
 
@@ -118,6 +122,12 @@ typedef struct cnat_main_
   /* Number of buckets of the  translation bihash */
   u32 translation_hash_buckets;
 
+  /* Memory size of the client bihash */
+  uword client_hash_memory;
+
+  /* Number of buckets of the  client bihash */
+  u32 client_hash_buckets;
+
   /* Memory size of the source NAT prefix bihash */
   uword snat_hash_memory;
 
@@ -137,9 +147,6 @@ typedef struct cnat_main_
 
   /* delay in seconds between two scans of session/clients tables */
   f64 scanner_timeout;
-
-  /* Lock for the timestamp pool */
-  clib_rwlock_t ts_lock;
 
   /* Index of the scanner process node */
   uword scanner_node_index;
@@ -165,6 +172,23 @@ typedef struct cnat_timestamp_t_
   u16 refcnt;
 } cnat_timestamp_t;
 
+/* Create the first pool with 1 << CNAT_TS_BASE_SIZE elts */
+#define CNAT_TS_BASE_SIZE (8)
+/* reserve the top CNAT_TS_MPOOL_BITS bits for finding the pool */
+#define CNAT_TS_MPOOL_BITS (6)
+
+typedef struct cnat_timestamp_mpool_t_
+{
+  /* Increasing fixed size pools of timestamps */
+  cnat_timestamp_t *ts_pools[1 << CNAT_TS_MPOOL_BITS];
+  /* Bitmap of pools with free space */
+  uword *ts_free;
+  /* Index of next pool to init */
+  u8 next_empty_pool_idx;
+  /* ts creation lock */
+  clib_spinlock_t ts_lock;
+} cnat_timestamp_mpool_t;
+
 typedef struct cnat_node_ctx_
 {
   f64 now;
@@ -178,8 +202,7 @@ extern u8 *format_cnat_endpoint (u8 * s, va_list * args);
 extern uword unformat_cnat_ep_tuple (unformat_input_t * input,
 				     va_list * args);
 extern uword unformat_cnat_ep (unformat_input_t * input, va_list * args);
-extern cnat_timestamp_t *cnat_timestamps;
-extern fib_source_t cnat_fib_source;
+extern cnat_timestamp_mpool_t cnat_timestamps;
 extern cnat_main_t cnat_main;
 
 extern char *cnat_error_strings[];

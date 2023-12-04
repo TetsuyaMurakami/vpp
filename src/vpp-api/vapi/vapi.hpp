@@ -140,6 +140,10 @@ private:
 
   template <typename Req, typename Resp, typename... Args> friend class Dump;
 
+  template <typename Req, typename Resp, typename StreamMessage,
+	    typename... Args>
+  friend class Stream;
+
   template <typename M> friend class Event_registration;
 };
 
@@ -451,6 +455,10 @@ private:
 
   template <typename Req, typename Resp, typename... Args> friend class Dump;
 
+  template <typename Req, typename Resp, typename StreamMessage,
+	    typename... Args>
+  friend class Stream;
+
   template <typename M> friend class Result_set;
 
   template <typename M> friend class Event_registration;
@@ -496,6 +504,10 @@ private:
 template <typename Req, typename Resp, typename... Args> class Request;
 
 template <typename Req, typename Resp, typename... Args> class Dump;
+
+template <typename Req, typename Resp, typename StreamMessage,
+	  typename... Args>
+class Stream;
 
 template <class, class = void> struct vapi_has_payload_trait : std::false_type
 {
@@ -627,6 +639,10 @@ private:
 
   template <typename Req, typename Resp, typename... Args> friend class Dump;
 
+  template <typename Req, typename Resp, typename StreamMessage,
+	    typename... Args>
+  friend class Stream;
+
   template <typename X> friend class Event_registration;
 
   template <typename X> friend class Result_set;
@@ -644,10 +660,11 @@ class Request : public Common_req
 {
 public:
   Request (Connection &con, Args... args,
-           std::function<vapi_error_e (Request<Req, Resp, Args...> &)>
-               callback = nullptr)
-      : Common_req{con}, callback{callback},
-        request{con, vapi_alloc<Req> (con, args...)}, response{con, nullptr}
+	   std::function<vapi_error_e (Request<Req, Resp, Args...> &)>
+	     callback = nullptr)
+      : Common_req{ con }, callback{ std::move (callback) },
+	request{ con, vapi_alloc<Req> (con, args...) }, response{ con,
+								  nullptr }
   {
   }
 
@@ -772,9 +789,93 @@ private:
   bool complete;
   std::vector<Msg<M>, typename Msg<M>::Msg_allocator> set;
 
+  template <typename Req, typename Resp, typename StreamMessage,
+	    typename... Args>
+  friend class Stream;
+
   template <typename Req, typename Resp, typename... Args> friend class Dump;
 
   template <typename X> friend class Event_registration;
+};
+
+/**
+ * Class representing a RPC request - zero or more identical responses to a
+ * single request message with a response
+ */
+template <typename Req, typename Resp, typename StreamMessage,
+	  typename... Args>
+class Stream : public Common_req
+{
+public:
+  Stream (
+    Connection &con, Args... args,
+    std::function<vapi_error_e (Stream<Req, Resp, StreamMessage, Args...> &)>
+      cb = nullptr)
+      : Common_req{ con }, request{ con, vapi_alloc<Req> (con, args...) },
+	response{ con, nullptr }, result_set{ con }, callback{ std::move (cb) }
+  {
+  }
+
+  Stream (const Stream &) = delete;
+
+  virtual ~Stream () {}
+
+  virtual std::tuple<vapi_error_e, bool>
+  assign_response (vapi_msg_id_t id, void *shm_data)
+  {
+    if (id == response.get_msg_id ())
+      {
+	response.assign_response (id, shm_data);
+	result_set.mark_complete ();
+	set_response_state (RESPONSE_READY);
+	if (nullptr != callback)
+	  {
+	    return std::make_pair (callback (*this), true);
+	  }
+	return std::make_pair (VAPI_OK, true);
+      }
+    else
+      {
+	result_set.assign_response (id, shm_data);
+      }
+    return std::make_pair (VAPI_OK, false);
+  }
+
+  vapi_error_e
+  execute ()
+  {
+    return con.send (this);
+  }
+
+  const Msg<Req> &
+  get_request (void)
+  {
+    return request;
+  }
+
+  const Msg<Resp> &
+  get_response (void)
+  {
+    return response;
+  }
+
+  using resp_type = typename Msg<StreamMessage>::shm_data_type;
+
+  const Result_set<StreamMessage> &
+  get_result_set (void) const
+  {
+    return result_set;
+  }
+
+private:
+  Msg<Req> request;
+  Msg<Resp> response;
+  Result_set<StreamMessage> result_set;
+  std::function<vapi_error_e (Stream<Req, Resp, StreamMessage, Args...> &)>
+    callback;
+
+  friend class Connection;
+  friend class Result_set<StreamMessage>;
 };
 
 /**
@@ -786,10 +887,10 @@ class Dump : public Common_req
 {
 public:
   Dump (Connection &con, Args... args,
-        std::function<vapi_error_e (Dump<Req, Resp, Args...> &)> callback =
-            nullptr)
-      : Common_req{con}, request{con, vapi_alloc<Req> (con, args...)},
-        result_set{con}, callback{callback}
+	std::function<vapi_error_e (Dump<Req, Resp, Args...> &)> callback =
+	  nullptr)
+      : Common_req{ con }, request{ con, vapi_alloc<Req> (con, args...) },
+	result_set{ con }, callback{ std::move (callback) }
   {
   }
 
@@ -853,9 +954,9 @@ template <typename M> class Event_registration : public Common_req
 {
 public:
   Event_registration (
-      Connection &con,
-      std::function<vapi_error_e (Event_registration<M> &)> callback = nullptr)
-      : Common_req{con}, result_set{con}, callback{callback}
+    Connection &con,
+    std::function<vapi_error_e (Event_registration<M> &)> callback = nullptr)
+      : Common_req{ con }, result_set{ con }, callback{ std::move (callback) }
   {
     if (!con.is_msg_available (M::get_msg_id ()))
       {

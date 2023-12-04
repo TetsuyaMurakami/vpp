@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import unittest
-from framework import tag_fixme_vpp_workers
-from framework import VppTestCase, VppTestRunner
+from framework import VppTestCase
+from asfframework import VppTestRunner, tag_fixme_vpp_workers
 
 from vpp_udp_encap import find_udp_encap, VppUdpEncap
 from vpp_udp_decap import VppUdpDecap
@@ -20,7 +20,7 @@ from vpp_papi import VppEnum
 
 from scapy.packet import Raw
 from scapy.layers.l2 import Ether
-from scapy.layers.inet import IP, UDP, ICMP
+from scapy.layers.inet import IP, UDP
 from scapy.layers.inet6 import IPv6
 from scapy.contrib.mpls import MPLS
 
@@ -709,10 +709,10 @@ class TestUDP(VppTestCase):
             table_id += 1
 
         # Configure namespaces
-        self.vapi.app_namespace_add_del(
+        self.vapi.app_namespace_add_del_v4(
             namespace_id="0", sw_if_index=self.loop0.sw_if_index
         )
-        self.vapi.app_namespace_add_del(
+        self.vapi.app_namespace_add_del_v4(
             namespace_id="1", sw_if_index=self.loop1.sw_if_index
         )
 
@@ -746,17 +746,15 @@ class TestUDP(VppTestCase):
 
         # Start builtin server and client
         uri = "udp://" + self.loop0.local_ip4 + "/1234"
-        error = self.vapi.cli(
-            "test echo server appns 0 fifo-size 4 no-echo" + "uri " + uri
-        )
+        error = self.vapi.cli("test echo server appns 0 fifo-size 4k " + "uri " + uri)
         if error:
             self.logger.critical(error)
             self.assertNotIn("failed", error)
 
         error = self.vapi.cli(
             "test echo client mbytes 10 appns 1 "
-            + "fifo-size 4 no-output test-bytes "
-            + "syn-timeout 2 no-return uri "
+            + "fifo-size 4k "
+            + "syn-timeout 2 uri "
             + uri
         )
         if error:

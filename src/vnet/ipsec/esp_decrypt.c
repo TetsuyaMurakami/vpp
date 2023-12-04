@@ -562,6 +562,12 @@ esp_decrypt_prepare_sync_op (vlib_main_t * vm, vlib_node_runtime_t * node,
 	      op->aad_len = esp_aad_fill (op->aad, esp0, sa0, pd->seq_hi);
 	      op->tag = payload + len;
 	      op->tag_len = 16;
+	      if (PREDICT_FALSE (ipsec_sa_is_set_IS_NULL_GMAC (sa0)))
+		{
+		  /* RFC-4543 ENCR_NULL_AUTH_AES_GMAC: IV is part of AAD */
+		  payload -= iv_sz;
+		  len += iv_sz;
+		}
 	    }
 	  else
 	    {
@@ -682,6 +688,12 @@ out:
 	  aad = (u8 *) nonce - sizeof (esp_aead_t);
 	  esp_aad_fill (aad, esp0, sa0, pd->seq_hi);
 	  tag = payload + len;
+	  if (PREDICT_FALSE (ipsec_sa_is_set_IS_NULL_GMAC (sa0)))
+	    {
+	      /* RFC-4543 ENCR_NULL_AUTH_AES_GMAC: IV is part of AAD */
+	      payload -= iv_sz;
+	      len += iv_sz;
+	    }
 	}
       else
 	{
@@ -733,6 +745,7 @@ esp_decrypt_post_crypto (vlib_main_t *vm, vlib_node_runtime_t *node,
   const u8 tun_flags = IPSEC_SA_FLAG_IS_TUNNEL | IPSEC_SA_FLAG_IS_TUNNEL_V6;
   u8 pad_length = 0, next_header = 0;
   u16 icv_sz;
+  u64 n_lost;
 
   /*
    * redo the anti-reply check
@@ -741,32 +754,47 @@ esp_decrypt_post_crypto (vlib_main_t *vm, vlib_node_runtime_t *node,
    * check above we did so against the state of the window (W),
    * after packet s-1. So each of the packets in the sequence will be
    * accepted.
-   * This time s will be cheked against Ws-1, s+1 chceked against Ws
-   * (i.e. the window state is updated/advnaced)
-   * so this time the successive s+! packet will be dropped.
+   * This time s will be cheked against Ws-1, s+1 checked against Ws
+   * (i.e. the window state is updated/advanced)
+   * so this time the successive s+1 packet will be dropped.
    * This is a consequence of batching the decrypts. If the
-   * check-dcrypt-advance process was done for each packet it would
+   * check-decrypt-advance process was done for each packet it would
    * be fine. But we batch the decrypts because it's much more efficient
    * to do so in SW and if we offload to HW and the process is async.
    *
    * You're probably thinking, but this means an attacker can send the
-   * above sequence and cause VPP to perform decrpyts that will fail,
+   * above sequence and cause VPP to perform decrypts that will fail,
    * and that's true. But if the attacker can determine s (a valid
    * sequence number in the window) which is non-trivial, it can generate
    * a sequence s, s+1, s+2, s+3, ... s+n and nothing will prevent any
    * implementation, sequential or batching, from decrypting these.
    */
-  if (ipsec_sa_anti_replay_and_sn_advance (sa0, pd->seq, pd->seq_hi, true,
-					   NULL))
+  if (PREDICT_FALSE (ipsec_sa_is_set_ANTI_REPLAY_HUGE (sa0)))
     {
-      esp_decrypt_set_next_index (b, node, vm->thread_index,
-				  ESP_DECRYPT_ERROR_REPLAY, 0, next,
-				  ESP_DECRYPT_NEXT_DROP, pd->sa_index);
-      return;
+      if (ipsec_sa_anti_replay_and_sn_advance (sa0, pd->seq, pd->seq_hi, true,
+					       NULL, true))
+	{
+	  esp_decrypt_set_next_index (b, node, vm->thread_index,
+				      ESP_DECRYPT_ERROR_REPLAY, 0, next,
+				      ESP_DECRYPT_NEXT_DROP, pd->sa_index);
+	  return;
+	}
+      n_lost = ipsec_sa_anti_replay_advance (sa0, vm->thread_index, pd->seq,
+					     pd->seq_hi, true);
     }
-
-  u64 n_lost =
-    ipsec_sa_anti_replay_advance (sa0, vm->thread_index, pd->seq, pd->seq_hi);
+  else
+    {
+      if (ipsec_sa_anti_replay_and_sn_advance (sa0, pd->seq, pd->seq_hi, true,
+					       NULL, false))
+	{
+	  esp_decrypt_set_next_index (b, node, vm->thread_index,
+				      ESP_DECRYPT_ERROR_REPLAY, 0, next,
+				      ESP_DECRYPT_NEXT_DROP, pd->sa_index);
+	  return;
+	}
+      n_lost = ipsec_sa_anti_replay_advance (sa0, vm->thread_index, pd->seq,
+					     pd->seq_hi, false);
+    }
 
   vlib_prefetch_simple_counter (&ipsec_sa_err_counters[IPSEC_SA_ERROR_LOST],
 				vm->thread_index, pd->sa_index);
@@ -828,7 +856,9 @@ esp_decrypt_post_crypto (vlib_main_t *vm, vlib_node_runtime_t *node,
   u16 adv = pd->iv_sz + esp_sz;
   u16 tail = sizeof (esp_footer_t) + pad_length + icv_sz;
   u16 tail_orig = sizeof (esp_footer_t) + pad_length + pd->icv_sz;
-  b->flags &= ~VLIB_BUFFER_TOTAL_LENGTH_VALID;
+  b->flags &=
+    ~(VLIB_BUFFER_TOTAL_LENGTH_VALID | VNET_BUFFER_F_L4_CHECKSUM_COMPUTED |
+      VNET_BUFFER_F_L4_CHECKSUM_CORRECT);
 
   if ((pd->flags & tun_flags) == 0 && !is_tun)	/* transport mode */
     {
@@ -1032,6 +1062,7 @@ esp_decrypt_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
   u32 current_sa_index = ~0, current_sa_bytes = 0, current_sa_pkts = 0;
   const u8 esp_sz = sizeof (esp_header_t);
   ipsec_sa_t *sa0 = 0;
+  bool anti_replay_result;
   vnet_crypto_op_t _op, *op = &_op;
   vnet_crypto_op_t **crypto_ops;
   vnet_crypto_op_t **integ_ops;
@@ -1149,8 +1180,18 @@ esp_decrypt_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
       pd->current_length = b[0]->current_length;
 
       /* anti-reply check */
-      if (ipsec_sa_anti_replay_and_sn_advance (sa0, pd->seq, ~0, false,
-					       &pd->seq_hi))
+      if (PREDICT_FALSE (ipsec_sa_is_set_ANTI_REPLAY_HUGE (sa0)))
+	{
+	  anti_replay_result = ipsec_sa_anti_replay_and_sn_advance (
+	    sa0, pd->seq, ~0, false, &pd->seq_hi, true);
+	}
+      else
+	{
+	  anti_replay_result = ipsec_sa_anti_replay_and_sn_advance (
+	    sa0, pd->seq, ~0, false, &pd->seq_hi, false);
+	}
+
+      if (anti_replay_result)
 	{
 	  err = ESP_DECRYPT_ERROR_REPLAY;
 	  esp_decrypt_set_next_index (b[0], node, thread_index, err, n_noop,
@@ -1183,6 +1224,15 @@ esp_decrypt_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	    {
 	      async_frames[async_op] =
 		vnet_crypto_async_get_frame (vm, async_op);
+	      if (PREDICT_FALSE (!async_frames[async_op]))
+		{
+		  err = ESP_DECRYPT_ERROR_NO_AVAIL_FRAME;
+		  esp_decrypt_set_next_index (
+		    b[0], node, thread_index, err, n_noop, noop_nexts,
+		    ESP_DECRYPT_NEXT_DROP, current_sa_index);
+		  goto next;
+		}
+
 	      /* Save the frame to the list we'll submit at the end */
 	      vec_add1 (ptd->async_frames, async_frames[async_op]);
 	    }
@@ -1246,7 +1296,7 @@ esp_decrypt_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  n_noop += esp_async_recycle_failed_submit (
 	    vm, *async_frame, node, ESP_DECRYPT_ERROR_CRYPTO_ENGINE_ERROR,
 	    IPSEC_SA_ERROR_CRYPTO_ENGINE_ERROR, n_noop, noop_bi, noop_nexts,
-	    ESP_DECRYPT_NEXT_DROP);
+	    ESP_DECRYPT_NEXT_DROP, false);
 	  vnet_crypto_async_reset_frame (*async_frame);
 	  vnet_crypto_async_free_frame (vm, *async_frame);
 	}

@@ -252,15 +252,22 @@ vlib_node_set_interrupt_pending (vlib_main_t *vm, u32 node_index)
 {
   vlib_node_main_t *nm = &vm->node_main;
   vlib_node_t *n = vec_elt (nm->nodes, node_index);
+  void *interrupts = 0;
 
-  ASSERT (n->type == VLIB_NODE_TYPE_INPUT);
+  if (n->type == VLIB_NODE_TYPE_INPUT)
+    interrupts = nm->input_node_interrupts;
+  else if (n->type == VLIB_NODE_TYPE_PRE_INPUT)
+    interrupts = nm->pre_input_node_interrupts;
+  else
+    {
+      ASSERT (0);
+      return;
+    }
 
   if (vm != vlib_get_main ())
-    clib_interrupt_set_atomic (nm->interrupts, n->runtime_index);
+    clib_interrupt_set_atomic (interrupts, n->runtime_index);
   else
-    clib_interrupt_set (nm->interrupts, n->runtime_index);
-
-  __atomic_store_n (nm->pending_interrupts, 1, __ATOMIC_RELEASE);
+    clib_interrupt_set (interrupts, n->runtime_index);
 }
 
 always_inline vlib_process_t *

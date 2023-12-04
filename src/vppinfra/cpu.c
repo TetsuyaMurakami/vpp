@@ -71,21 +71,22 @@
   _ (0x06, 0x17, "Penryn", "Yorkfield,Wolfdale,Penryn,Harpertown")
 
 /* _(implementor-id, part-id, vendor-name, cpu-name, show CPU pass as string) */
-#define foreach_aarch64_cpu_uarch \
- _(0x41, 0xd03, "ARM", "Cortex-A53", 0) \
- _(0x41, 0xd07, "ARM", "Cortex-A57", 0) \
- _(0x41, 0xd08, "ARM", "Cortex-A72", 0) \
- _(0x41, 0xd09, "ARM", "Cortex-A73", 0) \
- _(0x41, 0xd0a, "ARM", "Cortex-A75", 0) \
- _(0x41, 0xd0b, "ARM", "Cortex-A76", 0) \
- _(0x41, 0xd0c, "ARM", "Neoverse-N1", 0) \
- _(0x41, 0xd4a, "ARM", "Neoverse-E1", 0) \
- _(0x43, 0x0a1, "Marvell", "THUNDERX CN88XX", 0) \
- _(0x43, 0x0a2, "Marvell", "OCTEON TX CN81XX", 0) \
- _(0x43, 0x0a3, "Marvell", "OCTEON TX CN83XX", 0) \
- _(0x43, 0x0af, "Marvell", "THUNDERX2 CN99XX", 1) \
- _(0x43, 0x0b1, "Marvell", "OCTEON TX2 CN98XX", 1) \
- _(0x43, 0x0b2, "Marvell", "OCTEON TX2 CN96XX", 1)
+#define foreach_aarch64_cpu_uarch                                             \
+  _ (0x41, 0xd03, "ARM", "Cortex-A53", 0)                                     \
+  _ (0x41, 0xd07, "ARM", "Cortex-A57", 0)                                     \
+  _ (0x41, 0xd08, "ARM", "Cortex-A72", 0)                                     \
+  _ (0x41, 0xd09, "ARM", "Cortex-A73", 0)                                     \
+  _ (0x41, 0xd0a, "ARM", "Cortex-A75", 0)                                     \
+  _ (0x41, 0xd0b, "ARM", "Cortex-A76", 0)                                     \
+  _ (0x41, 0xd0c, "ARM", "Neoverse-N1", 0)                                    \
+  _ (0x41, 0xd49, "ARM", "Neoverse-N2", 0)                                    \
+  _ (0x41, 0xd4a, "ARM", "Neoverse-E1", 0)                                    \
+  _ (0x43, 0x0a1, "Marvell", "THUNDERX CN88XX", 0)                            \
+  _ (0x43, 0x0a2, "Marvell", "OCTEON TX CN81XX", 0)                           \
+  _ (0x43, 0x0a3, "Marvell", "OCTEON TX CN83XX", 0)                           \
+  _ (0x43, 0x0af, "Marvell", "THUNDERX2 CN99XX", 1)                           \
+  _ (0x43, 0x0b1, "Marvell", "OCTEON TX2 CN98XX", 1)                          \
+  _ (0x43, 0x0b2, "Marvell", "OCTEON TX2 CN96XX", 1)
 
 __clib_export u8 *
 format_cpu_uarch (u8 * s, va_list * args)
@@ -93,13 +94,34 @@ format_cpu_uarch (u8 * s, va_list * args)
 #if __x86_64__
   u32 __attribute__ ((unused)) eax, ebx, ecx, edx;
   u8 model, family, stepping;
+  u8 amd_vendor = 0;
+
+  if (__get_cpuid (0, &eax, &ebx, &ecx, &edx) == 0)
+    return format (s, "unknown (missing cpuid)");
+
+  if (amd_vendor (ebx, ecx, edx))
+    amd_vendor = 1;
 
   if (__get_cpuid (1, &eax, &ebx, &ecx, &edx) == 0)
     return format (s, "unknown (missing cpuid)");
 
-  model = ((eax >> 4) & 0x0f) | ((eax >> 12) & 0xf0);
-  family = (eax >> 8) & 0x0f;
   stepping = eax & 0x0f;
+  if (amd_vendor)
+    {
+      family = ((eax >> 8) & 0x0f);
+      model = ((eax >> 4) & 0x0f);
+      if (family >= 0xf)
+	{
+	  family = family + ((eax >> 20) & 0xf);
+	  model = (model | ((eax >> 12) & 0xf0));
+	}
+      return format (s, "Zen (family 0x%02x model 0x%02x)", family, model);
+    }
+  else
+    {
+      model = ((eax >> 4) & 0x0f) | ((eax >> 12) & 0xf0);
+      family = (eax >> 8) & 0x0f;
+    }
 
 #define _(f,m,a,c) if ((model == m) && (family == f)) return \
 format(s, "[0x%x] %s ([0x%02x] %s) stepping 0x%x", f, a, m, c, stepping);
@@ -108,30 +130,28 @@ format(s, "[0x%x] %s ([0x%02x] %s) stepping 0x%x", f, a, m, c, stepping);
     return format (s, "unknown (family 0x%02x model 0x%02x)", family, model);
 
 #elif __aarch64__
-  int fd;
   unformat_input_t input;
   u32 implementer, primary_part_number, variant, revision;
 
-  fd = open ("/proc/cpuinfo", 0);
-  if (fd < 0)
-    return format (s, "unknown");
-
-  unformat_init_clib_file (&input, fd);
-  while (unformat_check_input (&input) != UNFORMAT_END_OF_INPUT)
+  if (unformat_init_file (&input, "/proc/cpuinfo"))
     {
-      if (unformat (&input, "CPU implementer%_: 0x%x", &implementer))
-	;
-      else if (unformat (&input, "CPU part%_: 0x%x", &primary_part_number))
-	;
-      else if (unformat (&input, "CPU variant%_: 0x%x", &variant))
-	;
-      else if (unformat (&input, "CPU revision%_: %u", &revision))
-	;
-      else
-	unformat_skip_line (&input);
+      while (unformat_check_input (&input) != UNFORMAT_END_OF_INPUT)
+	{
+	  if (unformat (&input, "CPU implementer%_: 0x%x", &implementer))
+	    ;
+	  else if (unformat (&input, "CPU part%_: 0x%x", &primary_part_number))
+	    ;
+	  else if (unformat (&input, "CPU variant%_: 0x%x", &variant))
+	    ;
+	  else if (unformat (&input, "CPU revision%_: %u", &revision))
+	    ;
+	  else
+	    unformat_skip_line (&input);
+	}
+      unformat_free (&input);
     }
-  unformat_free (&input);
-  close (fd);
+  else
+    return format (s, "unknown");
 
 #define _(i,p,a,c,_format) if ((implementer == i) && (primary_part_number == p)){ \
 	if (_format)\
@@ -257,10 +277,39 @@ format_march_variant (u8 *s, va_list *args)
   return format (s, "%s", variants[t]);
 }
 
-/*
- * fd.io coding-style-patch-verification: ON
- *
- * Local Variables:
- * eval: (c-set-style "gnu")
- * End:
- */
+#ifdef __aarch64__
+
+__clib_export const clib_cpu_info_t *
+clib_get_cpu_info ()
+{
+  static int first_run = 1;
+  static clib_cpu_info_t info = {};
+  if (first_run)
+    {
+      FILE *fp = fopen ("/proc/cpuinfo", "r");
+      char buf[128];
+
+      if (!fp)
+	return 0;
+
+      while (!feof (fp))
+	{
+	  if (!fgets (buf, sizeof (buf), fp))
+	    break;
+	  buf[127] = '\0';
+	  if (strstr (buf, "CPU part"))
+	    info.aarch64.part_num =
+	      strtol (memchr (buf, ':', 128) + 2, NULL, 0);
+
+	  if (strstr (buf, "CPU implementer"))
+	    info.aarch64.implementer =
+	      strtol (memchr (buf, ':', 128) + 2, NULL, 0);
+	}
+      fclose (fp);
+
+      first_run = 0;
+    }
+  return &info;
+}
+
+#endif

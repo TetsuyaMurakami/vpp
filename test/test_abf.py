@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 
-from socket import inet_pton, inet_ntop, AF_INET, AF_INET6
 import unittest
 
-from framework import VppTestCase, VppTestRunner
-from vpp_ip import DpoProto
+from config import config
+from framework import VppTestCase
+from asfframework import VppTestRunner
 from vpp_ip_route import (
     VppIpRoute,
     VppRoutePath,
-    VppMplsLabel,
     VppIpTable,
-    FibPathProto,
 )
 from vpp_acl import AclRule, VppAcl
 
@@ -119,6 +117,11 @@ class VppAbfAttach(VppObject):
         return "abf-attach-%d-%d" % (self.policy_id, self.sw_if_index)
 
 
+@unittest.skipIf(
+    "acl" in config.excluded_plugins,
+    "Exclude ABF plugin tests due to absence of ACL plugin",
+)
+@unittest.skipIf("abf" in config.excluded_plugins, "Exclude ABF plugin tests")
 class TestAbf(VppTestCase):
     """ABF Test Case"""
 

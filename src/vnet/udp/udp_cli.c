@@ -95,10 +95,13 @@ format_udp_vars (u8 * s, va_list * args)
 {
   udp_connection_t *uc = va_arg (*args, udp_connection_t *);
 
-  s = format (s, " index %u%U flags: %U", uc->c_c_index, format_udp_cfg_flags,
-	      uc, format_udp_connection_flags, uc);
+  s = format (s, " index %u%U flags: %U\n", uc->c_c_index,
+	      format_udp_cfg_flags, uc, format_udp_connection_flags, uc);
+  s = format (s, " fib_index: %u next_node: %u opaque: %u ", uc->c_fib_index);
   if (!(uc->flags & UDP_CONN_F_LISTEN))
-    s = format (s, " \n sw_if_index: %d, mss: %u\n", uc->sw_if_index, uc->mss);
+    s = format (s, " sw_if_index: %d mss: %u\n", uc->sw_if_index, uc->mss);
+  else
+    s = format (s, "\n");
 
   return s;
 }
@@ -208,16 +211,21 @@ static void
 table_format_udp_port_ (vlib_main_t *vm, udp_main_t *um, table_t *t, int *c,
 			int port, int bind, int is_ip4)
 {
-  const udp_dst_port_info_t *pi = udp_get_dst_port_info (um, port, is_ip4);
+  const udp_dst_port_info_t *pi;
+
+  if (bind && !udp_is_valid_dst_port (port, is_ip4))
+    return;
+
+  pi = udp_get_dst_port_info (um, port, is_ip4);
   if (!pi)
     return;
-  if (bind && ~0 == pi->node_index)
-    return;
+
   table_format_cell (t, *c, 0, "%d", pi->dst_port);
   table_format_cell (t, *c, 1, is_ip4 ? "ip4" : "ip6");
   table_format_cell (t, *c, 2, ~0 == pi->node_index ? "none" : "%U",
 		     format_vlib_node_name, vm, pi->node_index);
   table_format_cell (t, *c, 3, "%s", pi->name);
+
   (*c)++;
 }
 

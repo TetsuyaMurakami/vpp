@@ -142,10 +142,14 @@ session_mq_listen_handler (session_worker_t *wrk, session_evt_elt_t *elt)
     session_worker_stat_error_inc (wrk, rv, 1);
 
   app_wrk = application_get_worker (app, mp->wrk_index);
-  mq_send_session_bound_cb (app_wrk->wrk_index, mp->context, a->handle, rv);
+  app_worker_listened_notify (app_wrk, a->handle, mp->context, rv);
 
   if (mp->ext_config)
     session_mq_free_ext_config (app, mp->ext_config);
+
+  /* Make sure events are flushed before releasing barrier, to avoid
+   * potential race with accept. */
+  app_wrk_flush_wrk_events (app_wrk, 0);
 }
 
 static void
@@ -170,7 +174,8 @@ session_mq_listen_uri_handler (session_worker_t *wrk, session_evt_elt_t *elt)
   rv = vnet_bind_uri (a);
 
   app_wrk = application_get_worker (app, 0);
-  mq_send_session_bound_cb (app_wrk->wrk_index, mp->context, a->handle, rv);
+  app_worker_listened_notify (app_wrk, a->handle, mp->context, rv);
+  app_wrk_flush_wrk_events (app_wrk, 0);
 }
 
 static void
@@ -215,7 +220,7 @@ session_mq_connect_one (session_connect_msg_t *mp)
       wrk = session_main_get_worker (vlib_get_thread_index ());
       session_worker_stat_error_inc (wrk, rv, 1);
       app_wrk = application_get_worker (app, mp->wrk_index);
-      mq_send_session_connected_cb (app_wrk->wrk_index, mp->context, 0, rv);
+      app_worker_connect_notify (app_wrk, 0, rv, mp->context);
     }
 
   if (mp->ext_config)
@@ -324,7 +329,7 @@ session_mq_connect_uri_handler (session_worker_t *wrk, session_evt_elt_t *elt)
     {
       session_worker_stat_error_inc (wrk, rv, 1);
       app_wrk = application_get_worker (app, 0 /* default wrk only */ );
-      mq_send_session_connected_cb (app_wrk->wrk_index, mp->context, 0, rv);
+      app_worker_connect_notify (app_wrk, 0, rv, mp->context);
     }
 }
 
@@ -410,7 +415,7 @@ session_mq_unlisten_handler (session_worker_t *wrk, session_evt_elt_t *elt)
   if (!app_wrk)
     return;
 
-  mq_send_unlisten_reply (app_wrk, sh, mp->context, rv);
+  app_worker_unlisten_reply (app_wrk, sh, mp->context, rv);
 }
 
 static void
@@ -451,6 +456,7 @@ session_mq_accepted_reply_handler (session_worker_t *wrk,
       a->app_index = mp->context;
       a->handle = mp->handle;
       vnet_disconnect_session (a);
+      s->app_wrk_index = SESSION_INVALID_INDEX;
       return;
     }
 
@@ -466,7 +472,7 @@ session_mq_accepted_reply_handler (session_worker_t *wrk,
   session_set_state (s, SESSION_STATE_READY);
 
   if (!svm_fifo_is_empty_prod (s->rx_fifo))
-    app_worker_lock_and_send_event (app_wrk, s, SESSION_IO_EVT_RX);
+    app_worker_rx_notify (app_wrk, s);
 
   /* Closed while waiting for app to reply. Resend disconnect */
   if (old_state >= SESSION_STATE_TRANSPORT_CLOSING)
@@ -669,7 +675,7 @@ session_mq_worker_update_handler (void *data)
     session_send_io_evt_to_thread (s->tx_fifo, SESSION_IO_EVT_TX);
 
   if (s->rx_fifo && !svm_fifo_is_empty (s->rx_fifo))
-    app_worker_lock_and_send_event (app_wrk, s, SESSION_IO_EVT_RX);
+    app_worker_rx_notify (app_wrk, s);
 
   if (s->session_state >= SESSION_STATE_TRANSPORT_CLOSING)
     app_worker_close_notify (app_wrk, s);
@@ -1105,10 +1111,8 @@ session_tx_fill_buffer (session_worker_t *wrk, session_tx_context_t *ctx,
 
 	  if (transport_connection_is_cless (ctx->tc))
 	    {
-	      ip_copy (&ctx->tc->rmt_ip, &hdr->rmt_ip, ctx->tc->is_ip4);
-	      ip_copy (&ctx->tc->lcl_ip, &hdr->lcl_ip, ctx->tc->is_ip4);
-	      /* Local port assumed to be bound, not overwriting it */
-	      ctx->tc->rmt_port = hdr->rmt_port;
+	      clib_memcpy_fast (data0 - sizeof (session_dgram_hdr_t), hdr,
+				sizeof (*hdr));
 	    }
 	  hdr->data_offset += n_bytes_read;
 	  if (hdr->data_offset == hdr->data_length)
@@ -1235,6 +1239,13 @@ session_tx_set_dequeue_params (vlib_main_t * vm, session_tx_context_t * ctx,
 	  if (PREDICT_FALSE (ctx->hdr.data_length == 0))
 	    {
 	      svm_fifo_dequeue_drop (ctx->s->tx_fifo, sizeof (ctx->hdr));
+	      ctx->max_len_to_snd = 0;
+	      return;
+	    }
+	  /* We cannot be sure apps have not enqueued incomplete dgrams */
+	  if (PREDICT_FALSE (ctx->max_dequeue <
+			     ctx->hdr.data_length + sizeof (ctx->hdr)))
+	    {
 	      ctx->max_len_to_snd = 0;
 	      return;
 	    }
@@ -1598,9 +1609,12 @@ session_tx_fifo_dequeue_internal (session_worker_t * wrk,
 {
   transport_send_params_t *sp = &wrk->ctx.sp;
   session_t *s = wrk->ctx.s;
+  clib_llist_index_t ei;
   u32 n_packets;
 
-  if (PREDICT_FALSE (s->session_state >= SESSION_STATE_TRANSPORT_CLOSED))
+  if (PREDICT_FALSE ((s->session_state >= SESSION_STATE_TRANSPORT_CLOSED) ||
+		     (s->session_state == SESSION_STATE_CONNECTING &&
+		      (s->flags & SESSION_F_HALF_OPEN))))
     return 0;
 
   /* Clear custom-tx flag used to request reschedule for tx */
@@ -1611,8 +1625,13 @@ session_tx_fifo_dequeue_internal (session_worker_t * wrk,
   sp->max_burst_size = clib_min (SESSION_NODE_FRAME_SIZE - *n_tx_packets,
 				 TRANSPORT_PACER_MAX_BURST_PKTS);
 
+  /* Grab elt index since app transports can enqueue events on tx */
+  ei = clib_llist_entry_index (wrk->event_elts, elt);
+
   n_packets = transport_custom_tx (session_get_transport_proto (s), s, sp);
   *n_tx_packets += n_packets;
+
+  elt = clib_llist_elt (wrk->event_elts, ei);
 
   if (s->flags & SESSION_F_CUSTOM_TX)
     {
@@ -1768,7 +1787,7 @@ session_event_dispatch_io (session_worker_t * wrk, vlib_node_runtime_t * node,
       break;
     case SESSION_IO_EVT_RX:
       s = session_event_get_session (wrk, e);
-      if (!s)
+      if (!s || s->session_state >= SESSION_STATE_TRANSPORT_CLOSED)
 	break;
       transport_app_rx_evt (session_get_transport_proto (s),
 			    s->connection_index, s->thread_index);
@@ -1779,7 +1798,7 @@ session_event_dispatch_io (session_worker_t * wrk, vlib_node_runtime_t * node,
 	break;
       svm_fifo_unset_event (s->rx_fifo);
       app_wrk = app_worker_get (s->app_wrk_index);
-      app_worker_builtin_rx (app_wrk, s);
+      app_worker_rx_notify (app_wrk, s);
       break;
     case SESSION_IO_EVT_TX_MAIN:
       s = session_get_if_valid (e->session_index, 0 /* main thread */);

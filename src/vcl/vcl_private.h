@@ -180,6 +180,9 @@ typedef struct vcl_session_
 #if VCL_ELOG
   elog_track_t elog_track;
 #endif
+
+  u16 original_dst_port; /**< original dst port (network order) */
+  u32 original_dst_ip4;	 /**< original dst ip4 (network order) */
 } vcl_session_t;
 
 typedef struct vppcom_cfg_t_
@@ -208,6 +211,7 @@ typedef struct vppcom_cfg_t_
   u32 tls_engine;
   u8 mt_wrk_supported;
   u8 huge_page;
+  u8 app_original_dst;
 } vppcom_cfg_t;
 
 void vppcom_cfg (vppcom_cfg_t * vcl_cfg);
@@ -664,6 +668,26 @@ static inline session_evt_type_t
 vcl_session_dgram_tx_evt (vcl_session_t *s, session_evt_type_t et)
 {
   return (s->flags & VCL_SESSION_F_CONNECTED) ? et : SESSION_IO_EVT_TX_MAIN;
+}
+
+static inline void
+vcl_session_add_want_deq_ntf (vcl_session_t *s, svm_fifo_deq_ntf_t evt)
+{
+  svm_fifo_t *txf = vcl_session_is_ct (s) ? s->ct_tx_fifo : s->tx_fifo;
+  if (txf)
+    {
+      svm_fifo_add_want_deq_ntf (txf, evt);
+      /* Request tx notification only if 3% of fifo is empty */
+      svm_fifo_set_deq_thresh (txf, 0.03 * svm_fifo_size (txf));
+    }
+}
+
+static inline void
+vcl_session_del_want_deq_ntf (vcl_session_t *s, svm_fifo_deq_ntf_t evt)
+{
+  svm_fifo_t *txf = vcl_session_is_ct (s) ? s->ct_tx_fifo : s->tx_fifo;
+  if (txf)
+    svm_fifo_del_want_deq_ntf (txf, evt);
 }
 
 /*

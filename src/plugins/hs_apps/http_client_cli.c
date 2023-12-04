@@ -53,6 +53,8 @@ typedef struct
   vlib_main_t *vlib_main;
   u32 cli_node_index;
   u8 *http_response;
+  u8 *appns_id;
+  u64 appns_secret;
 } hcc_main_t;
 
 typedef enum
@@ -297,6 +299,11 @@ hcc_attach ()
     hcm->fifo_size ? hcm->fifo_size : 32 << 10;
   a->options[APP_OPTIONS_FLAGS] = APP_OPTIONS_FLAGS_IS_BUILTIN;
   a->options[APP_OPTIONS_PREALLOC_FIFO_PAIRS] = hcm->prealloc_fifos;
+  if (hcm->appns_id)
+    {
+      a->namespace_id = hcm->appns_id;
+      a->options[APP_OPTIONS_NAMESPACE_SECRET] = hcm->appns_secret;
+    }
 
   if ((rv = vnet_application_attach (a)))
     return clib_error_return (0, "attach returned %d", rv);
@@ -307,13 +314,37 @@ hcc_attach ()
   return 0;
 }
 
+static int
+hcc_connect_rpc (void *rpc_args)
+{
+  vnet_connect_args_t *a = rpc_args;
+  int rv;
+
+  rv = vnet_connect (a);
+  if (rv)
+    clib_warning (0, "connect returned: %U", format_session_error, rv);
+
+  vec_free (a);
+  return rv;
+}
+
+static void
+hcc_program_connect (vnet_connect_args_t *a)
+{
+  session_send_rpc_evt_to_thread_force (transport_cl_thread (),
+					hcc_connect_rpc, a);
+}
+
 static clib_error_t *
 hcc_connect ()
 {
-  vnet_connect_args_t _a = {}, *a = &_a;
+  vnet_connect_args_t *a = 0;
   hcc_main_t *hcm = &hcc_main;
   hcc_worker_t *wrk;
   hcc_session_t *hs;
+
+  vec_validate (a, 0);
+  clib_memset (a, 0, sizeof (a[0]));
 
   clib_memcpy (&a->sep_ext, &hcm->connect_sep, sizeof (hcm->connect_sep));
   a->app_index = hcm->app_index;
@@ -323,11 +354,7 @@ hcc_connect ()
   hs = hcc_session_alloc (wrk);
   a->api_context = hs->session_index;
 
-  int rv = vnet_connect (a);
-
-  if (rv)
-    return clib_error_return (0, "connect returned: %U", format_session_error,
-			      rv);
+  hcc_program_connect (a);
   return 0;
 }
 
@@ -408,6 +435,7 @@ hcc_command_fn (vlib_main_t *vm, unformat_input_t *input,
   unformat_input_t _line_input, *line_input = &_line_input;
   hcc_main_t *hcm = &hcc_main;
   u64 seg_size;
+  u8 *appns_id = 0;
   clib_error_t *err = 0;
   int rv;
 
@@ -433,6 +461,10 @@ hcc_command_fn (vlib_main_t *vm, unformat_input_t *input,
 	hcm->fifo_size <<= 10;
       else if (unformat (line_input, "uri %s", &hcm->uri))
 	;
+      else if (unformat (line_input, "appns %_%v%_", &appns_id))
+	;
+      else if (unformat (line_input, "secret %lu", &hcm->appns_secret))
+	;
       else if (unformat (line_input, "query %s", &hcm->http_query))
 	;
       else
@@ -443,6 +475,8 @@ hcc_command_fn (vlib_main_t *vm, unformat_input_t *input,
 	}
     }
 
+  vec_free (hcm->appns_id);
+  hcm->appns_id = appns_id;
   hcm->cli_node_index = vlib_get_current_process (vm)->node_runtime.node_index;
 
   if (!hcm->uri)
@@ -457,7 +491,9 @@ hcc_command_fn (vlib_main_t *vm, unformat_input_t *input,
       goto done;
     }
 
+  vlib_worker_thread_barrier_sync (vm);
   vnet_session_enable_disable (vm, 1 /* turn on TCP, etc. */);
+  vlib_worker_thread_barrier_release (vm);
 
   err = hcc_run (vm);
 
@@ -478,8 +514,10 @@ done:
 
 VLIB_CLI_COMMAND (hcc_command, static) = {
   .path = "http cli client",
-  .short_help = "uri http://<ip-addr> query <query-string>",
+  .short_help = "[appns <app-ns> secret <appns-secret>] uri http://<ip-addr> "
+		"query <query-string>",
   .function = hcc_command_fn,
+  .is_mp_safe = 1,
 };
 
 static clib_error_t *

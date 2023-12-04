@@ -3,14 +3,13 @@ from __future__ import print_function
 
 """ACL plugin - MACIP tests
 """
-import binascii
-import ipaddress
 import random
 from socket import inet_ntop, inet_pton, AF_INET, AF_INET6
 from struct import pack, unpack
 import re
 import unittest
 from ipaddress import ip_network, IPv4Network, IPv6Network
+from config import config
 
 import scapy.compat
 from scapy.packet import Raw
@@ -18,7 +17,8 @@ from scapy.layers.l2 import Ether
 from scapy.layers.inet import IP, UDP
 from scapy.layers.inet6 import IPv6
 
-from framework import VppTestCase, VppTestRunner
+from framework import VppTestCase
+from asfframework import VppTestRunner
 from vpp_lo_interface import VppLoInterface
 from vpp_l2 import L2_PORT_TYPE
 from vpp_sub_interface import (
@@ -31,7 +31,6 @@ from vpp_acl import (
     AclRule,
     VppAcl,
     VppAclInterface,
-    VppEtypeWhitelist,
     VppMacipAclInterface,
     VppMacipAcl,
     MacipRule,
@@ -39,6 +38,7 @@ from vpp_acl import (
 from vpp_papi import MACAddress
 
 
+@unittest.skipIf("acl" in config.excluded_plugins, "Exclude ACL plugin tests")
 class MethodHolder(VppTestCase):
     DEBUG = False
 

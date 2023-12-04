@@ -797,7 +797,7 @@ ip_neighbor_cmd (vlib_main_t * vm,
   vnet_main_t *vnm = vnet_get_main ();
   ip_neighbor_flags_t flags;
   u32 sw_if_index = ~0;
-  int is_add = 1;
+  int is_add = 1, is_flush = 0;
   int count = 1;
 
   flags = IP_NEIGHBOR_FLAG_DYNAMIC;
@@ -811,6 +811,8 @@ ip_neighbor_cmd (vlib_main_t * vm,
 	;
       else if (unformat (input, "delete") || unformat (input, "del"))
 	is_add = 0;
+      else if (unformat (input, "flush"))
+	is_flush = 1;
       else if (unformat (input, "static"))
 	{
 	  flags |= IP_NEIGHBOR_FLAG_STATIC;
@@ -822,6 +824,13 @@ ip_neighbor_cmd (vlib_main_t * vm,
 	;
       else
 	break;
+    }
+
+  if (is_flush)
+    {
+      ip_neighbor_del_all (AF_IP4, sw_if_index);
+      ip_neighbor_del_all (AF_IP6, sw_if_index);
+      return NULL;
     }
 
   if (sw_if_index == ~0 ||
@@ -888,7 +897,7 @@ VLIB_CLI_COMMAND (ip_neighbor_command, static) = {
 };
 VLIB_CLI_COMMAND (ip_neighbor_command2, static) = {
   .path = "ip neighbor",
-  .short_help = "ip neighbor [del] <intfc> <ip-address> <mac-address> "
+  .short_help = "ip neighbor [del] [flush] <intfc> <ip-address> <mac-address> "
 		"[static] [no-fib-entry] [count <count>]",
   .function = ip_neighbor_cmd,
 };
@@ -1598,8 +1607,8 @@ ip_neighbour_age_out (index_t ipni, f64 now, f64 * wait)
 	}
       else
 	{
-	  ip_neighbor_probe_dst (ip_neighbor_get_sw_if_index (ipn), af,
-				 vlib_get_thread_index (),
+	  ip_neighbor_probe_dst (ip_neighbor_get_sw_if_index (ipn),
+				 vlib_get_thread_index (), af,
 				 &ip_addr_46 (&ipn->ipn_key->ipnk_ip));
 
 	  ipn->ipn_n_probes++;
@@ -1755,6 +1764,17 @@ ip_neighbor_config (ip_address_family_t af, u32 limit, u32 age, bool recycle)
 			      ip4_neighbor_age_process_node.index :
 			      ip6_neighbor_age_process_node.index),
 			     IP_NEIGHBOR_AGE_PROCESS_WAKEUP, 0);
+
+  return (0);
+}
+
+int
+ip_neighbor_get_config (ip_address_family_t af, u32 *limit, u32 *age,
+			bool *recycle)
+{
+  *limit = ip_neighbor_db[af].ipndb_limit;
+  *age = ip_neighbor_db[af].ipndb_age;
+  *recycle = ip_neighbor_db[af].ipndb_recycle;
 
   return (0);
 }

@@ -721,8 +721,8 @@ virtio_pci_control_vring_init (vlib_main_t * vm, virtio_if_t * vif,
 }
 
 clib_error_t *
-virtio_pci_vring_split_init (vlib_main_t * vm, virtio_if_t * vif,
-			     u16 queue_num)
+virtio_pci_vring_split_init (vlib_main_t *vm, virtio_if_t *vif, u16 queue_num,
+			     u16 txq_size)
 {
   clib_error_t *error = 0;
   u16 queue_size = 0;
@@ -745,6 +745,16 @@ virtio_pci_vring_split_init (vlib_main_t * vm, virtio_if_t * vif,
 
   if (queue_num % 2)
     {
+      if (txq_size)
+	{
+	  virtio_log_debug (vif, "tx-queue: number %u, default-size %u",
+			    queue_num, queue_size);
+	  vif->virtio_pci_func->set_queue_size (vm, vif, queue_num, txq_size);
+	  queue_size =
+	    vif->virtio_pci_func->get_queue_size (vm, vif, queue_num);
+	  virtio_log_debug (vif, "tx-queue: number %u, new size %u", queue_num,
+			    queue_size);
+	}
       vec_validate_aligned (vif->txq_vrings, TX_QUEUE_ACCESS (queue_num),
 			    CLIB_CACHE_LINE_BYTES);
       vring = vec_elt_at_index (vif->txq_vrings, TX_QUEUE_ACCESS (queue_num));
@@ -886,12 +896,13 @@ virtio_pci_vring_packed_init (vlib_main_t * vm, virtio_if_t * vif,
 }
 
 clib_error_t *
-virtio_pci_vring_init (vlib_main_t * vm, virtio_if_t * vif, u16 queue_num)
+virtio_pci_vring_init (vlib_main_t *vm, virtio_if_t *vif, u16 queue_num,
+		       u16 txq_size)
 {
   if (vif->is_packed)
     return virtio_pci_vring_packed_init (vm, vif, queue_num);
   else
-    return virtio_pci_vring_split_init (vm, vif, queue_num);
+    return virtio_pci_vring_split_init (vm, vif, queue_num, txq_size);
 }
 
 static void
@@ -1229,7 +1240,7 @@ virtio_pci_device_init (vlib_main_t * vm, virtio_if_t * vif,
 
   for (int i = 0; i < vif->max_queue_pairs; i++)
     {
-      if ((error = virtio_pci_vring_init (vm, vif, RX_QUEUE (i))))
+      if ((error = virtio_pci_vring_init (vm, vif, RX_QUEUE (i), 0)))
 	{
 	  args->rv = VNET_API_ERROR_INIT_FAILED;
 	  virtio_log_error (vif, "%s (%u) %s", "error in rxq-queue",
@@ -1244,7 +1255,8 @@ virtio_pci_device_init (vlib_main_t * vm, virtio_if_t * vif,
 	  vif->num_rxqs++;
 	}
 
-      if ((error = virtio_pci_vring_init (vm, vif, TX_QUEUE (i))))
+      if ((error = virtio_pci_vring_init (vm, vif, TX_QUEUE (i),
+					  args->tx_queue_size)))
 	{
 	  args->rv = VNET_API_ERROR_INIT_FAILED;
 	  virtio_log_error (vif, "%s (%u) %s", "error in txq-queue",
@@ -1498,9 +1510,17 @@ virtio_pci_create_if (vlib_main_t * vm, virtio_pci_create_if_args_t * args)
 			    "error encountered during packet buffering init");
 	  goto error;
 	}
+      /*
+       * packet buffering flag needs to be set 1 before calling the
+       * virtio_pre_input_node_enable but after the successful initialization
+       * of buffering queues above.
+       * Packet buffering flag set to 0 if there will be any error during
+       * buffering initialization.
+       */
+      vif->packet_buffering = 1;
+      virtio_pre_input_node_enable (vm, vif);
     }
 
-  virtio_pre_input_node_enable (vm, vif);
   virtio_vring_set_rx_queues (vm, vif);
   virtio_vring_set_tx_queues (vm, vif);
 
@@ -1542,17 +1562,19 @@ virtio_pci_delete_if (vlib_main_t * vm, virtio_if_t * vif)
 
   vlib_pci_intr_disable (vm, vif->pci_dev_handle);
 
-  for (i = 0; i < vif->max_queue_pairs; i++)
-    {
-      vif->virtio_pci_func->del_queue (vm, vif, RX_QUEUE (i));
-      vif->virtio_pci_func->del_queue (vm, vif, TX_QUEUE (i));
-    }
-
-  if (vif->features & VIRTIO_FEATURE (VIRTIO_NET_F_CTRL_VQ))
-    vif->virtio_pci_func->del_queue (vm, vif, vif->max_queue_pairs * 2);
-
   if (vif->virtio_pci_func)
-    vif->virtio_pci_func->device_reset (vm, vif);
+    {
+      for (i = 0; i < vif->max_queue_pairs; i++)
+	{
+	  vif->virtio_pci_func->del_queue (vm, vif, RX_QUEUE (i));
+	  vif->virtio_pci_func->del_queue (vm, vif, TX_QUEUE (i));
+	}
+
+      if (vif->features & VIRTIO_FEATURE (VIRTIO_NET_F_CTRL_VQ))
+	vif->virtio_pci_func->del_queue (vm, vif, vif->max_queue_pairs * 2);
+
+      vif->virtio_pci_func->device_reset (vm, vif);
+    }
 
   if (vif->hw_if_index)
     {
@@ -1573,7 +1595,8 @@ virtio_pci_delete_if (vlib_main_t * vm, virtio_if_t * vif)
     vlib_physmem_free (vm, vring->desc);
   }
 
-  virtio_pre_input_node_disable (vm, vif);
+  if (vif->packet_buffering)
+    virtio_pre_input_node_disable (vm, vif);
 
   vec_foreach_index (i, vif->txq_vrings)
   {

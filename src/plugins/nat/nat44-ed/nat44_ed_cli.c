@@ -180,7 +180,7 @@ snat_set_log_level_command_fn (vlib_main_t * vm,
 {
   unformat_input_t _line_input, *line_input = &_line_input;
   snat_main_t *sm = &snat_main;
-  u8 log_level = NAT_LOG_NONE;
+  u32 log_level = NAT_LOG_NONE;
   clib_error_t *error = 0;
 
   if (!unformat_user (input, unformat_line_input, line_input))
@@ -1058,6 +1058,7 @@ add_lb_static_mapping_command_fn (vlib_main_t * vm,
 	{
 	  clib_memset (&local, 0, sizeof (local));
 	  local.addr = l_addr;
+	  l_port = clib_host_to_net_u16 (l_port);
 	  local.port = (u16) l_port;
 	  local.probability = (u8) probability;
 	  vec_add1 (locals, local);
@@ -1068,6 +1069,7 @@ add_lb_static_mapping_command_fn (vlib_main_t * vm,
 	{
 	  clib_memset (&local, 0, sizeof (local));
 	  local.addr = l_addr;
+	  l_port = clib_host_to_net_u16 (l_port);
 	  local.port = (u16) l_port;
 	  local.probability = (u8) probability;
 	  local.vrf_id = vrf_id;
@@ -1075,7 +1077,9 @@ add_lb_static_mapping_command_fn (vlib_main_t * vm,
 	}
       else if (unformat (line_input, "external %U:%u", unformat_ip4_address,
 			 &e_addr, &e_port))
-	;
+	{
+	  e_port = clib_host_to_net_u16 (e_port);
+	}
       else if (unformat (line_input, "protocol %U", unformat_ip_protocol,
 			 &proto))
 	{

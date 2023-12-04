@@ -28,6 +28,15 @@
 #include <rte_ethdev.h>
 #include <rte_version.h>
 #include <rte_net.h>
+#if RTE_VERSION >= RTE_VERSION_NUM(22, 11, 0, 0)
+#include <rte_bus.h>
+#include <rte_pci.h>
+#include <ctype.h>
+
+#include <bus_driver.h>
+#include <bus_pci_driver.h>
+#include <bus_vmbus_driver.h>
+#endif
 
 #include <vnet/devices/devices.h>
 
@@ -110,14 +119,14 @@ typedef struct
   u16 n_rx_desc;
   u16 n_tx_desc;
   u32 supported_flow_actions;
-  i32 enable_lsc_int : 1;
-  i32 enable_rxq_int : 1;
-  i32 disable_rx_scatter : 1;
-  i32 program_vlans : 1;
-  i32 mq_mode_none : 1;
-  i32 interface_number_from_port_id : 1;
-  i32 use_intel_phdr_cksum : 1;
-  i32 int_unmaskable : 1;
+  u32 enable_lsc_int : 1;
+  u32 enable_rxq_int : 1;
+  u32 disable_rx_scatter : 1;
+  u32 program_vlans : 1;
+  u32 mq_mode_none : 1;
+  u32 interface_number_from_port_id : 1;
+  u32 use_intel_phdr_cksum : 1;
+  u32 int_unmaskable : 1;
 } dpdk_driver_t;
 
 dpdk_driver_t *dpdk_driver_find (const char *name, const char **desc);
@@ -418,6 +427,7 @@ void dpdk_update_link_state (dpdk_device_t * xd, f64 now);
   _ (19, RTE_ETH_RSS_NVGRE, "nvgre")                                          \
   _ (20, RTE_ETH_RSS_GTPU, "gtpu")                                            \
   _ (21, RTE_ETH_RSS_ESP, "esp")                                              \
+  _ (22, RTE_ETH_RSS_L2TPV3, "l2tpv3")                                        \
   _ (60, RTE_ETH_RSS_L4_DST_ONLY, "l4-dst-only")                              \
   _ (61, RTE_ETH_RSS_L4_SRC_ONLY, "l4-src-only")                              \
   _ (62, RTE_ETH_RSS_L3_DST_ONLY, "l3-dst-only")                              \

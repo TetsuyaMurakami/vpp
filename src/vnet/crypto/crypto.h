@@ -33,11 +33,14 @@
   _(AES_256_CTR, "aes-256-ctr", 32)
 
 /* CRYPTO_ID, PRETTY_NAME, KEY_LENGTH_IN_BYTES */
-#define foreach_crypto_aead_alg \
-  _(AES_128_GCM, "aes-128-gcm", 16) \
-  _(AES_192_GCM, "aes-192-gcm", 24) \
-  _(AES_256_GCM, "aes-256-gcm", 32) \
-  _(CHACHA20_POLY1305, "chacha20-poly1305", 32)
+#define foreach_crypto_aead_alg                                               \
+  _ (AES_128_GCM, "aes-128-gcm", 16)                                          \
+  _ (AES_192_GCM, "aes-192-gcm", 24)                                          \
+  _ (AES_256_GCM, "aes-256-gcm", 32)                                          \
+  _ (AES_128_NULL_GMAC, "aes-128-null-gmac", 16)                              \
+  _ (AES_192_NULL_GMAC, "aes-192-null-gmac", 24)                              \
+  _ (AES_256_NULL_GMAC, "aes-256-null-gmac", 32)                              \
+  _ (CHACHA20_POLY1305, "chacha20-poly1305", 32)
 
 #define foreach_crypto_hash_alg                                               \
   _ (SHA1, "sha-1")                                                           \
@@ -89,6 +92,12 @@ typedef enum
   _ (AES_192_GCM, "aes-192-gcm-aad12", 24, 16, 12)                            \
   _ (AES_256_GCM, "aes-256-gcm-aad8", 32, 16, 8)                              \
   _ (AES_256_GCM, "aes-256-gcm-aad12", 32, 16, 12)                            \
+  _ (AES_128_NULL_GMAC, "aes-128-null-gmac-aad8", 16, 16, 8)                  \
+  _ (AES_128_NULL_GMAC, "aes-128-null-gmac-aad12", 16, 16, 12)                \
+  _ (AES_192_NULL_GMAC, "aes-192-null-gmac-aad8", 24, 16, 8)                  \
+  _ (AES_192_NULL_GMAC, "aes-192-null-gmac-aad12", 24, 16, 12)                \
+  _ (AES_256_NULL_GMAC, "aes-256-null-gmac-aad8", 32, 16, 8)                  \
+  _ (AES_256_NULL_GMAC, "aes-256-null-gmac-aad12", 32, 16, 12)                \
   _ (CHACHA20_POLY1305, "chacha20-poly1305-aad8", 32, 16, 8)                  \
   _ (CHACHA20_POLY1305, "chacha20-poly1305-aad12", 32, 16, 12)                \
   _ (CHACHA20_POLY1305, "chacha20-poly1305", 32, 16, 0)
@@ -467,12 +476,8 @@ typedef struct
   uword *alg_index_by_name;
   uword *async_alg_index_by_name;
   vnet_crypto_async_alg_data_t *async_algs;
-  u32 async_refcnt;
   vnet_crypto_async_next_node_t *next_nodes;
   u32 crypto_node_index;
-#define VNET_CRYPTO_ASYNC_DISPATCH_POLLING 0
-#define VNET_CRYPTO_ASYNC_DISPATCH_INTERRUPT 1
-  u8 dispatch_mode;
 } vnet_crypto_main_t;
 
 extern vnet_crypto_main_t crypto_main;
@@ -483,7 +488,7 @@ u32 vnet_crypto_process_chained_ops (vlib_main_t * vm, vnet_crypto_op_t ops[],
 u32 vnet_crypto_process_ops (vlib_main_t * vm, vnet_crypto_op_t ops[],
 			     u32 n_ops);
 
-
+void vnet_crypto_set_async_dispatch (u8 mode, u8 adaptive);
 int vnet_crypto_set_handler2 (char *ops_handler_name, char *engine,
 			      crypto_op_class_type_t oct);
 int vnet_crypto_is_set_handler (vnet_crypto_alg_t alg);
@@ -500,20 +505,12 @@ u32 vnet_crypto_key_add_linked (vlib_main_t * vm,
 				vnet_crypto_key_index_t index_crypto,
 				vnet_crypto_key_index_t index_integ);
 
-clib_error_t *crypto_dispatch_enable_disable (int is_enable);
-
 int vnet_crypto_set_async_handler2 (char *alg_name, char *engine);
 
 int vnet_crypto_is_set_async_handler (vnet_crypto_async_op_id_t opt);
 
-void vnet_crypto_request_async_mode (int is_enable);
-
-void vnet_crypto_set_async_dispatch_mode (u8 mode);
-
 vnet_crypto_async_alg_t vnet_crypto_link_algs (vnet_crypto_alg_t crypto_alg,
 					       vnet_crypto_alg_t integ_alg);
-
-clib_error_t *crypto_dispatch_enable_disable (int is_enable);
 
 format_function_t format_vnet_crypto_alg;
 format_function_t format_vnet_crypto_engine;
@@ -568,12 +565,16 @@ vnet_crypto_async_get_frame (vlib_main_t * vm, vnet_crypto_async_op_id_t opt)
   vnet_crypto_thread_t *ct = cm->threads + vm->thread_index;
   vnet_crypto_async_frame_t *f = NULL;
 
-  pool_get_aligned (ct->frame_pool, f, CLIB_CACHE_LINE_BYTES);
-  if (CLIB_DEBUG > 0)
-    clib_memset (f, 0xfe, sizeof (*f));
-  f->state = VNET_CRYPTO_FRAME_STATE_NOT_PROCESSED;
-  f->op = opt;
-  f->n_elts = 0;
+  if (PREDICT_TRUE (pool_free_elts (ct->frame_pool)))
+    {
+      pool_get_aligned (ct->frame_pool, f, CLIB_CACHE_LINE_BYTES);
+#if CLIB_DEBUG > 0
+      clib_memset (f, 0xfe, sizeof (*f));
+#endif
+      f->state = VNET_CRYPTO_FRAME_STATE_NOT_PROCESSED;
+      f->op = opt;
+      f->n_elts = 0;
+    }
 
   return f;
 }
@@ -593,7 +594,8 @@ vnet_crypto_async_submit_open_frame (vlib_main_t * vm,
 {
   vnet_crypto_main_t *cm = &crypto_main;
   vlib_thread_main_t *tm = vlib_get_thread_main ();
-  u32 i = vlib_num_workers () > 0;
+  u32 i;
+  vlib_node_t *n;
 
   frame->state = VNET_CRYPTO_FRAME_STATE_PENDING;
   frame->enqueue_thread_index = vm->thread_index;
@@ -608,9 +610,10 @@ vnet_crypto_async_submit_open_frame (vlib_main_t * vm,
 
   if (PREDICT_TRUE (ret == 0))
     {
-      if (cm->dispatch_mode == VNET_CRYPTO_ASYNC_DISPATCH_INTERRUPT)
+      n = vlib_get_node (vm, cm->crypto_node_index);
+      if (n->state == VLIB_NODE_STATE_INTERRUPT)
 	{
-	  for (; i < tm->n_vlib_mains; i++)
+	  for (i = 0; i < tm->n_vlib_mains; i++)
 	    vlib_node_set_interrupt_pending (vlib_get_main_by_index (i),
 					     cm->crypto_node_index);
 	}

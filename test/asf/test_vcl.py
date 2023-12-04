@@ -7,8 +7,8 @@ import subprocess
 import signal
 import glob
 from config import config
-from asfframework import VppTestCase, VppTestRunner, Worker
-from vpp_ip_route import VppIpTable, VppIpRoute, VppRoutePath, FibPathProto
+from asfframework import VppAsfTestCase, VppTestRunner, Worker
+from vpp_ip_route import VppIpTable, VppIpRoute, VppRoutePath
 
 iperf3 = "/usr/bin/iperf3"
 
@@ -58,7 +58,7 @@ class VCLAppWorker(Worker):
         super(VCLAppWorker, self).__init__(self.args, logger, env, *args, **kwargs)
 
 
-class VCLTestCase(VppTestCase):
+class VCLTestCase(VppAsfTestCase):
     """VCL Test Class"""
 
     session_startup = ["poll-main"]
@@ -67,7 +67,7 @@ class VCLTestCase(VppTestCase):
     def setUpClass(cls):
         if cls.session_startup:
             conf = "session {" + " ".join(cls.session_startup) + "}"
-            cls.extra_vpp_punt_config = [conf]
+            cls.extra_vpp_config = [conf]
         super(VCLTestCase, cls).setUpClass()
 
     @classmethod
@@ -84,7 +84,7 @@ class VCLTestCase(VppTestCase):
         self.timeout = 20
         self.echo_phrase = "Hello, world! Jenny is a friend of mine."
         self.pre_test_sleep = 0.3
-        self.post_test_sleep = 0.2
+        self.post_test_sleep = 1
         self.sapi_client_sock = ""
         self.sapi_server_sock = ""
 
@@ -162,10 +162,10 @@ class VCLTestCase(VppTestCase):
             table_id += 1
 
         # Configure namespaces
-        self.vapi.app_namespace_add_del(
+        self.vapi.app_namespace_add_del_v4(
             namespace_id="1", secret=1234, sw_if_index=self.loop0.sw_if_index
         )
-        self.vapi.app_namespace_add_del(
+        self.vapi.app_namespace_add_del_v4(
             namespace_id="2", secret=5678, sw_if_index=self.loop1.sw_if_index
         )
 
@@ -212,10 +212,10 @@ class VCLTestCase(VppTestCase):
             table_id += 1
 
         # Configure namespaces
-        self.vapi.app_namespace_add_del(
+        self.vapi.app_namespace_add_del_v4(
             namespace_id="1", secret=1234, sw_if_index=self.loop0.sw_if_index
         )
-        self.vapi.app_namespace_add_del(
+        self.vapi.app_namespace_add_del_v4(
             namespace_id="2", secret=5678, sw_if_index=self.loop1.sw_if_index
         )
 
@@ -996,6 +996,7 @@ class LDPThruHostStackIperfUdp(VCLTestCase):
             "-t 2",
             "-u",
             "-l 1400",
+            "-P 2",
             "-c",
             self.loop0.local_ip4,
         ]

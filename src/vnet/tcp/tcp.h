@@ -66,6 +66,13 @@ typedef struct tcp_wrk_stats_
 #undef _
 } tcp_wrk_stats_t;
 
+typedef enum
+{
+#define _(name, type, str) TCP_STAT_##name,
+  foreach_tcp_wrk_stat
+#undef _
+} tcp_wrk_stats_e;
+
 typedef struct tcp_free_req_
 {
   clib_time_type_t free_time;
@@ -215,9 +222,6 @@ typedef struct _tcp_main
   /** vlib buffer size */
   u32 bytes_per_buffer;
 
-  /** Session layer edge indices to ip lookup (syns, rst) */
-  u32 ipl_next_node[2];
-
   /** Dispatch table by state and flags */
   tcp_lookup_dispatch_t dispatch_table[TCP_N_STATES][64];
 
@@ -235,6 +239,9 @@ typedef struct _tcp_main
 
   /** Flag that indicates if stack is on or off */
   u8 is_enabled;
+
+  /** Set if counters on stats segment initialized */
+  u8 counters_init;
 
   /** Flag that indicates if v4 punting is enabled */
   u8 punt_unknown4;
@@ -270,6 +277,8 @@ extern vlib_node_registration_t tcp4_listen_node;
 extern vlib_node_registration_t tcp6_listen_node;
 extern vlib_node_registration_t tcp4_input_nolookup_node;
 extern vlib_node_registration_t tcp6_input_nolookup_node;
+extern vlib_node_registration_t tcp4_drop_node;
+extern vlib_node_registration_t tcp6_drop_node;
 
 #define tcp_cfg tcp_main.cfg
 #define tcp_node_index(node_id, is_ip4) 				\

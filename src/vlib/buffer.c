@@ -58,9 +58,6 @@ STATIC_ASSERT_FITS_IN (vlib_buffer_t, ref_count, 16);
 STATIC_ASSERT_FITS_IN (vlib_buffer_t, buffer_pool_index, 16);
 #endif
 
-/* Make sure that buffer template size is not accidentally changed */
-STATIC_ASSERT_OFFSET_OF (vlib_buffer_t, template_end, 64);
-
 u16 __vlib_buffer_external_hdr_size = 0;
 
 uword
@@ -484,16 +481,18 @@ vlib_buffer_alloc_size (uword ext_hdr_size, uword data_size)
 }
 
 u8
-vlib_buffer_pool_create (vlib_main_t * vm, char *name, u32 data_size,
-			 u32 physmem_map_index)
+vlib_buffer_pool_create (vlib_main_t *vm, u32 data_size, u32 physmem_map_index,
+			 char *fmt, ...)
 {
   vlib_buffer_main_t *bm = vm->buffer_main;
   vlib_buffer_pool_t *bp;
   vlib_physmem_map_t *m = vlib_physmem_get_map (vm, physmem_map_index);
   uword start = pointer_to_uword (m->base);
   uword size = (uword) m->n_pages << m->log2_page_size;
-  uword i, j;
-  u32 alloc_size, n_alloc_per_page;
+  uword page_mask = ~pow2_mask (m->log2_page_size);
+  u8 *p;
+  u32 alloc_size;
+  va_list va;
 
   if (vec_len (bm->buffer_pools) >= 255)
     return ~0;
@@ -531,48 +530,57 @@ vlib_buffer_pool_create (vlib_main_t * vm, char *name, u32 data_size,
   bp->buffer_template.buffer_pool_index = bp->index;
   bp->buffer_template.ref_count = 1;
   bp->physmem_map_index = physmem_map_index;
-  bp->name = format (0, "%s%c", name, 0);
   bp->data_size = data_size;
   bp->numa_node = m->numa_node;
+  bp->log2_page_size = m->log2_page_size;
+
+  va_start (va, fmt);
+  bp->name = va_format (0, fmt, &va);
+  va_end (va);
 
   vec_validate_aligned (bp->threads, vlib_get_n_threads () - 1,
 			CLIB_CACHE_LINE_BYTES);
 
   alloc_size = vlib_buffer_alloc_size (bm->ext_hdr_size, data_size);
-  n_alloc_per_page = (1ULL << m->log2_page_size) / alloc_size;
+  bp->alloc_size = alloc_size;
 
   /* preallocate buffer indices memory */
-  bp->n_buffers = m->n_pages * n_alloc_per_page;
-  bp->buffers = clib_mem_alloc_aligned (bp->n_buffers * sizeof (u32),
-					CLIB_CACHE_LINE_BYTES);
+  bp->buffers = clib_mem_alloc_aligned (
+    round_pow2 ((size / alloc_size) * sizeof (u32), CLIB_CACHE_LINE_BYTES),
+    CLIB_CACHE_LINE_BYTES);
 
   clib_spinlock_init (&bp->lock);
 
-  for (j = 0; j < m->n_pages; j++)
-    for (i = 0; i < n_alloc_per_page; i++)
-      {
-	u8 *p;
-	u32 bi;
+  p = m->base;
 
-	p = m->base + (j << m->log2_page_size) + i * alloc_size;
-	p += bm->ext_hdr_size;
+  /* start with naturally aligned address */
+  p += alloc_size - (uword) p % alloc_size;
 
-	/*
-	 * Waste 1 buffer (maximum) so that 0 is never a valid buffer index.
-	 * Allows various places to ASSERT (bi != 0). Much easier
-	 * than debugging downstream crashes in successor nodes.
-	 */
-	if (p == m->base)
-	  continue;
+  /*
+   * Waste 1 buffer (maximum) so that 0 is never a valid buffer index.
+   * Allows various places to ASSERT (bi != 0). Much easier
+   * than debugging downstream crashes in successor nodes.
+   */
+  if (p == m->base)
+    p += alloc_size;
 
-	vlib_buffer_copy_template ((vlib_buffer_t *) p, &bp->buffer_template);
+  for (; p < (u8 *) m->base + size - alloc_size; p += alloc_size)
+    {
+      vlib_buffer_t *b;
+      u32 bi;
 
-	bi = vlib_get_buffer_index (vm, (vlib_buffer_t *) p);
+      /* skip if buffer spans across page boundary */
+      if (((uword) p & page_mask) != ((uword) (p + alloc_size) & page_mask))
+	continue;
 
-	bp->buffers[bp->n_avail++] = bi;
+      b = (vlib_buffer_t *) (p + bm->ext_hdr_size);
+      b->template = bp->buffer_template;
+      bi = vlib_get_buffer_index (vm, b);
+      bp->buffers[bp->n_avail++] = bi;
+      vlib_get_buffer (vm, bi);
+    }
 
-	vlib_get_buffer (vm, bi);
-      }
+  bp->n_buffers = bp->n_avail;
 
   return bp->index;
 }
@@ -595,9 +603,10 @@ format_vlib_buffer_pool (u8 * s, va_list * va)
     cached += bpt->n_cached;
   /* *INDENT-ON* */
 
-  s = format (s, "%-20s%=6d%=6d%=6u%=11u%=6u%=8u%=8u%=8u",
-	      bp->name, bp->index, bp->numa_node, bp->data_size +
-	      sizeof (vlib_buffer_t) + vm->buffer_main->ext_hdr_size,
+  s = format (s, "%-20v%=6d%=6d%=6u%=11u%=6u%=8u%=8u%=8u", bp->name, bp->index,
+	      bp->numa_node,
+	      bp->data_size + sizeof (vlib_buffer_t) +
+		vm->buffer_main->ext_hdr_size,
 	      bp->data_size, bp->n_buffers, bp->n_avail, cached,
 	      bp->n_buffers - bp->n_avail - cached);
 
@@ -694,7 +703,6 @@ vlib_buffer_main_init_numa_node (struct vlib_main_t *vm, u32 numa_node,
   vlib_buffer_main_t *bm = vm->buffer_main;
   u32 physmem_map_index;
   clib_error_t *error;
-  u8 *name = 0;
 
   if (bm->log2_page_size == CLIB_MEM_PAGE_SZ_UNKNOWN)
     {
@@ -725,14 +733,12 @@ vlib_buffer_main_init_numa_node (struct vlib_main_t *vm, u32 numa_node,
     return error;
 
 buffer_pool_create:
-  name = format (name, "default-numa-%d%c", numa_node, 0);
-  *index = vlib_buffer_pool_create (vm, (char *) name,
-				    vlib_buffer_get_default_data_size (vm),
-				    physmem_map_index);
+  *index =
+    vlib_buffer_pool_create (vm, vlib_buffer_get_default_data_size (vm),
+			     physmem_map_index, "default-numa-%d", numa_node);
 
   if (*index == (u8) ~ 0)
     error = clib_error_return (0, "maximum number of buffer pools reached");
-  vec_free (name);
 
 
   return error;
@@ -892,16 +898,16 @@ vlib_buffer_main_init (struct vlib_main_t * vm)
       continue;
 
     reg.entry_index =
-      vlib_stats_add_gauge ("/buffer-pools/%s/cached", bp->name);
+      vlib_stats_add_gauge ("/buffer-pools/%v/cached", bp->name);
     reg.collect_fn = buffer_gauges_collect_cached_fn;
     vlib_stats_register_collector_fn (&reg);
 
-    reg.entry_index = vlib_stats_add_gauge ("/buffer-pools/%s/used", bp->name);
+    reg.entry_index = vlib_stats_add_gauge ("/buffer-pools/%v/used", bp->name);
     reg.collect_fn = buffer_gauges_collect_used_fn;
     vlib_stats_register_collector_fn (&reg);
 
     reg.entry_index =
-      vlib_stats_add_gauge ("/buffer-pools/%s/available", bp->name);
+      vlib_stats_add_gauge ("/buffer-pools/%v/available", bp->name);
     reg.collect_fn = buffer_gauges_collect_available_fn;
     vlib_stats_register_collector_fn (&reg);
   }

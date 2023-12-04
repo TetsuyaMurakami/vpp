@@ -690,8 +690,8 @@ typedef struct
   vlib_node_runtime_t *nodes_by_type[VLIB_N_NODE_TYPE];
 
   /* Node runtime indices for input nodes with pending interrupts. */
-  void *interrupts;
-  volatile u32 *pending_interrupts;
+  void *input_node_interrupts;
+  void *pre_input_node_interrupts;
 
   /* Input nodes are switched from/to interrupt to/from polling mode
      when average vector length goes above/below polling/interrupt

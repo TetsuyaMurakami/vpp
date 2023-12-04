@@ -16,14 +16,8 @@
 /build-root/*.tar.xz
 /build-root/*.changes
 /build-root/rpmbuild/
-/build-root/test-doc/
-/build-root/test-cov/
+/build-root/test-coverage/
 /build-root/test/
-/test/run/
-/test/build/
-/test/coverage/
-/test/vapi_test/
-/test/doc/build/
 /build-config.mk
 /build/external/*.tar.gz
 /build/external/*.tar.xz
@@ -129,3 +123,15 @@ compile_commands.json
 /extras/hs-test/hs-test
 /extras/hs-test/http_server
 /extras/hs-test/.build.vpp
+
+# ./configure
+/CMakeFiles
+/bin
+/lib
+/.ninja_deps
+/.ninja_log
+/CMakeCache.txt
+/build.ninja
+/cmake_install.cmake
+/startup.conf
+/startup.vpp

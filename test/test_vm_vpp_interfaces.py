@@ -11,7 +11,8 @@ from vpp_qemu_utils import (
     add_namespace_route,
 )
 from vpp_iperf import start_iperf, stop_iperf
-from framework import VppTestCase, VppTestRunner
+from framework import VppTestCase
+from asfframework import VppTestRunner, tag_fixme_debian11, is_distro_debian11
 from config import config
 from vpp_papi import VppEnum
 import time
@@ -63,7 +64,12 @@ layer3 = test_config["L3"]
 def create_test(test_name, test, ip_version, mtu):
     """Create and return a unittest method for a test."""
 
-    @unittest.skipUnless(config.extended, "part of extended tests")
+    @unittest.skipIf(
+        is_distro_debian11, "FIXME intermittent test failures on debian11 distro"
+    )
+    @unittest.skipIf(
+        config.skip_netns_tests, "netns not available or disabled from cli"
+    )
     def test_func(self):
         self.logger.debug(f"Starting unittest:{test_name}")
         self.setUpTestToplogy(test=test, ip_version=ip_version)
@@ -98,6 +104,8 @@ def create_test(test_name, test, ip_version, mtu):
 
 def generate_vpp_interface_tests():
     """Generate unittests for testing vpp interfaces."""
+    if config.skip_netns_tests:
+        print("Skipping netns tests")
     for test in tests:
         for ip_version in test_config["ip_versions"]:
             for mtu in test_config["mtus"]:
@@ -107,10 +115,12 @@ def generate_vpp_interface_tests():
                     + f"_v{test['client_if_version']}_"
                     + f"gso_{test.get('client_if_gso', 0)}_"
                     + f"gro_{test.get('client_if_gro', 0)}_"
+                    + f"checksum_{test.get('client_if_checksum_offload', 0)}_"
                     + f"to_server_{test['server_if_type']}"
                     + f"_v{test['server_if_version']}_"
                     + f"gso_{test.get('server_if_gso', 0)}_"
                     + f"gro_{test.get('server_if_gro', 0)}_"
+                    + f"checksum_{test.get('server_if_checksum_offload', 0)}_"
                     + f"mtu_{mtu}_mode_{test['x_connect_mode']}_"
                     + f"tcp_ipv{ip_version}"
                 )
@@ -120,6 +130,7 @@ def generate_vpp_interface_tests():
                 setattr(TestVPPInterfacesQemu, test_name, test_func)
 
 
+@tag_fixme_debian11
 class TestVPPInterfacesQemu(VppTestCase):
     """Test VPP interfaces inside a QEMU VM for IPv4/v6.
 
@@ -183,6 +194,8 @@ class TestVPPInterfacesQemu(VppTestCase):
         enable_server_if_gso = test.get("server_if_gso", 0)
         enable_client_if_gro = test.get("client_if_gro", 0)
         enable_server_if_gro = test.get("server_if_gro", 0)
+        enable_client_if_checksum_offload = test.get("client_if_checksum_offload", 0)
+        enable_server_if_checksum_offload = test.get("server_if_checksum_offload", 0)
         ## Handle client interface types
         if client_if_type == "af_packet":
             create_host_interface(
@@ -236,6 +249,7 @@ class TestVPPInterfacesQemu(VppTestCase):
                 host_if_name=f"{client_if_type}0",
                 enable_gso=enable_client_if_gso,
                 enable_gro=enable_client_if_gro,
+                enable_checksum_offload=enable_client_if_checksum_offload,
             )
             self.vpp_interfaces.append(self.ingress_if_idx)
             self.linux_interfaces.append([client_namespace, f"{client_if_type}0"])
@@ -290,6 +304,7 @@ class TestVPPInterfacesQemu(VppTestCase):
                 host_if_name=f"{server_if_type}0",
                 enable_gso=enable_server_if_gso,
                 enable_gro=enable_server_if_gro,
+                enable_checksum_offload=enable_server_if_checksum_offload,
             )
             self.vpp_interfaces.append(self.egress_if_idx)
             self.linux_interfaces.append([server_namespace, f"{server_if_type}0"])
@@ -436,6 +451,7 @@ class TestVPPInterfacesQemu(VppTestCase):
         host_if_name=None,
         enable_gso=0,
         enable_gro=0,
+        enable_checksum_offload=0,
     ):
         """Create a tapv2 or tunv2 interface in VPP and attach to host.
 
@@ -453,6 +469,7 @@ class TestVPPInterfacesQemu(VppTestCase):
         host_if_name -- host side interface name
         enable_gso -- enable GSO
         enable_gro -- enable GSO/GRO-Coalesce
+        enable_checksum_offload -- enable checksum offload without gso
         """
         TapFlags = VppEnum.vl_api_tap_flags_t
         tap_flags = 0
@@ -464,6 +481,8 @@ class TestVPPInterfacesQemu(VppTestCase):
                 )
             elif enable_gso:
                 tap_flags = tap_flags | TapFlags.TAP_API_FLAG_GSO
+            elif enable_checksum_offload:
+                tap_flags = tap_flags | TapFlags.TAP_API_FLAG_CSUM_OFFLOAD
         elif int_type == "tap":
             if enable_gro:
                 tap_flags = (
@@ -471,6 +490,8 @@ class TestVPPInterfacesQemu(VppTestCase):
                 )
             elif enable_gso:
                 tap_flags = TapFlags.TAP_API_FLAG_GSO
+            elif enable_checksum_offload:
+                tap_flags = tap_flags | TapFlags.TAP_API_FLAG_CSUM_OFFLOAD
 
         api_args = {
             "id": id,

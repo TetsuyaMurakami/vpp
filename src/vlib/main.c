@@ -1471,9 +1471,6 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
   else
     cpu_time_now = clib_cpu_time_now ();
 
-  /* Pre-allocate interupt runtime indices and lock. */
-  vec_validate_aligned (nm->pending_interrupts, 0, CLIB_CACHE_LINE_BYTES);
-
   /* Pre-allocate expired nodes. */
   if (!nm->polling_threshold_vector_length)
     nm->polling_threshold_vector_length = 10;
@@ -1552,6 +1549,22 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
 				      /* frame */ 0,
 				      cpu_time_now);
 
+      if (clib_interrupt_is_any_pending (nm->pre_input_node_interrupts))
+	{
+	  int int_num = -1;
+
+	  while ((int_num = clib_interrupt_get_next_and_clear (
+		    nm->pre_input_node_interrupts, int_num)) != -1)
+	    {
+	      vlib_node_runtime_t *n;
+	      n = vec_elt_at_index (
+		nm->nodes_by_type[VLIB_NODE_TYPE_PRE_INPUT], int_num);
+	      cpu_time_now = dispatch_node (vm, n, VLIB_NODE_TYPE_PRE_INPUT,
+					    VLIB_NODE_STATE_INTERRUPT,
+					    /* frame */ 0, cpu_time_now);
+	    }
+	}
+
       /* Next process input nodes. */
       vec_foreach (n, nm->nodes_by_type[VLIB_NODE_TYPE_INPUT])
 	cpu_time_now = dispatch_node (vm, n,
@@ -1563,16 +1576,14 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
       if (PREDICT_TRUE (is_main && vm->queue_signal_pending == 0))
 	vm->queue_signal_callback (vm);
 
-      if (__atomic_load_n (nm->pending_interrupts, __ATOMIC_ACQUIRE))
+      if (clib_interrupt_is_any_pending (nm->input_node_interrupts))
 	{
 	  int int_num = -1;
-	  *nm->pending_interrupts = 0;
 
-	  while ((int_num =
-		    clib_interrupt_get_next (nm->interrupts, int_num)) != -1)
+	  while ((int_num = clib_interrupt_get_next_and_clear (
+		    nm->input_node_interrupts, int_num)) != -1)
 	    {
 	      vlib_node_runtime_t *n;
-	      clib_interrupt_clear (nm->interrupts, int_num);
 	      n = vec_elt_at_index (nm->nodes_by_type[VLIB_NODE_TYPE_INPUT],
 				    int_num);
 	      cpu_time_now = dispatch_node (vm, n, VLIB_NODE_TYPE_INPUT,

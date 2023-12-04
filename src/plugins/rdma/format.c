@@ -281,7 +281,7 @@ format_rdma_rxq (u8 * s, va_list * args)
 
   if (rd->flags & RDMA_DEVICE_F_MLX5DV)
     {
-      u32 next_cqe_index = rxq->cq_ci & (rxq->size - 1);
+      u32 next_cqe_index = rxq->cq_ci & ((1 << rxq->log2_cq_size) - 1);
       s = format (s, "\n%Uwq: stride %u wqe-cnt %u",
 		  format_white_space, indent + 2, rxq->wq_stride,
 		  rxq->wqe_cnt);
@@ -292,9 +292,8 @@ format_rdma_rxq (u8 * s, va_list * args)
 		  next_cqe_index);
       s = format (s, "\n%U%U", format_white_space, indent + 6,
 		  format_mlx5_cqe_rx, rxq->cqes + next_cqe_index);
-      s = format (s, "\n%U%U", format_white_space, indent + 6,
-		  format_hexdump, rxq->cqes + next_cqe_index,
-		  sizeof (mlx5dv_cqe_t));
+      s = format (s, "\n%U%U", format_white_space, indent + 6, format_hexdump,
+		  rxq->cqes + next_cqe_index, (u32) sizeof (mlx5dv_cqe_t));
     }
 
   return s;

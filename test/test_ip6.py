@@ -5,7 +5,6 @@ from socket import inet_pton, inet_ntop
 import unittest
 
 from parameterized import parameterized
-import scapy.compat
 import scapy.layers.inet6 as inet6
 from scapy.layers.inet import UDP, IP
 from scapy.contrib.mpls import MPLS
@@ -26,7 +25,6 @@ from scapy.layers.inet6 import (
     ICMPv6EchoReply,
     IPv6ExtHdrHopByHop,
     ICMPv6MLReport2,
-    ICMPv6MLDMultAddrRec,
 )
 from scapy.layers.l2 import Ether, Dot1Q, GRE
 from scapy.packet import Raw
@@ -35,14 +33,14 @@ from scapy.utils6 import (
     in6_getnsmac,
     in6_ptop,
     in6_islladdr,
-    in6_mactoifaceid,
 )
 from six import moves
 
-from framework import VppTestCase, VppTestRunner, tag_run_solo
+from framework import VppTestCase
+from asfframework import VppTestRunner, tag_run_solo
 from util import ppp, ip6_normalize, mk_ll_addr
 from vpp_papi import VppEnum
-from vpp_ip import DpoProto, VppIpPuntPolicer, VppIpPuntRedirect, VppIpPathMtu
+from vpp_ip import VppIpPuntPolicer, VppIpPuntRedirect, VppIpPathMtu
 from vpp_ip_route import (
     VppIpRoute,
     VppRoutePath,
@@ -141,7 +139,7 @@ class TestIPv6ND(VppTestCase):
         self.assertEqual(in6_ptop(ns.tgt), in6_ptop(tgt_ip))
 
         # packet is from the router's local address
-        self.assertEqual(in6_ptop(rx[IPv6].src), intf.local_ip6)
+        self.assertEqual(in6_ptop(rx[IPv6].src), intf.local_ip6_ll)
 
         # Src link-layer options should have the router's MAC
         sll = rx[ICMPv6NDOptSrcLLAddr]
@@ -2975,7 +2973,6 @@ class TestIP6Input(VppTestCase):
         ]
     )
     def test_ip_input_no_replies(self, name, src, dst, l4, msg, timeout):
-
         self._testMethodDoc = "IPv6 Input Exception - %s" % name
 
         p_version = (

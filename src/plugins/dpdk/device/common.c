@@ -47,8 +47,8 @@ static struct
 void
 dpdk_device_error (dpdk_device_t * xd, char *str, int rv)
 {
-  dpdk_log_err ("Interface %U error %d: %s",
-		format_dpdk_device_name, xd->port_id, rv, rte_strerror (rv));
+  dpdk_log_err ("Interface %U error %d: %s", format_dpdk_device_name,
+		xd->device_index, rv, rte_strerror (rv));
   xd->errors = clib_error_return (xd->errors, "%s[port:%d, errno:%d]: %s",
 				  str, xd->port_id, rv, rte_strerror (rv));
 }
@@ -134,11 +134,6 @@ dpdk_device_setup (dpdk_device_t * xd)
   dpdk_log_debug ("[%u] Configured TX offloads: %U", xd->port_id,
 		  format_dpdk_tx_offload_caps, txo);
 
-  /* Enable flow director when flows exist */
-  if (xd->supported_flow_actions &&
-      (xd->flags & DPDK_DEVICE_FLAG_RX_FLOW_OFFLOAD) != 0)
-    conf.fdir_conf.mode = RTE_FDIR_MODE_PERFECT;
-
   /* finalize configuration */
   conf.rxmode.offloads = rxo;
   conf.txmode.offloads = txo;
@@ -165,7 +160,6 @@ dpdk_device_setup (dpdk_device_t * xd)
     {
       conf.rxmode.max_rx_pkt_len = dev_info.max_rx_pktlen;
       xd->max_supported_frame_size = dev_info.max_rx_pktlen;
-      mtu = xd->max_supported_frame_size - xd->driver_frame_overhead;
     }
   else
     {
@@ -336,7 +330,7 @@ dpdk_setup_interrupts (dpdk_device_t *xd)
   if (rte_eth_dev_rx_intr_enable (xd->port_id, 0))
     {
       dpdk_log_info ("probe for interrupt mode for device %U. Failed.\n",
-		     format_dpdk_device_name, xd->port_id);
+		     format_dpdk_device_name, xd->device_index);
     }
   else
     {
@@ -344,7 +338,7 @@ dpdk_setup_interrupts (dpdk_device_t *xd)
       if (!(xd->flags & DPDK_DEVICE_FLAG_INT_UNMASKABLE))
 	rte_eth_dev_rx_intr_disable (xd->port_id, 0);
       dpdk_log_info ("Probe for interrupt mode for device %U. Success.\n",
-		     format_dpdk_device_name, xd->port_id);
+		     format_dpdk_device_name, xd->device_index);
     }
 
   if (xd->flags & DPDK_DEVICE_FLAG_INT_SUPPORTED)
@@ -365,8 +359,8 @@ dpdk_setup_interrupts (dpdk_device_t *xd)
 	  f.flags = UNIX_FILE_EVENT_EDGE_TRIGGERED;
 	  f.file_descriptor = rxq->efd;
 	  f.private_data = rxq->queue_index;
-	  f.description =
-	    format (0, "%U queue %u", format_dpdk_device_name, xd->port_id, q);
+	  f.description = format (0, "%U queue %u", format_dpdk_device_name,
+				  xd->device_index, q);
 	  rxq->clib_file_index = clib_file_add (&file_main, &f);
 	  vnet_hw_if_set_rx_queue_file_index (vnm, rxq->queue_index,
 					      rxq->clib_file_index);
@@ -424,8 +418,8 @@ dpdk_device_start (dpdk_device_t * xd)
 
   rte_eth_allmulticast_enable (xd->port_id);
 
-  dpdk_log_info ("Interface %U started",
-		 format_dpdk_device_name, xd->port_id);
+  dpdk_log_info ("Interface %U started", format_dpdk_device_name,
+		 xd->device_index);
 }
 
 void
@@ -438,8 +432,8 @@ dpdk_device_stop (dpdk_device_t * xd)
   rte_eth_dev_stop (xd->port_id);
   clib_memset (&xd->link, 0, sizeof (struct rte_eth_link));
 
-  dpdk_log_info ("Interface %U stopped",
-		 format_dpdk_device_name, xd->port_id);
+  dpdk_log_info ("Interface %U stopped", format_dpdk_device_name,
+		 xd->device_index);
 }
 
 void vl_api_force_rpc_call_main_thread (void *fp, u8 * data, u32 data_length);
@@ -487,7 +481,11 @@ dpdk_get_pci_device (const struct rte_eth_dev_info *info)
   const struct rte_bus *bus;
 
   bus = rte_bus_find_by_device (info->device);
+#if RTE_VERSION >= RTE_VERSION_NUM(22, 11, 0, 0)
+  if (bus && !strcmp (rte_bus_name (bus), "pci"))
+#else
   if (bus && !strcmp (bus->name, "pci"))
+#endif
     return RTE_DEV_TO_PCI (info->device);
   else
     return NULL;
@@ -500,7 +498,11 @@ dpdk_get_vmbus_device (const struct rte_eth_dev_info *info)
   const struct rte_bus *bus;
 
   bus = rte_bus_find_by_device (info->device);
+#if RTE_VERSION >= RTE_VERSION_NUM(22, 11, 0, 0)
+  if (bus && !strcmp (rte_bus_name (bus), "vmbus"))
+#else
   if (bus && !strcmp (bus->name, "vmbus"))
+#endif
     return container_of (info->device, struct rte_vmbus_device, device);
   else
     return NULL;

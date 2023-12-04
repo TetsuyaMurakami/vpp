@@ -17,6 +17,9 @@
  *------------------------------------------------------------------
  */
 
+#define _GNU_SOURCE
+#include <string.h>
+
 #include <vnet/vnet.h>
 #include <vlibmemory/api.h>
 
@@ -384,7 +387,6 @@ vl_api_sw_interface_dump_t_handler (vl_api_sw_interface_dump_t * mp)
       vec_add1 (filter, 0);	/* Ensure it's a C string for strcasecmp() */
     }
 
-  char *strcasestr (char *, char *);	/* lnx hdr file botch */
   /* *INDENT-OFF* */
   pool_foreach (swif, im->sw_interfaces)
    {
@@ -1214,7 +1216,7 @@ out:
 static void
 send_interface_tx_placement_details (vnet_hw_if_tx_queue_t **all_queues,
 				     u32 index, vl_api_registration_t *rp,
-				     u32 native_context)
+				     u32 context)
 {
   vnet_main_t *vnm = vnet_get_main ();
   vl_api_sw_interface_tx_placement_details_t *rmp;
@@ -1223,7 +1225,6 @@ send_interface_tx_placement_details (vnet_hw_if_tx_queue_t **all_queues,
   uword *bitmap = q[0]->threads;
   u32 hw_if_index = q[0]->hw_if_index;
   vnet_hw_interface_t *hw_if = vnet_get_hw_interface (vnm, hw_if_index);
-  u32 context = clib_host_to_net_u32 (native_context);
 
   n_bits = clib_bitmap_count_set_bits (bitmap);
   u32 n = n_bits * sizeof (u32);
@@ -1602,6 +1603,33 @@ static void
   ip_interface_address_sweep ();
 
   REPLY_MACRO (VL_API_SW_INTERFACE_ADDRESS_REPLACE_END_REPLY);
+}
+
+static void
+vl_api_pcap_set_filter_function_t_handler (
+  vl_api_pcap_set_filter_function_t *mp)
+{
+  vnet_main_t *vnm = vnet_get_main ();
+  vnet_pcap_t *pp = &vnm->pcap;
+  vl_api_pcap_set_filter_function_reply_t *rmp;
+  unformat_input_t input = { 0 };
+  vlib_is_packet_traced_fn_t *f;
+  char *filter_name;
+  int rv = 0;
+  filter_name = vl_api_from_api_to_new_c_string (&mp->filter_function_name);
+  unformat_init_cstring (&input, filter_name);
+  if (unformat (&input, "%U", unformat_vlib_trace_filter_function, &f) == 0)
+    {
+      rv = -1;
+      goto done;
+    }
+
+  pp->current_filter_function = f;
+
+done:
+  unformat_free (&input);
+  vec_free (filter_name);
+  REPLY_MACRO (VL_API_PCAP_SET_FILTER_FUNCTION_REPLY);
 }
 
 static void

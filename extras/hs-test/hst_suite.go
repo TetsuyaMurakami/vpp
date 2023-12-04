@@ -1,10 +1,13 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"os"
+	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/edwarnicke/exechelper"
@@ -14,22 +17,47 @@ import (
 )
 
 const (
-	defaultNetworkNumber int = 1
+	DEFAULT_NETWORK_NUM int = 1
 )
 
 var isPersistent = flag.Bool("persist", false, "persists topology config")
 var isVerbose = flag.Bool("verbose", false, "verbose test output")
 var isUnconfiguring = flag.Bool("unconfigure", false, "remove topology")
 var isVppDebug = flag.Bool("debug", false, "attach gdb to vpp")
+var nConfiguredCpus = flag.Int("cpus", 1, "number of CPUs assigned to vpp")
+var vppSourceFileDir = flag.String("vppsrc", "", "vpp source file directory")
 
 type HstSuite struct {
 	suite.Suite
-	containers    map[string]*Container
-	volumes       []string
-	netConfigs    []NetConfig
-	netInterfaces map[string]*NetInterface
-	addresser     *Addresser
-	testIds       map[string]string
+	containers       map[string]*Container
+	volumes          []string
+	netConfigs       []NetConfig
+	netInterfaces    map[string]*NetInterface
+	ip4AddrAllocator *Ip4AddressAllocator
+	testIds          map[string]string
+	cpuAllocator     *CpuAllocatorT
+	cpuContexts      []*CpuContext
+	cpuPerVpp        int
+}
+
+func (s *HstSuite) SetupSuite() {
+	var err error
+	s.cpuAllocator, err = CpuAllocator()
+	if err != nil {
+		s.FailNow("failed to init cpu allocator: %v", err)
+	}
+	s.cpuPerVpp = *nConfiguredCpus
+}
+
+func (s *HstSuite) AllocateCpus() []int {
+	cpuCtx, err := s.cpuAllocator.Allocate(s.cpuPerVpp)
+	s.assertNil(err)
+	s.AddCpuContext(cpuCtx)
+	return cpuCtx.cpus
+}
+
+func (s *HstSuite) AddCpuContext(cpuCtx *CpuContext) {
+	s.cpuContexts = append(s.cpuContexts, cpuCtx)
 }
 
 func (s *HstSuite) TearDownSuite() {
@@ -39,6 +67,9 @@ func (s *HstSuite) TearDownSuite() {
 func (s *HstSuite) TearDownTest() {
 	if *isPersistent {
 		return
+	}
+	for _, c := range s.cpuContexts {
+		c.Release()
 	}
 	s.resetContainers()
 	s.removeVolumes()
@@ -66,7 +97,7 @@ func (s *HstSuite) setupVolumes() {
 
 func (s *HstSuite) setupContainers() {
 	for _, container := range s.containers {
-		if container.isOptional == false {
+		if !container.isOptional {
 			container.run()
 		}
 	}
@@ -128,6 +159,26 @@ func (s *HstSuite) log(args ...any) {
 func (s *HstSuite) skip(args ...any) {
 	s.log(args...)
 	s.T().SkipNow()
+}
+
+func (s *HstSuite) SkipIfMultiWorker(args ...any) {
+	if *nConfiguredCpus > 1 {
+		s.skip("test case not supported with multiple vpp workers")
+	}
+}
+
+func (s *HstSuite) SkipUnlessExtendedTestsBuilt() {
+	imageName := "hs-test/nginx-http3"
+
+	cmd := exec.Command("docker", "images", imageName)
+	byteOutput, err := cmd.CombinedOutput()
+	if err != nil {
+		s.log("error while searching for docker image")
+		return
+	}
+	if !strings.Contains(string(byteOutput), imageName) {
+		s.skip("extended tests not built")
+	}
 }
 
 func (s *HstSuite) resetContainers() {
@@ -196,7 +247,7 @@ func (s *HstSuite) loadNetworkTopology(topologyName string) {
 		s.T().Fatalf("unmarshal error: %v", err)
 	}
 
-	s.addresser = newAddresser(s)
+	s.ip4AddrAllocator = NewIp4AddressAllocator()
 	s.netInterfaces = make(map[string]*NetInterface)
 	for _, elem := range yamlTopo.Devices {
 		switch elem["type"].(string) {
@@ -210,7 +261,7 @@ func (s *HstSuite) loadNetworkTopology(topologyName string) {
 			}
 		case Veth, Tap:
 			{
-				if netIf, err := newNetworkInterface(elem, s.addresser); err == nil {
+				if netIf, err := newNetworkInterface(elem, s.ip4AddrAllocator); err == nil {
 					s.netConfigs = append(s.netConfigs, netIf)
 					s.netInterfaces[netIf.Name()] = netIf
 				} else {
@@ -266,43 +317,80 @@ func (s *HstSuite) getTestId() string {
 	return s.testIds[testName]
 }
 
-type AddressCounter = int
-
-type Addresser struct {
-	networks map[int]AddressCounter
-	suite    *HstSuite
+func (s *HstSuite) startServerApp(running chan error, done chan struct{}, env []string) {
+	cmd := exec.Command("iperf3", "-4", "-s")
+	if env != nil {
+		cmd.Env = env
+	}
+	s.log(cmd)
+	err := cmd.Start()
+	if err != nil {
+		msg := fmt.Errorf("failed to start iperf server: %v", err)
+		running <- msg
+		return
+	}
+	running <- nil
+	<-done
+	cmd.Process.Kill()
 }
 
-func (a *Addresser) addNetwork(networkNumber int) {
-	a.networks[networkNumber] = 1
+func (s *HstSuite) startClientApp(ipAddress string, env []string, clnCh chan error, clnRes chan string) {
+	defer func() {
+		clnCh <- nil
+	}()
+
+	nTries := 0
+
+	for {
+		cmd := exec.Command("iperf3", "-c", ipAddress, "-u", "-l", "1460", "-b", "10g")
+		if env != nil {
+			cmd.Env = env
+		}
+		s.log(cmd)
+		o, err := cmd.CombinedOutput()
+		if err != nil {
+			if nTries > 5 {
+				clnCh <- fmt.Errorf("failed to start client app '%s'.\n%s", err, o)
+				return
+			}
+			time.Sleep(1 * time.Second)
+			nTries++
+			continue
+		} else {
+			clnRes <- fmt.Sprintf("Client output: %s", o)
+		}
+		break
+	}
 }
 
-func (a *Addresser) newIp4Address(inputNetworkNumber ...int) (string, error) {
-	var networkNumber int = 0
-	if len(inputNetworkNumber) > 0 {
-		networkNumber = inputNetworkNumber[0]
+func (s *HstSuite) startHttpServer(running chan struct{}, done chan struct{}, addressPort, netNs string) {
+	cmd := newCommand([]string{"./http_server", addressPort}, netNs)
+	err := cmd.Start()
+	s.log(cmd)
+	if err != nil {
+		fmt.Println("Failed to start http server")
+		return
 	}
-
-	if _, ok := a.networks[networkNumber]; !ok {
-		a.addNetwork(networkNumber)
-	}
-
-	numberOfAddresses := a.networks[networkNumber]
-
-	if numberOfAddresses == 254 {
-		return "", fmt.Errorf("no available IPv4 addresses")
-	}
-
-	address := fmt.Sprintf("10.10.%v.%v/24", networkNumber, numberOfAddresses)
-	a.networks[networkNumber] = numberOfAddresses + 1
-
-	return address, nil
+	running <- struct{}{}
+	<-done
+	cmd.Process.Kill()
 }
 
-func newAddresser(suite *HstSuite) *Addresser {
-	var addresser = new(Addresser)
-	addresser.suite = suite
-	addresser.networks = make(map[int]AddressCounter)
-	addresser.addNetwork(0)
-	return addresser
+func (s *HstSuite) startWget(finished chan error, server_ip, port, query, netNs string) {
+	defer func() {
+		finished <- errors.New("wget error")
+	}()
+
+	cmd := newCommand([]string{"wget", "--timeout=10", "--no-proxy", "--tries=5", "-O", "/dev/null", server_ip + ":" + port + "/" + query},
+		netNs)
+	s.log(cmd)
+	o, err := cmd.CombinedOutput()
+	if err != nil {
+		finished <- fmt.Errorf("wget error: '%v\n\n%s'", err, o)
+		return
+	} else if !strings.Contains(string(o), "200 OK") {
+		finished <- fmt.Errorf("wget error: response not 200 OK")
+		return
+	}
+	finished <- nil
 }

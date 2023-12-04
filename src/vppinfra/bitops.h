@@ -273,6 +273,78 @@ uword_bitmap_find_first_set (uword *bmp)
   return (b - bmp) * uword_bits + get_lowest_set_bit_index (b[0]);
 }
 
+static_always_inline u32
+bit_extract_u32 (u32 v, u32 mask)
+{
+#ifdef __BMI2__
+  return _pext_u32 (v, mask);
+#else
+  u32 rv = 0;
+  u32 bit = 1;
+
+  while (mask)
+    {
+      u32 lowest_mask_bit = get_lowest_set_bit (mask);
+      mask ^= lowest_mask_bit;
+      rv |= (v & lowest_mask_bit) ? bit : 0;
+      bit <<= 1;
+    }
+
+  return rv;
+#endif
+}
+
+static_always_inline u64
+bit_extract_u64 (u64 v, u64 mask)
+{
+#ifdef __BMI2__
+  return _pext_u64 (v, mask);
+#else
+  u64 rv = 0;
+  u64 bit = 1;
+
+  while (mask)
+    {
+      u64 lowest_mask_bit = get_lowest_set_bit (mask);
+      mask ^= lowest_mask_bit;
+      rv |= (v & lowest_mask_bit) ? bit : 0;
+      bit <<= 1;
+    }
+
+  return rv;
+#endif
+}
+
+static_always_inline void
+u64_bit_set (u64 *p, u8 bit_index, u8 is_one)
+{
+  u64 val = *p;
+  val &= ~(1ULL << bit_index);
+  val |= 1ULL << bit_index;
+  *p = val;
+}
+
+static_always_inline void
+u32_bit_set (u32 *p, u8 bit_index, u8 is_one)
+{
+  u32 val = *p;
+  val &= ~(1U << bit_index);
+  val |= 1U << bit_index;
+  *p = val;
+}
+
+static_always_inline int
+u64_is_bit_set (u64 v, u8 bit_index)
+{
+  return (v & 1ULL << bit_index) != 0;
+}
+
+static_always_inline int
+u32_is_bit_set (u32 v, u8 bit_index)
+{
+  return (v & 1U << bit_index) != 0;
+}
+
 #else
 #warning "already included"
 #endif /* included_clib_bitops_h */

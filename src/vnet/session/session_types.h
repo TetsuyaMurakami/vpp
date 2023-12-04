@@ -379,6 +379,8 @@ typedef enum
   SESSION_CTRL_EVT_APP_WRK_RPC,
   SESSION_CTRL_EVT_TRANSPORT_ATTR,
   SESSION_CTRL_EVT_TRANSPORT_ATTR_REPLY,
+  SESSION_CTRL_EVT_TRANSPORT_CLOSED,
+  SESSION_CTRL_EVT_HALF_CLEANUP,
 } session_evt_type_t;
 
 #define foreach_session_ctrl_evt                                              \
@@ -437,6 +439,7 @@ typedef struct
     session_handle_t session_handle;
     session_rpc_args_t rpc_args;
     u32 ctrl_data_index;
+    u64 as_u64[2];
     struct
     {
       u8 data[0];
@@ -484,9 +487,11 @@ STATIC_ASSERT (sizeof (session_dgram_hdr_t) == (SESSION_CONN_ID_LEN + 10),
   _ (NOLISTEN, "not listening")                                               \
   _ (NOSESSION, "session does not exist")                                     \
   _ (NOAPP, "app not attached")                                               \
+  _ (APP_ATTACHED, "app already attached")                                    \
   _ (PORTINUSE, "lcl port in use")                                            \
   _ (IPINUSE, "ip in use")                                                    \
   _ (ALREADY_LISTENING, "ip port pair already listened on")                   \
+  _ (ADDR_NOT_IN_USE, "address not in use")                                   \
   _ (INVALID, "invalid value")                                                \
   _ (INVALID_RMT_IP, "invalid remote ip")                                     \
   _ (INVALID_APPWRK, "invalid app worker")                                    \
@@ -506,6 +511,8 @@ STATIC_ASSERT (sizeof (session_dgram_hdr_t) == (SESSION_CONN_ID_LEN + 10),
   _ (NOCRYPTOENG, "no crypto engine")                                         \
   _ (NOCRYPTOCKP, "cert key pair not found ")                                 \
   _ (LOCAL_CONNECT, "could not connect with local scope")                     \
+  _ (WRONG_NS_SECRET, "wrong ns secret")                                      \
+  _ (SYSCALL, "system call error")                                            \
   _ (TRANSPORT_NO_REG, "transport was not registered")
 
 typedef enum session_error_p_

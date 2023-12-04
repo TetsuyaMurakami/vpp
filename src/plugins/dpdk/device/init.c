@@ -205,8 +205,12 @@ dpdk_find_startup_config (struct rte_eth_dev_info *di)
   if ((vmbus_dev = dpdk_get_vmbus_device (di)))
     {
       unformat_input_t input_vmbus;
-      unformat_init_string (&input_vmbus, di->device->name,
-			    strlen (di->device->name));
+#if RTE_VERSION >= RTE_VERSION_NUM(22, 11, 0, 0)
+      const char *dev_name = rte_dev_name (di->device);
+#else
+      const char *dev_name = di->device->name;
+#endif
+      unformat_init_string (&input_vmbus, dev_name, strlen (dev_name));
       if (unformat (&input_vmbus, "%U", unformat_vlib_vmbus_addr, &vmbus_addr))
 	p = mhash_get (&dm->conf->device_config_index_by_vmbus_addr,
 		       &vmbus_addr);
@@ -264,6 +268,7 @@ dpdk_lib_init (dpdk_main_t * dm)
       dpdk_device_config_t *devconf = 0;
       vnet_eth_interface_registration_t eir = {};
       dpdk_driver_t *dr;
+      i8 numa_node;
 
       if (!rte_eth_dev_is_valid_port (port_id))
 	continue;
@@ -444,7 +449,12 @@ dpdk_lib_init (dpdk_main_t * dm)
       eir.cb.set_max_frame_size = dpdk_set_max_frame_size;
       xd->hw_if_index = vnet_eth_register_interface (vnm, &eir);
       hi = vnet_get_hw_interface (vnm, xd->hw_if_index);
-      hi->numa_node = xd->cpu_socket = (i8) rte_eth_dev_socket_id (port_id);
+      numa_node = (i8) rte_eth_dev_socket_id (port_id);
+      if (numa_node == SOCKET_ID_ANY)
+	/* numa_node is not set, default to 0 */
+	hi->numa_node = xd->cpu_socket = 0;
+      else
+	hi->numa_node = xd->cpu_socket = numa_node;
       sw = vnet_get_hw_sw_interface (vnm, xd->hw_if_index);
       xd->sw_if_index = sw->sw_if_index;
       dpdk_log_debug ("[%u] interface %s created", port_id, hi->name);
@@ -658,10 +668,28 @@ dpdk_bind_devices_to_uio (dpdk_config_main_t * conf)
       {
         continue;
       }
-    /* Mellanox CX6, CX6VF, CX6DX, CX6DXVF */
-    else if (d->vendor_id == 0x15b3 && d->device_id >= 0x101b && d->device_id <= 0x101e)
+    /* Mellanox CX6, CX6VF, CX6DX, CX6DXVF, CX6LX */
+    else if (d->vendor_id == 0x15b3 &&
+	     (d->device_id >= 0x101b && d->device_id <= 0x101f))
       {
-        continue;
+	continue;
+      }
+    /* Mellanox CX7 */
+    else if (d->vendor_id == 0x15b3 && d->device_id == 0x1021)
+      {
+	continue;
+      }
+    /* Mellanox BF, BFVF */
+    else if (d->vendor_id == 0x15b3 &&
+	     (d->device_id >= 0xa2d2 && d->device_id <= 0Xa2d3))
+      {
+	continue;
+      }
+    /* Mellanox BF2, BF3 */
+    else if (d->vendor_id == 0x15b3 &&
+	     (d->device_id == 0xa2d6 || d->device_id == 0xa2dc))
+      {
+	continue;
       }
     /* Broadcom NetXtreme S, and E series only */
     else if (d->vendor_id == 0x14e4 &&
@@ -997,7 +1025,6 @@ dpdk_config (vlib_main_t * vm, unformat_input_t * input)
   int eal_no_hugetlb = 0;
   u8 no_pci = 0;
   u8 no_vmbus = 0;
-  u8 no_dsa = 0;
   u8 file_prefix = 0;
   u8 *socket_mem = 0;
   u8 *huge_dir_path = 0;
@@ -1108,8 +1135,6 @@ dpdk_config (vlib_main_t * vm, unformat_input_t * input)
 	  tmp = format (0, "--no-pci%c", 0);
 	  vec_add1 (conf->eal_init_args, tmp);
 	}
-      else if (unformat (input, "no-dsa"))
-	no_dsa = 1;
       else if (unformat (input, "blacklist %U", unformat_vlib_vmbus_addr,
 			 &vmbus_addr))
 	{
@@ -1319,13 +1344,6 @@ dpdk_config (vlib_main_t * vm, unformat_input_t * input)
 
   vm = vlib_get_main ();
 
-  if (no_dsa)
-    {
-      struct rte_bus *bus;
-      bus = rte_bus_find_by_name ("dsa");
-      if (bus)
-	rte_bus_unregister (bus);
-    }
   /* make copy of args as rte_eal_init tends to mess up with arg array */
   for (i = 1; i < vec_len (conf->eal_init_args); i++)
     conf->eal_init_args_str = format (conf->eal_init_args_str, "%s ",

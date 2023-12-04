@@ -133,8 +133,11 @@ typedef struct _unformat_input_t
      (and argument). */
     uword (*fill_buffer) (struct _unformat_input_t * i);
 
-  /* Return values for fill buffer function which indicate whether not
-     input has been exhausted. */
+    /* User's function to be called on input_free */
+    void (*free) (struct _unformat_input_t *i);
+
+    /* Return values for fill buffer function which indicate whether not
+       input has been exhausted. */
 #define UNFORMAT_END_OF_INPUT (~0)
 #define UNFORMAT_MORE_INPUT   0
 
@@ -155,6 +158,8 @@ unformat_init (unformat_input_t * i,
 always_inline void
 unformat_free (unformat_input_t * i)
 {
+  if (i->free)
+    i->free (i);
   vec_free (i->buffer);
   vec_free (i->buffer_marks);
   clib_memset (i, 0, sizeof (i[0]));
@@ -304,6 +309,13 @@ unformat_function_t unformat_eof;
 /* Parse memory size e.g. 100, 100k, 100m, 100g. */
 unformat_function_t unformat_memory_size;
 
+/* Unformat C string array, takes array length as 2nd argument */
+unformat_function_t unformat_c_string_array;
+
+/* Unformat sigle and double quoted string */
+unformat_function_t unformat_single_quoted_string;
+unformat_function_t unformat_double_quoted_string;
+
 /* Format base 10 e.g. 100, 100K, 100M, 100G */
 u8 *format_base10 (u8 *s, va_list *va);
 
@@ -321,6 +333,9 @@ u8 *format_c_identifier (u8 * s, va_list * va);
 
 /* Format hexdump with both hex and printable chars - compatible with text2pcap */
 u8 *format_hexdump (u8 * s, va_list * va);
+u8 *format_hexdump_u16 (u8 *s, va_list *va);
+u8 *format_hexdump_u32 (u8 *s, va_list *va);
+u8 *format_hexdump_u64 (u8 *s, va_list *va);
 
 /* Format bitmap of array of uword numbers */
 u8 *format_uword_bitmap (u8 *s, va_list *va);
@@ -329,6 +344,9 @@ u8 *format_uword_bitmap (u8 *s, va_list *va);
 #ifdef CLIB_UNIX
 /* Setup input from Unix file. */
 void unformat_init_clib_file (unformat_input_t * input, int file_descriptor);
+
+/* Setup input from flesystem path. */
+uword unformat_init_file (unformat_input_t *input, char *fmt, ...);
 
 /* Take input from Unix environment variable; returns
    1 if variable exists zero otherwise. */

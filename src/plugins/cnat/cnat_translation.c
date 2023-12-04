@@ -221,8 +221,11 @@ cnat_translation_stack (cnat_translation_t * ct)
     if (trk->ct_flags & CNAT_TRK_ACTIVE)
       vec_add1 (ct->ct_active_paths, *trk);
 
+  flow_hash_config_t fhc = IP_FLOW_HASH_DEFAULT;
+  if (ct->fhc != 0)
+    fhc = ct->fhc;
   lbi = load_balance_create (vec_len (ct->ct_active_paths),
-			     fib_proto_to_dpo (fproto), IP_FLOW_HASH_DEFAULT);
+			     fib_proto_to_dpo (fproto), fhc);
 
   ep_idx = 0;
   vec_foreach (trk, ct->ct_active_paths)
@@ -233,7 +236,7 @@ cnat_translation_stack (cnat_translation_t * ct)
 
   dpo_set (&ct->ct_lb, DPO_LOAD_BALANCE, dproto, lbi);
   dpo_stack (cnat_client_dpo, dproto, &ct->ct_lb, &ct->ct_lb);
-  ct->flags |= CNAT_TRANSLATION_STACKED;
+  ct->flags |= CNAT_TR_FLAG_STACKED;
 }
 
 int
@@ -263,7 +266,7 @@ cnat_translation_delete (u32 id)
 u32
 cnat_translation_update (cnat_endpoint_t *vip, ip_protocol_t proto,
 			 cnat_endpoint_tuple_t *paths, u8 flags,
-			 cnat_lb_type_t lb_type)
+			 cnat_lb_type_t lb_type, flow_hash_config_t fhc)
 {
   cnat_endpoint_tuple_t *path;
   const cnat_client_t *cc;
@@ -296,6 +299,7 @@ cnat_translation_update (cnat_endpoint_t *vip, ip_protocol_t proto,
       ct->ct_cci = cci;
       ct->index = ct - cnat_translation_pool;
       ct->lb_type = lb_type;
+      ct->fhc = fhc;
 
       cnat_add_translation_to_db (cci, vip, proto, ct->index);
       cnat_client_translation_added (cci);
@@ -315,7 +319,7 @@ cnat_translation_update (cnat_endpoint_t *vip, ip_protocol_t proto,
   }
 
   vec_reset_length (ct->ct_paths);
-  ct->flags &= ~CNAT_TRANSLATION_STACKED;
+  ct->flags &= ~CNAT_TR_FLAG_STACKED;
 
   u64 path_idx = 0;
   vec_foreach (path, paths)
@@ -383,6 +387,11 @@ format_cnat_translation (u8 * s, va_list * args)
   s = format (s, "%U %U ", format_cnat_endpoint, &ct->ct_vip,
 	      format_ip_protocol, ct->ct_proto);
   s = format (s, "lb:%U ", format_cnat_lb_type, ct->lb_type);
+
+  if ((ct->fhc == 0) || (ct->fhc == IP_FLOW_HASH_DEFAULT))
+    s = format (s, "fhc:0x%x(default)", IP_FLOW_HASH_DEFAULT);
+  else
+    s = format (s, "fhc:0x%x", ct->fhc);
 
   vec_foreach (ck, ct->ct_paths)
     s = format (s, "\n%U", format_cnat_ep_trk, ck, 2);
@@ -513,7 +522,7 @@ cnat_translation_back_walk_notify (fib_node_t * node,
   /* If we have more than FIB_PATH_LIST_POPULAR paths
    * we might get called during path tracking
    * (cnat_tracker_track) */
-  if (!(ct->flags & CNAT_TRANSLATION_STACKED))
+  if (!(ct->flags & CNAT_TR_FLAG_STACKED))
     return (FIB_NODE_BACK_WALK_CONTINUE);
 
   cnat_translation_stack (ct);
@@ -576,8 +585,9 @@ cnat_translation_cli_add_del (vlib_main_t * vm,
 	}
     }
 
+  flow_hash_config_t fhc = 0;
   if (INDEX_INVALID == del_index)
-    cnat_translation_update (&vip, proto, paths, flags, lb_type);
+    cnat_translation_update (&vip, proto, paths, flags, lb_type, fhc);
   else
     cnat_translation_delete (del_index);
 
@@ -662,11 +672,11 @@ cnat_if_addr_add_del_backend_cb (addr_resolution_t * ar,
       ep->ce_flags |= CNAT_EP_FLAG_RESOLVED;
     }
 
-  ct->flags &= ~CNAT_TRANSLATION_STACKED;
+  ct->flags &= ~CNAT_TR_FLAG_STACKED;
   cnat_tracker_track (ar->cti, trk);
 
   cnat_translation_stack (ct);
-  ct->flags |= CNAT_TRANSLATION_STACKED;
+  ct->flags |= CNAT_TR_FLAG_STACKED;
 }
 
 static void

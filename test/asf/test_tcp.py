@@ -2,11 +2,11 @@
 
 import unittest
 
-from asfframework import VppTestCase, VppTestRunner
+from asfframework import VppAsfTestCase, VppTestRunner
 from vpp_ip_route import VppIpTable, VppIpRoute, VppRoutePath
 
 
-class TestTCP(VppTestCase):
+class TestTCP(VppAsfTestCase):
     """TCP Test Case"""
 
     @classmethod
@@ -36,10 +36,10 @@ class TestTCP(VppTestCase):
             table_id += 1
 
         # Configure namespaces
-        self.vapi.app_namespace_add_del(
+        self.vapi.app_namespace_add_del_v4(
             namespace_id="0", sw_if_index=self.loop0.sw_if_index
         )
-        self.vapi.app_namespace_add_del(
+        self.vapi.app_namespace_add_del_v4(
             namespace_id="1", sw_if_index=self.loop1.sw_if_index
         )
 
@@ -73,14 +73,14 @@ class TestTCP(VppTestCase):
 
         # Start builtin server and client
         uri = "tcp://" + self.loop0.local_ip4 + "/1234"
-        error = self.vapi.cli("test echo server appns 0 fifo-size 4 uri " + uri)
+        error = self.vapi.cli("test echo server appns 0 fifo-size 4k uri " + uri)
         if error:
             self.logger.critical(error)
             self.assertNotIn("failed", error)
 
         error = self.vapi.cli(
             "test echo client mbytes 10 appns 1 "
-            + "fifo-size 4 no-output test-bytes "
+            + "fifo-size 4k test-bytes "
             + "syn-timeout 2 uri "
             + uri
         )
@@ -93,7 +93,7 @@ class TestTCP(VppTestCase):
         ip_t10.remove_vpp_config()
 
 
-class TestTCPUnitTests(VppTestCase):
+class TestTCPUnitTests(VppAsfTestCase):
     "TCP Unit Tests"
 
     @classmethod

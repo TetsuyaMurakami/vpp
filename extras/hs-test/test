@@ -7,6 +7,7 @@ single_test=0
 persist_set=0
 unconfigure_set=0
 debug_set=0
+vppsrc=
 
 for i in "$@"
 do
@@ -38,11 +39,17 @@ case "${i}" in
             unconfigure_set=1
         fi
         ;;
+    --cpus=*)
+        args="$args -cpus ${i#*=}"
+        ;;
+    --vppsrc=*)
+        args="$args -vppsrc ${i#*=}"
+        ;;
     --test=*)
         tc_name="${i#*=}"
         if [ $tc_name != "all" ]; then
             single_test=1
-            args="$args -run $tc_name"
+            args="$args -run $tc_name -verbose"
         fi
 esac
 done
@@ -67,4 +74,4 @@ if [ $single_test -eq 0 ] && [ $debug_set -eq 1 ]; then
     exit 1
 fi
 
-sudo -E go test -buildvcs=false -v $args
+sudo -E go test -timeout=20m -buildvcs=false -v $args

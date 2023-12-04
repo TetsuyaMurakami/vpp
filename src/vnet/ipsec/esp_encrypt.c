@@ -182,9 +182,9 @@ ext_hdr_is_pre_esp (u8 nexthdr)
 
   return !u8x16_is_all_zero (ext_hdr_types == u8x16_splat (nexthdr));
 #else
-  return ((nexthdr ^ IP_PROTOCOL_IP6_HOP_BY_HOP_OPTIONS) |
-	  (nexthdr ^ IP_PROTOCOL_IPV6_ROUTE) |
-	  ((nexthdr ^ IP_PROTOCOL_IPV6_FRAGMENTATION) != 0));
+  return (!(nexthdr ^ IP_PROTOCOL_IP6_HOP_BY_HOP_OPTIONS) ||
+	  !(nexthdr ^ IP_PROTOCOL_IPV6_ROUTE) ||
+	  !(nexthdr ^ IP_PROTOCOL_IPV6_FRAGMENTATION));
 #endif
 }
 
@@ -415,6 +415,12 @@ esp_prepare_sync_op (vlib_main_t *vm, ipsec_per_thread_data_t *ptd,
 	      op->aad_len = esp_aad_fill (op->aad, esp, sa0, seq_hi);
 	      op->tag = payload + crypto_len;
 	      op->tag_len = 16;
+	      if (PREDICT_FALSE (ipsec_sa_is_set_IS_NULL_GMAC (sa0)))
+		{
+		  /* RFC-4543 ENCR_NULL_AUTH_AES_GMAC: IV is part of AAD */
+		  crypto_start -= iv_sz;
+		  crypto_len += iv_sz;
+		}
 	    }
 	  else
 	    {
@@ -522,6 +528,12 @@ esp_prepare_async_frame (vlib_main_t *vm, ipsec_per_thread_data_t *ptd,
 	  /* constuct aad in a scratch space in front of the nonce */
 	  aad = (u8 *) nonce - sizeof (esp_aead_t);
 	  esp_aad_fill (aad, esp, sa, sa->seq_hi);
+	  if (PREDICT_FALSE (ipsec_sa_is_set_IS_NULL_GMAC (sa)))
+	    {
+	      /* RFC-4543 ENCR_NULL_AUTH_AES_GMAC: IV is part of AAD */
+	      crypto_start_offset -= iv_sz;
+	      crypto_total_len += iv_sz;
+	    }
 	}
       else
 	{
@@ -678,6 +690,7 @@ esp_encrypt_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  current_sa_packets = current_sa_bytes = 0;
 
 	  sa0 = ipsec_sa_get (sa_index0);
+	  current_sa_index = sa_index0;
 
 	  if (PREDICT_FALSE ((sa0->crypto_alg == IPSEC_CRYPTO_ALG_NONE &&
 			      sa0->integ_alg == IPSEC_INTEG_ALG_NONE) &&
@@ -689,7 +702,6 @@ esp_encrypt_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 					  sa_index0);
 	      goto trace;
 	    }
-	  current_sa_index = sa_index0;
 	  vlib_prefetch_combined_counter (&ipsec_sa_counters, thread_index,
 					  current_sa_index);
 
@@ -999,6 +1011,16 @@ esp_encrypt_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	    {
 	      async_frames[async_op] =
 		vnet_crypto_async_get_frame (vm, async_op);
+
+	      if (PREDICT_FALSE (!async_frames[async_op]))
+		{
+		  err = ESP_ENCRYPT_ERROR_NO_AVAIL_FRAME;
+		  esp_encrypt_set_next_index (b[0], node, thread_index, err,
+					      n_noop, noop_nexts, drop_next,
+					      current_sa_index);
+		  goto trace;
+		}
+
 	      /* Save the frame to the list we'll submit at the end */
 	      vec_add1 (ptd->async_frames, async_frames[async_op]);
 	    }
@@ -1088,7 +1110,7 @@ esp_encrypt_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	      n_noop += esp_async_recycle_failed_submit (
 		vm, *async_frame, node, ESP_ENCRYPT_ERROR_CRYPTO_ENGINE_ERROR,
 		IPSEC_SA_ERROR_CRYPTO_ENGINE_ERROR, n_noop, noop_bi,
-		noop_nexts, drop_next);
+		noop_nexts, drop_next, true);
 	      vnet_crypto_async_reset_frame (*async_frame);
 	      vnet_crypto_async_free_frame (vm, *async_frame);
 	    }

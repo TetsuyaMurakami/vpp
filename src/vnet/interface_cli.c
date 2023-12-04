@@ -54,6 +54,9 @@
 #include <vnet/interface/rx_queue_funcs.h>
 #include <vnet/interface/tx_queue_funcs.h>
 #include <vnet/hash/hash.h>
+#include <vnet/dev/dev.h>
+#include <vnet/dev/dev_funcs.h>
+
 static int
 compare_interface_names (void *a1, void *a2)
 {
@@ -1516,6 +1519,33 @@ set_hw_interface_change_rx_mode (vnet_main_t * vnm, u32 hw_if_index,
   clib_error_t *error = 0;
   vnet_hw_interface_t *hw;
   u32 *queue_indices = 0;
+  vnet_dev_port_t *port;
+
+  port = vnet_dev_get_port_from_hw_if_index (hw_if_index);
+
+  if (port)
+    {
+      vlib_main_t *vm = vlib_get_main ();
+      vnet_dev_rv_t rv;
+
+      vnet_dev_port_cfg_change_req_t req = {
+	.type = mode == VNET_HW_IF_RX_MODE_POLLING ?
+			VNET_DEV_PORT_CFG_RXQ_INTR_MODE_DISABLE :
+			VNET_DEV_PORT_CFG_RXQ_INTR_MODE_ENABLE,
+	.queue_id = queue_id_valid ? queue_id : 0,
+	.all_queues = queue_id_valid ? 0 : 1,
+      };
+
+      if ((rv = vnet_dev_port_cfg_change_req_validate (vm, port, &req)))
+	return vnet_dev_port_err (
+	  vm, port, rv, "rx queue interupt mode enable/disable not supported");
+
+      if ((rv = vnet_dev_process_port_cfg_change_req (vm, port, &req)))
+	return vnet_dev_port_err (
+	  vm, port, rv,
+	  "device failed to enable/disable queue interrupt mode");
+      return 0;
+    }
 
   hw = vnet_get_hw_interface (vnm, hw_if_index);
 
@@ -2438,6 +2468,72 @@ VLIB_CLI_COMMAND (pcap_tx_trace_command, static) = {
     .function = pcap_trace_command_fn,
 };
 /* *INDENT-ON* */
+
+static clib_error_t *
+set_pcap_filter_function (vlib_main_t *vm, unformat_input_t *input,
+			  vlib_cli_command_t *cmd)
+{
+  vnet_pcap_t *pp = &vnet_get_main ()->pcap;
+  unformat_input_t _line_input, *line_input = &_line_input;
+  vlib_is_packet_traced_fn_t *res = 0;
+  clib_error_t *error = 0;
+
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != (uword) UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "%U", unformat_vlib_trace_filter_function,
+		    &res))
+	;
+      else
+	{
+	  error = clib_error_create (
+	    "expected valid trace filter function, got `%U'",
+	    format_unformat_error, line_input);
+	  goto done;
+	}
+    }
+  pp->current_filter_function = res;
+
+done:
+  unformat_free (line_input);
+
+  return error;
+}
+
+VLIB_CLI_COMMAND (set_pcap_filter_function_cli, static) = {
+  .path = "set pcap filter function",
+  .short_help = "set pcap filter function <func_name>",
+  .function = set_pcap_filter_function,
+};
+
+static clib_error_t *
+show_pcap_filter_function (vlib_main_t *vm, unformat_input_t *input,
+			   vlib_cli_command_t *cmd)
+{
+  vnet_pcap_t *pp = &vnet_get_main ()->pcap;
+  vlib_trace_filter_main_t *tfm = &vlib_trace_filter_main;
+  vlib_is_packet_traced_fn_t *current_trace_filter_fn =
+    pp->current_filter_function;
+  vlib_trace_filter_function_registration_t *reg =
+    tfm->trace_filter_registration;
+
+  while (reg)
+    {
+      vlib_cli_output (vm, "%sname:%s description: %s priority: %u",
+		       reg->function == current_trace_filter_fn ? "(*) " : "",
+		       reg->name, reg->description, reg->priority);
+      reg = reg->next;
+    }
+  return 0;
+}
+
+VLIB_CLI_COMMAND (show_pcap_filter_function_cli, static) = {
+  .path = "show pcap filter function",
+  .short_help = "show pcap filter function",
+  .function = show_pcap_filter_function,
+};
 
 static clib_error_t *
 set_interface_name (vlib_main_t *vm, unformat_input_t *input,

@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-import binascii
 import random
 import socket
 import unittest
 
-import scapy.compat
 from scapy.contrib.mpls import MPLS
 from scapy.contrib.gtp import GTP_U_Header
 from scapy.layers.inet import IP, UDP, TCP, ICMP, icmptypes, icmpcodes
@@ -13,8 +11,8 @@ from scapy.layers.l2 import Ether, Dot1Q, ARP
 from scapy.packet import Raw
 from six import moves
 
-from framework import tag_fixme_vpp_workers
-from framework import VppTestCase, VppTestRunner
+from framework import VppTestCase
+from asfframework import VppTestRunner, tag_fixme_vpp_workers
 from util import ppp
 from vpp_ip_route import (
     VppIpRoute,
@@ -563,7 +561,6 @@ class TestIPv4FibCrud(VppTestCase):
         return routes
 
     def unconfig_fib_many_to_one(self, start_dest_addr, next_hop_addr, count, start=0):
-
         routes = []
         for i in range(count):
             r = VppIpRoute(

@@ -784,12 +784,10 @@ quic_on_stream_destroy (quicly_stream_t * stream, int err)
   quic_stream_data_t *stream_data = (quic_stream_data_t *) stream->data;
   quic_ctx_t *sctx = quic_ctx_get (stream_data->ctx_id,
 				   stream_data->thread_index);
-  session_t *stream_session = session_get (sctx->c_s_index,
-					   sctx->c_thread_index);
   QUIC_DBG (2, "DESTROYED_STREAM: session 0x%lx (%U)",
 	    session_handle (stream_session), quic_format_err, err);
 
-  stream_session->session_state = SESSION_STATE_CLOSED;
+  session_transport_closing_notify (&sctx->connection);
   session_transport_delete_notify (&sctx->connection);
 
   quic_increment_counter (QUIC_ERROR_CLOSED_STREAM, 1);
@@ -832,7 +830,7 @@ quic_on_receive (quicly_stream_t * stream, size_t off, const void *src,
 		 size_t len)
 {
   QUIC_DBG (3, "received data: %lu bytes, offset %lu", len, off);
-  u32 max_enq, rv;
+  u32 max_enq;
   quic_ctx_t *sctx;
   session_t *stream_session;
   app_worker_t *app_wrk;
@@ -897,10 +895,7 @@ quic_on_receive (quicly_stream_t * stream, size_t off, const void *src,
       app_wrk = app_worker_get_if_valid (stream_session->app_wrk_index);
       if (PREDICT_TRUE (app_wrk != 0))
 	{
-	  rv = app_worker_lock_and_send_event (app_wrk, stream_session,
-					       SESSION_IO_EVT_RX);
-	  if (rv)
-	    QUIC_ERR ("Failed to ping app for RX");
+	  app_worker_rx_notify (app_wrk, stream_session);
 	}
       quic_ack_rx_data (stream_session);
     }
@@ -1050,6 +1045,8 @@ quic_on_stream_open (quicly_stream_open_t * self, quicly_stream_t * stream)
   stream_session->session_type =
     session_type_from_proto_and_ip (TRANSPORT_PROTO_QUIC, qctx->udp_is_ip4);
   quic_session = session_get (qctx->c_s_index, qctx->c_thread_index);
+  /* Make sure quic session is in listening state */
+  quic_session->session_state = SESSION_STATE_LISTENING;
   stream_session->listener_handle = listen_session_get_handle (quic_session);
 
   app_wrk = app_worker_get (stream_session->app_wrk_index);
@@ -1063,6 +1060,7 @@ quic_on_stream_open (quicly_stream_open_t * self, quicly_stream_t * stream)
 			     SVM_FIFO_WANT_DEQ_NOTIF_IF_FULL |
 			     SVM_FIFO_WANT_DEQ_NOTIF_IF_EMPTY);
 
+  stream_session->session_state = SESSION_STATE_ACCEPTING;
   if ((rv = app_worker_accept_notify (app_wrk, stream_session)))
     {
       QUIC_ERR ("failed to notify accept worker app");
@@ -1295,6 +1293,7 @@ quic_connect_stream (session_t * quic_session, session_endpoint_cfg_t * sep)
   stream_data->app_rx_data_len = 0;
   stream_data->app_tx_data_len = 0;
   stream_session->session_state = SESSION_STATE_READY;
+  stream_session->opaque = sep->opaque;
 
   /* For now we only reset streams. Cleanup will be triggered by timers */
   if ((rv = app_worker_init_connected (app_wrk, stream_session)))
@@ -1571,7 +1570,7 @@ format_quic_ctx (u8 * s, va_list * args)
 
   if (!ctx)
     return s;
-  str = format (str, "[#%d][Q] ", ctx->c_thread_index);
+  str = format (str, "[%d:%d][Q] ", ctx->c_thread_index, ctx->c_s_index);
 
   if (quic_ctx_is_listener (ctx))
     str = format (str, "Listener, UDP %ld", ctx->udp_session_handle);
@@ -1689,15 +1688,6 @@ quic_on_quic_session_connected (quic_ctx_t * ctx)
       quic_proto_on_close (ctx_id, thread_index);
       return;
     }
-
-  /*  If the app opens a stream in its callback it may invalidate ctx */
-  ctx = quic_ctx_get (ctx_id, thread_index);
-  /*
-   * app_worker_connect_notify() might have reallocated pool, reload
-   * quic_session pointer
-   */
-  quic_session = session_get (ctx->c_s_index, thread_index);
-  quic_session->session_state = SESSION_STATE_LISTENING;
 }
 
 static void
@@ -2124,7 +2114,6 @@ quic_accept_connection (quic_rx_packet_ctx_t * pctx)
   quic_session = session_alloc (ctx->c_thread_index);
   QUIC_DBG (2, "Allocated quic_session, 0x%lx ctx %u",
 	    session_handle (quic_session), ctx->c_c_index);
-  quic_session->session_state = SESSION_STATE_LISTENING;
   ctx->c_s_index = quic_session->session_index;
 
   lctx = quic_ctx_get (ctx->listener_ctx_id, 0);
@@ -2150,6 +2139,7 @@ quic_accept_connection (quic_rx_packet_ctx_t * pctx)
     }
 
   app_wrk = app_worker_get (quic_session->app_wrk_index);
+  quic_session->session_state = SESSION_STATE_ACCEPTING;
   if ((rv = app_worker_accept_notify (app_wrk, quic_session)))
     {
       QUIC_ERR ("failed to notify accept worker app");

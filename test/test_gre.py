@@ -9,8 +9,8 @@ from scapy.layers.inet import IP, UDP
 from scapy.layers.inet6 import IPv6
 from scapy.volatile import RandMAC, RandIP
 
-from framework import tag_fixme_vpp_workers
-from framework import VppTestCase, VppTestRunner
+from framework import VppTestCase
+from asfframework import VppTestRunner, tag_fixme_vpp_workers
 from vpp_sub_interface import L2_VTR_OP, VppDot1QSubint
 from vpp_gre_interface import VppGreInterface
 from vpp_teib import VppTeib
@@ -19,7 +19,6 @@ from vpp_ip_route import (
     VppIpRoute,
     VppRoutePath,
     VppIpTable,
-    FibPathProto,
     VppMplsLabel,
 )
 from vpp_mpls_tunnel_interface import VppMPLSTunnelInterface
@@ -240,7 +239,6 @@ class TestGRE(VppTestCase):
     def verify_tunneled_4o4(
         self, src_if, capture, sent, tunnel_src, tunnel_dst, dscp=0, ecn=0
     ):
-
         self.assertEqual(len(capture), len(sent))
         tos = (dscp << 2) | ecn
 
@@ -273,7 +271,6 @@ class TestGRE(VppTestCase):
     def verify_tunneled_6o6(
         self, src_if, capture, sent, tunnel_src, tunnel_dst, dscp=0, ecn=0
     ):
-
         self.assertEqual(len(capture), len(sent))
         tc = (dscp << 2) | ecn
 
@@ -304,7 +301,6 @@ class TestGRE(VppTestCase):
                 raise
 
     def verify_tunneled_4o6(self, src_if, capture, sent, tunnel_src, tunnel_dst):
-
         self.assertEqual(len(capture), len(sent))
 
         for i in range(len(capture)):
@@ -333,7 +329,6 @@ class TestGRE(VppTestCase):
                 raise
 
     def verify_tunneled_6o4(self, src_if, capture, sent, tunnel_src, tunnel_dst):
-
         self.assertEqual(len(capture), len(sent))
 
         for i in range(len(capture)):

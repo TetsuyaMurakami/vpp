@@ -261,6 +261,7 @@ http_ts_connected_callback (u32 http_app_index, u32 ho_hc_index, session_t *ts,
   as->connection_index = hc->c_c_index;
   as->app_wrk_index = hc->h_pa_wrk_index;
   as->session_state = SESSION_STATE_READY;
+  as->opaque = hc->h_pa_app_api_ctx;
   as->session_type = session_type_from_proto_and_ip (
     TRANSPORT_PROTO_HTTP, session_type_is_ip4 (ts->session_type));
 
@@ -503,7 +504,8 @@ state_srv_wait_method (http_conn_t *hc, transport_send_params_t *sp)
   hc->http_state = HTTP_STATE_WAIT_APP;
 
   app_wrk = app_worker_get_if_valid (as->app_wrk_index);
-  app_worker_lock_and_send_event (app_wrk, as, SESSION_IO_EVT_RX);
+  if (app_wrk)
+    app_worker_rx_notify (app_wrk, as);
 
   return HTTP_SM_STOP;
 
@@ -777,7 +779,7 @@ state_cln_wait_method (http_conn_t *hc, transport_send_params_t *sp)
     }
 
   app_wrk = app_worker_get_if_valid (as->app_wrk_index);
-  app_worker_lock_and_send_event (app_wrk, as, SESSION_IO_EVT_RX);
+  app_worker_rx_notify (app_wrk, as);
   return HTTP_SM_STOP;
 }
 
@@ -808,7 +810,7 @@ cln_drain_rx_buf (http_conn_t *hc, session_t *ts, session_t *as)
   app_wrk = app_worker_get_if_valid (as->app_wrk_index);
   ASSERT (app_wrk);
 
-  app_worker_lock_and_send_event (app_wrk, as, SESSION_IO_EVT_RX);
+  app_worker_rx_notify (app_wrk, as);
   return 1;
 }
 
@@ -864,8 +866,9 @@ maybe_reschedule:
   if (hc->rx_buf_offset < vec_len (hc->rx_buf) ||
       svm_fifo_max_dequeue_cons (ts->rx_fifo))
     {
+      /* TODO is the flag really needed? */
       if (svm_fifo_set_event (ts->rx_fifo))
-	session_send_io_evt_to_thread (ts->rx_fifo, SESSION_IO_EVT_BUILTIN_RX);
+	session_enqueue_notify (ts);
     }
   return HTTP_SM_CONTINUE;
 }

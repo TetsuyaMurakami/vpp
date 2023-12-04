@@ -40,6 +40,7 @@ unix { 									\
 	$(if $(wildcard startup.vpp),"exec startup.vpp",)		\
 }									\
 $(if $(DPDK_CONFIG), "dpdk { $(DPDK_CONFIG) }",)			\
+$(if $(EXTRA_VPP_CONFIG), "$(EXTRA_VPP_CONFIG)",)			\
 $(call disable_plugins,$(DISABLED_PLUGINS))				\
 "
 
@@ -54,7 +55,7 @@ OS_ID        = $(shell grep '^ID=' /etc/os-release | cut -f2- -d= | sed -e 's/\"
 OS_VERSION_ID= $(shell grep '^VERSION_ID=' /etc/os-release | cut -f2- -d= | sed -e 's/\"//g')
 endif
 
-ifeq ($(filter ubuntu debian,$(OS_ID)),$(OS_ID))
+ifeq ($(filter ubuntu debian linuxmint,$(OS_ID)),$(OS_ID))
 PKG=deb
 else ifeq ($(filter rhel centos fedora opensuse-leap rocky,$(OS_ID)),$(OS_ID))
 PKG=rpm
@@ -65,10 +66,10 @@ endif
 DEB_DEPENDS  = curl build-essential autoconf automake ccache
 DEB_DEPENDS += debhelper dkms git libtool libapr1-dev dh-python
 DEB_DEPENDS += libconfuse-dev git-review exuberant-ctags cscope pkg-config
-DEB_DEPENDS += lcov chrpath autoconf libnuma-dev
+DEB_DEPENDS += gcovr lcov chrpath autoconf libnuma-dev
 DEB_DEPENDS += python3-all python3-setuptools check
 DEB_DEPENDS += libffi-dev python3-ply
-DEB_DEPENDS += cmake ninja-build uuid-dev python3-jsonschema python3-yaml
+DEB_DEPENDS += cmake ninja-build python3-jsonschema python3-yaml
 DEB_DEPENDS += python3-venv  # ensurepip
 DEB_DEPENDS += python3-dev python3-pip
 DEB_DEPENDS += libnl-3-dev libnl-route-3-dev libmnl-dev
@@ -79,6 +80,8 @@ DEB_DEPENDS += libelf-dev libpcap-dev # for libxdp (af_xdp)
 DEB_DEPENDS += iperf3 # for 'make test TEST=vcl'
 DEB_DEPENDS += nasm
 DEB_DEPENDS += iperf ethtool  # for 'make test TEST=vm_vpp_interfaces'
+DEB_DEPENDS += libpcap-dev
+DEB_DEPENDS += tshark
 
 LIBFFI=libffi6 # works on all but 20.04 and debian-testing
 
@@ -117,7 +120,6 @@ RPM_DEPENDS += numactl-devel
 RPM_DEPENDS += check check-devel
 RPM_DEPENDS += selinux-policy selinux-policy-devel
 RPM_DEPENDS += ninja-build
-RPM_DEPENDS += libuuid-devel
 RPM_DEPENDS += ccache
 RPM_DEPENDS += xmlto
 RPM_DEPENDS += elfutils-libelf-devel libpcap-devel
@@ -175,7 +177,8 @@ RPM_SUSE_BUILDTOOLS_DEPS = autoconf automake ccache check-devel chrpath
 RPM_SUSE_BUILDTOOLS_DEPS += clang cmake indent libtool make ninja python3-ply
 
 RPM_SUSE_DEVEL_DEPS = glibc-devel-static libnuma-devel libelf-devel
-RPM_SUSE_DEVEL_DEPS += libopenssl-devel libuuid-devel lsb-release
+RPM_SUSE_DEVEL_DEPS += libopenssl-devel lsb-release
+RPM_SUSE_DEVEL_DEPS += libpcap-devel llvm-devel
 RPM_SUSE_DEVEL_DEPS += curl libstdc++-devel bison gcc-c++ zlib-devel
 
 RPM_SUSE_PYTHON_DEPS = python3-devel python3-pip python3-rpm-macros
@@ -195,6 +198,7 @@ ifneq ($(wildcard $(STARTUP_DIR)/startup.conf),)
 endif
 
 ifeq ($(findstring y,$(UNATTENDED)),y)
+DEBIAN_FRONTEND=noninteractive
 CONFIRM=-y
 FORCE=--allow-downgrades --allow-remove-essential --allow-change-held-packages
 endif
@@ -290,7 +294,7 @@ $(BR)/.deps.ok:
 ifeq ($(findstring y,$(UNATTENDED)),y)
 	make install-dep
 endif
-ifeq ($(filter ubuntu debian,$(OS_ID)),$(OS_ID))
+ifeq ($(filter ubuntu debian linuxmint,$(OS_ID)),$(OS_ID))
 	@MISSING=$$(apt-get install -y -qq -s $(DEB_DEPENDS) | grep "^Inst ") ; \
 	if [ -n "$$MISSING" ] ; then \
 	  echo "\nPlease install missing packages: \n$$MISSING\n" ; \
@@ -318,7 +322,7 @@ bootstrap:
 
 .PHONY: install-dep
 install-dep:
-ifeq ($(filter ubuntu debian,$(OS_ID)),$(OS_ID))
+ifeq ($(filter ubuntu debian linuxmint,$(OS_ID)),$(OS_ID))
 	@sudo -E apt-get update
 	@sudo -E apt-get $(APT_ARGS) $(CONFIRM) $(FORCE) install $(DEB_DEPENDS)
 else ifneq ("$(wildcard /etc/redhat-release)","")
@@ -426,13 +430,14 @@ rebuild-release: wipe-release build-release
 export TEST_DIR ?= $(WS_ROOT)/test
 
 define test
-	$(if $(filter-out $(2),retest),make -C $(BR) PLATFORM=vpp TAG=$(1) vpp-install,)
+	$(if $(filter-out $(2),retest),make -C $(BR) PLATFORM=vpp TAG=$(1) CC=$(CC) vpp-install,)
 	$(eval libs:=lib lib64)
 	make -C test \
 	  VPP_BUILD_DIR=$(BR)/build-$(1)-native/vpp \
 	  VPP_BIN=$(BR)/install-$(1)-native/vpp/bin/vpp \
 	  VPP_INSTALL_PATH=$(BR)/install-$(1)-native/ \
 	  EXTENDED_TESTS=$(EXTENDED_TESTS) \
+	  TEST_GCOV=$(TEST_GCOV) \
 	  PYTHON=$(PYTHON) \
 	  OS_ID=$(OS_ID) \
 	  RND_SEED=$(RND_SEED) \
@@ -449,9 +454,27 @@ test:
 test-debug:
 	$(call test,vpp_debug,test)
 
-.PHONY: test-gcov
-test-gcov:
+.PHONY: test-cov
+test-cov:
+	$(eval CC=gcc)
+	$(eval TEST_GCOV=1)
+	$(call test,vpp_gcov,cov)
+
+.PHONY: test-cov-build
+test-cov-build:
+	$(eval CC=gcc)
+	$(eval TEST_GCOV=1)
 	$(call test,vpp_gcov,test)
+
+.PHONY: test-cov-prep
+test-cov-prep:
+	$(eval CC=gcc)
+	$(call test,vpp_gcov,cov-prep)
+
+.PHONY: test-cov-post
+test-cov-post:
+	$(eval CC=gcc)
+	$(call test,vpp_gcov,cov-post)
 
 .PHONY: test-all
 test-all:
@@ -462,6 +485,13 @@ test-all:
 test-all-debug:
 	$(eval EXTENDED_TESTS=1)
 	$(call test,vpp_debug,test)
+
+.PHONY: test-all-cov
+test-all-cov:
+	$(eval CC=gcc)
+	$(eval TEST_GCOV=1)
+	$(eval EXTENDED_TESTS=1)
+	$(call test,vpp_gcov,test)
 
 .PHONY: papi-wipe
 papi-wipe: test-wipe-papi
@@ -487,8 +517,10 @@ test-shell:
 test-shell-debug:
 	$(call test,vpp_debug,shell)
 
-.PHONY: test-shell-gcov
-test-shell-gcov:
+.PHONY: test-shell-cov
+test-shell-cov:
+	$(eval CC=gcc)
+	$(eval TEST_GCOV=1)
 	$(call test,vpp_gcov,shell)
 
 .PHONY: test-dep
@@ -505,13 +537,9 @@ test-wipe-doc:
 	@echo "make test-wipe-doc is DEPRECATED"
 	sleep 300
 
-.PHONY: test-cov
-test-cov:
-	$(eval EXTENDED_TESTS=1)
-	$(call test,vpp_gcov,cov)
-
 .PHONY: test-wipe-cov
 test-wipe-cov:
+	$(call make,$(PLATFORM)_gcov,$(addsuffix -wipe,$(TARGETS)))
 	@make -C test wipe-cov
 
 .PHONY: test-wipe-all

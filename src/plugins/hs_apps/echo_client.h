@@ -18,14 +18,17 @@
 #ifndef __included_echo_client_h__
 #define __included_echo_client_h__
 
+#include <hs_apps/hs_test.h>
 #include <vnet/session/session.h>
 #include <vnet/session/application_interface.h>
 
 typedef struct ec_session_
 {
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
-  app_session_t data;
-  u32 vpp_session_index;
+#define _(type, name) type name;
+  foreach_app_session_field
+#undef _
+    u32 vpp_session_index;
   u32 thread_index;
   u64 bytes_to_send;
   u64 bytes_sent;
@@ -69,10 +72,12 @@ typedef struct
 
   u32 cli_node_index;			/**< cli process node index */
   u32 app_index;			/**< app index after attach */
+  session_handle_t ctrl_session_handle; /**< control session handle */
 
   /*
    * Configuration params
    */
+  hs_test_cfg_t cfg;
   u32 n_clients;			/**< Number of clients */
   u8 *connect_uri;			/**< URI for slave's connect */
   session_endpoint_cfg_t connect_sep;	/**< Sever session endpoint */
@@ -84,7 +89,6 @@ typedef struct
   u32 private_segment_count;		/**< Number of private fifo segs */
   u64 private_segment_size;		/**< size of private fifo segs */
   u32 tls_engine;			/**< TLS engine mbedtls/openssl */
-  u8 is_dgram;
   u32 no_copy;				/**< Don't memcpy data to tx fifo */
   u32 quic_streams;			/**< QUIC streams per connection */
   u32 ckpair_index;			/**< Cert key pair for tls/quic */
@@ -99,13 +103,11 @@ typedef struct
    */
   u8 app_is_init;
   u8 test_client_attached;
-  u8 no_return;
+  u8 echo_bytes;
   u8 test_return_packets;
   int drop_packets;		/**< drop all packets */
   u8 prealloc_fifos;		/**< Request fifo preallocation */
   u8 prealloc_sessions;
-  u8 no_output;
-  u8 test_bytes;
   u8 test_failed;
   u8 transport_proto;
   u8 barrier_acq_needed;
@@ -124,6 +126,9 @@ typedef enum ec_cli_signal_
 {
   EC_CLI_CONNECTS_DONE = 1,
   EC_CLI_CONNECTS_FAILED,
+  EC_CLI_CFG_SYNC,
+  EC_CLI_START,
+  EC_CLI_STOP,
   EC_CLI_TEST_DONE
 } ec_cli_signal_t;
 

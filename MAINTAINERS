@@ -98,6 +98,11 @@ I:	policer
 M:	Neale Ranns <neale@graphiant.com>
 F:	src/vnet/policer/
 
+VNET New Device Drivers Infra
+I:	dev
+M:	Damjan Marion <damarion@cisco.com>
+F:	src/vnet/dev/
+
 VNET Device Drivers
 I:	devices
 Y:	src/vnet/devices/pipe/FEATURE.yaml
@@ -194,7 +199,7 @@ VNET IPSec
 I:	ipsec
 M:	Neale Ranns <neale@graphiant.com>
 M:	Radu Nicolau <radu.nicolau@intel.com>
-M:	Fan Zhang <roy.fan.zhang@intel.com>
+M:	Fan Zhang <fanzhang.oss@gmail.com>
 F:	src/vnet/ipsec/
 
 VNET Crypto Infra
@@ -226,12 +231,12 @@ F:	src/plugins/crypto_openssl/
 Plugin - Crypto - ipsecmb
 I:	crypto-ipsecmb
 M:	Neale Ranns <neale@graphiant.com>
-M:      Fan Zhang <roy.fan.zhang@intel.com>
+M:      Fan Zhang <fanzhang.oss@gmail.com>
 F:	src/plugins/crypto_ipsecmb/
 
 Plugin - Crypto - sw_scheduler
 I:	crypto-sw-scheduler
-M:	Fan Zhang <roy.fan.zhang@intel.com>
+M:	Fan Zhang <fanzhang.oss@gmail.com>
 F:	src/plugs/crypto_sw_scheduler/
 
 VNET L2
@@ -405,6 +410,16 @@ I:	avf
 M:	Damjan Marion <damarion@cisco.com>
 F:	src/plugins/avf/
 
+Plugin - IAVF Device driver
+I:	iavf
+M:	Damjan Marion <damarion@cisco.com>
+F:	src/plugins/dev_iavf/
+
+Plugin - Amazon Elastic Network Adapter (ENA) device driver
+I:	ena
+M:	Damjan Marion <damarion@cisco.com>
+F:	src/plugins/dev_ena/
+
 Plugin - Dispatch Trace PCAP
 I:	dispatch-trace
 M:	Dave Barach <vpp@barachs.net>
@@ -418,9 +433,8 @@ F:	src/plugins/dpdk/
 
 Plugin - DPDK Crypto
 I:	dpdk-cryptodev
-M:	Sergio Gonzalez Monroy <sergio.gonzalez.monroy@outlook.com>
 M:	Radu Nicolau <radu.nicolau@intel.com>
-M:	Fan Zhang <roy.fan.zhang@intel.com>
+M:	Fan Zhang <fanzhang.oss@gmail.com>
 F:	src/plugins/dpdk/cryptodev/
 
 Plugin - flowprobe
@@ -428,6 +442,11 @@ I:	flowprobe
 Y:	src/plugins/flowprobe/FEATURE.yaml
 M:	Ole Troan <otroan@employees.org>
 F:	src/plugins/flowprobe/
+
+Plugin - fateshare
+I:	fateshare
+M:	Andrew Yourtchenko <ayourtch@gmail.com>
+F:	src/plugins/fateshare/
 
 Plugin - http_static
 I:	http_static
@@ -571,6 +590,11 @@ I:	unittest
 M:	Dave Barach <vpp@barachs.net>
 M:	Florin Coras <fcoras@cisco.com>
 F:	src/plugins/unittest/
+
+Plugin - IDPF Device driver
+I:      idpf
+M:      Ting Xu <ting.xu@intel.com>
+F:      src/plugins/idpf/
 
 Plugin - Intel DMA engines
 I:      dma_intel
@@ -742,7 +766,7 @@ F:	src/plugins/cnat
 Plugin - Wireguard
 I:	wireguard
 M:	Artem Glazychev <artem.glazychev@xored.com>
-M:	Fan Zhang <roy.fan.zhang@intel.com>
+M:	Fan Zhang <fanzhang.oss@gmail.com>
 F:	src/plugins/wireguard
 
 Packetforge
@@ -770,6 +794,11 @@ Plugin - geneve
 I:	geneve
 M:	community vpp-dev@lists.fd.io
 F:	src/plugins/geneve/
+
+Plugin - IP session redirect
+I:	ip_session_redirect
+M:	Benoît Ganne <bganne@cisco.com>
+F:	src/plugins/ip_session_redirect/
 
 Plugin - linux-cp
 I:	linux-cp
@@ -802,6 +831,21 @@ I:	prom
 M:	Florin Coras <fcoras@cisco.com>
 F:	src/plugins/prom
 
+Plugin - BPF Trace Filter
+I:      bpf_trace_filter
+M:      Mohammed Hawari <mohammed@hawari.fr>
+F:      src/plugins/bpf_trace_filter
+
+Plugin - NPTv6
+I:      npt66
+M:      Ole Troan <otroan@employees.org>
+F:      src/plugins/npt66
+
+Plugin - Trace node
+I:	tracenode
+M:	Maxime Peim <mpeim@cisco.com>
+F:	src/plugins/tracenode
+
 cJSON
 I:	cjson
 M:	Ole Troan <ot@cisco.com>
@@ -825,7 +869,7 @@ F:	src/extras/rpm/opensuse
 
 VPP StrongSwan Daemon
 I:	vpp-swan
-M:	Fan Zhang <roy.fan.zhang@intel.com>
+M:	Fan Zhang <fanzhang.oss@gmail.com>
 M:	Gabriel Oginski <gabrielx.oginski@intel.com>
 F:	extras/strongswan/vpp_sswan
 

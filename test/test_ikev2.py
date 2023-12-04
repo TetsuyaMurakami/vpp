@@ -19,9 +19,15 @@ from scapy.layers.inet import IP, UDP, Ether
 from scapy.layers.inet6 import IPv6
 from scapy.packet import raw, Raw
 from scapy.utils import long_converter
-from framework import tag_fixme_vpp_workers, tag_fixme_ubuntu2204, tag_fixme_debian11
-from framework import is_distro_ubuntu2204, is_distro_debian11
-from framework import VppTestCase, VppTestRunner
+from framework import VppTestCase
+from asfframework import (
+    tag_fixme_vpp_workers,
+    tag_fixme_ubuntu2204,
+    tag_fixme_debian11,
+    is_distro_ubuntu2204,
+    is_distro_debian11,
+    VppTestRunner,
+)
 from vpp_ikev2 import Profile, IDType, AuthMethod
 from vpp_papi import VppEnum
 
@@ -580,6 +586,7 @@ class IKEv2SA(object):
         return digest.finalize()
 
 
+@unittest.skipIf("ikev2" in config.excluded_plugins, "Exclude IKEv2 plugin tests")
 class IkePeer(VppTestCase):
     """common class for initiator and responder"""
 
@@ -1667,6 +1674,7 @@ class Ikev2Params(object):
             )
 
 
+@unittest.skipIf("ikev2" in config.excluded_plugins, "Exclude IKEv2 plugin tests")
 class TestApi(VppTestCase):
     """Test IKEV2 API"""
 

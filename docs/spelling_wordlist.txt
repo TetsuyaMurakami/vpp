@@ -102,6 +102,7 @@ bms
 Bn
 boolean
 bootup
+bpf
 Brockners
 bsid
 bss
@@ -109,6 +110,7 @@ bufferindex
 bufmon
 Bufmon
 bugfixing
+buildinfo
 buildingrst
 builtin
 builtinurl
@@ -189,6 +191,7 @@ CPPFLAGS
 cpu
 cPython
 crc
+crcchecker
 crcs
 crit
 criterias
@@ -245,6 +248,7 @@ Dest
 det
 dev
 devbind
+dev_iavf
 df
 dhcp
 dhcp
@@ -310,6 +314,7 @@ elts
 emacs
 emerg
 emphasise
+ena
 enablement
 encap
 encap
@@ -345,6 +350,7 @@ extranet
 Extranets
 failover
 fallback
+fateshare
 favour
 favoured
 favours
@@ -397,7 +403,6 @@ Gerrit
 gethostbyname
 gettingsources
 gettingstarted
-ggcov
 gid
 Gigabit
 GigE
@@ -409,6 +414,7 @@ Golang
 Goncalves
 govpp
 gpe
+graphviz
 gre
 grep
 grepping
@@ -461,12 +467,15 @@ ia
 iacl
 iAcl
 iACL
+iavf
 iBGP
 ibverb
 IBverbs
 iccrg
 icmp
 icmpr
+idpf
+Idpf
 ietf
 iface
 ifndef
@@ -746,6 +755,7 @@ netmap
 Netmap
 netplan
 Netplan
+newfile
 nexthop
 nginx
 NIC
@@ -757,6 +767,8 @@ nodaemon
 noevaluate
 nonaddress
 nosyslog
+npt
+npt66
 ns
 nsess
 nsh
@@ -778,6 +790,7 @@ oddbuf
 Oddbuf
 offline
 ofr
+oldfile
 online
 onlink
 ooo
@@ -800,6 +813,7 @@ params
 parsable
 passthrough
 passwordless
+patchset
 pathname
 pbb
 pcap
@@ -992,6 +1006,7 @@ seg
 segfault
 selinux
 semodule
+semver
 setjmp
 settingupenvironment
 setUp
@@ -1138,6 +1153,8 @@ tpv
 TPv
 tracedump
 Tracedump
+tracenode
+Tracenode
 TRex
 Tsou
 ttl
@@ -1147,6 +1164,8 @@ tuntap
 tw
 twovppinstances
 tx
+txq
+TXQ
 txt
 typedef
 ubuntu
@@ -1178,6 +1197,7 @@ unmounting
 Unmounting
 unmounts
 unreachables
+unregister
 unrouteable
 unserialization
 unserialize
@@ -1336,6 +1356,7 @@ XXhash
 xxx
 XXX
 xyz
+xz
 yaml
 Yaml
 YYMM

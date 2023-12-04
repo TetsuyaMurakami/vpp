@@ -146,6 +146,8 @@ p2p_ethernet_add_del (vlib_main_t * vm, u32 parent_if_index,
 	      vnet_feature_enable_disable ("device-input",
 					   "p2p-ethernet-input",
 					   parent_if_index, 1, 0, 0);
+	      vnet_feature_enable_disable ("port-rx-eth", "p2p-ethernet-input",
+					   parent_if_index, 1, 0, 0);
 	      /* Set promiscuous mode on the l2 interface */
 	      ethernet_set_flags (vnm, parent_if_index,
 				  ETHERNET_INTERFACE_FLAG_ACCEPT_ALL);
@@ -153,7 +155,7 @@ p2p_ethernet_add_del (vlib_main_t * vm, u32 parent_if_index,
 	    }
 	  p2pm->p2p_ethernet_by_sw_if_index[parent_if_index]++;
 	  /* set the interface mode */
-	  set_int_l2_mode (vm, vnm, MODE_L3, p2pe_subif_id, 0,
+	  set_int_l2_mode (vm, vnm, MODE_L3, p2pe_sw_if_index, 0,
 			   L2_BD_PORT_TYPE_NORMAL, 0, 0);
 	  return 0;
 	}
@@ -174,6 +176,9 @@ p2p_ethernet_add_del (vlib_main_t * vm, u32 parent_if_index,
 	      if (p2pm->p2p_ethernet_by_sw_if_index[parent_if_index] == 1)
 		{
 		  vnet_feature_enable_disable ("device-input",
+					       "p2p-ethernet-input",
+					       parent_if_index, 0, 0, 0);
+		  vnet_feature_enable_disable ("port-rx-eth",
 					       "p2p-ethernet-input",
 					       parent_if_index, 0, 0, 0);
 		  /* Disable promiscuous mode on the l2 interface */
@@ -248,10 +253,11 @@ vnet_p2p_ethernet_add_del (vlib_main_t * vm, unformat_input_t * input,
   return 0;
 }
 
-VLIB_CLI_COMMAND (p2p_ethernet_add_del_command, static) =
-{
-.path = "p2p_ethernet ",.function = vnet_p2p_ethernet_add_del,.short_help =
-    "p2p_ethernet <intfc> <mac-address> [sub-id <id> | del]",};
+VLIB_CLI_COMMAND (p2p_ethernet_add_del_command, static) = {
+  .path = "p2p_ethernet",
+  .function = vnet_p2p_ethernet_add_del,
+  .short_help = "p2p_ethernet <intfc> <mac-address> [sub-id <id>|del]",
+};
 
 static clib_error_t *
 p2p_ethernet_init (vlib_main_t * vm)

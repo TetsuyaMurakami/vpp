@@ -1,12 +1,6 @@
-import socket
-
-from scapy.layers.inet import IP, UDP, ICMP
-from scapy.layers.inet6 import IPv6
-from scapy.layers.l2 import Ether, GRE
-from scapy.packet import Raw
+from scapy.layers.inet import IP, ICMP
 
 from framework import VppTestCase
-from util import ppp
 from vpp_ip_route import VppIpInterfaceAddress, VppIpRoute, VppRoutePath
 from vpp_neighbor import VppNeighbor
 
@@ -177,5 +171,39 @@ class TestPing(VppTestCase):
             for p in out:
                 self.verify_ping_request(p, self.pg1.local_ip4, routed_dst, icmp_seq)
                 icmp_seq = icmp_seq + 1
+        finally:
+            self.vapi.cli("show error")
+
+    def test_ping_api(self):
+        """ping api"""
+
+        try:
+            self.pg_enable_capture(self.pg_interfaces)
+            self.pg_start()
+
+            ret = self.vapi.want_ping_finished_events(
+                address=self.pg1.remote_ip4,
+                repeat=4,
+                interval=0.2,
+            )
+            self.logger.info(ret)
+            timeout = 1
+
+            ev = self.vapi.wait_for_event(timeout, "ping_finished_event")
+            self.logger.info(ev)
+            self.assertEqual(ev.request_count, 4)
+
+            out = self.pg1.get_capture(4)
+            icmp_id = None
+            icmp_seq = 1
+            for p in out:
+                icmp = self.verify_ping_request(
+                    p, self.pg1.local_ip4, self.pg1.remote_ip4, icmp_seq
+                )
+                icmp_seq = icmp_seq + 1
+                if icmp_id is None:
+                    icmp_id = icmp.id
+                else:
+                    self.assertEqual(icmp.id, icmp_id)
         finally:
             self.vapi.cli("show error")

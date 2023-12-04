@@ -1,19 +1,15 @@
 import socket
-import unittest
 from scapy.layers.ipsec import ESP
 from scapy.layers.inet import IP, ICMP, UDP
 from scapy.layers.inet6 import IPv6
 from scapy.layers.l2 import Ether
 from scapy.packet import Raw
 
-from parameterized import parameterized
-from framework import VppTestRunner
 from template_ipsec import (
     IpsecTra46Tests,
     IpsecTun46Tests,
     TemplateIpsec,
     IpsecTcpTests,
-    IpsecTun4Tests,
     IpsecTra4Tests,
     config_tra_params,
     config_tun_params,
@@ -62,10 +58,11 @@ class ConfigIpsecESP(TemplateIpsec):
     def tearDown(self):
         super(ConfigIpsecESP, self).tearDown()
 
-    def config_anti_replay(self, params):
+    def config_anti_replay(self, params, anti_replay_window_size=64):
         saf = VppEnum.vl_api_ipsec_sad_flags_t
         for p in params:
             p.flags |= saf.IPSEC_API_SAD_FLAG_USE_ANTI_REPLAY
+            p.anti_replay_window_size = anti_replay_window_size
 
     def config_network(self, params):
         self.net_objs = []
@@ -134,6 +131,7 @@ class ConfigIpsecESP(TemplateIpsec):
         flags = params.flags
         tun_flags = params.tun_flags
         salt = params.salt
+        anti_replay_window_size = params.anti_replay_window_size
         objs = []
 
         params.tun_sa_in = VppIpsecSA(
@@ -152,6 +150,7 @@ class ConfigIpsecESP(TemplateIpsec):
             flags=flags,
             salt=salt,
             hop_limit=params.outer_hop_limit,
+            anti_replay_window_size=anti_replay_window_size,
         )
         params.tun_sa_out = VppIpsecSA(
             self,
@@ -169,6 +168,7 @@ class ConfigIpsecESP(TemplateIpsec):
             flags=flags,
             salt=salt,
             hop_limit=params.outer_hop_limit,
+            anti_replay_window_size=anti_replay_window_size,
         )
         objs.append(params.tun_sa_in)
         objs.append(params.tun_sa_out)
@@ -274,6 +274,7 @@ class ConfigIpsecESP(TemplateIpsec):
         e = VppEnum.vl_api_ipsec_spd_action_t
         flags = params.flags
         salt = params.salt
+        anti_replay_window_size = params.anti_replay_window_size
         objs = []
 
         params.tra_sa_in = VppIpsecSA(
@@ -287,6 +288,7 @@ class ConfigIpsecESP(TemplateIpsec):
             self.vpp_esp_protocol,
             flags=flags,
             salt=salt,
+            anti_replay_window_size=anti_replay_window_size,
         )
         params.tra_sa_out = VppIpsecSA(
             self,
@@ -299,6 +301,7 @@ class ConfigIpsecESP(TemplateIpsec):
             self.vpp_esp_protocol,
             flags=flags,
             salt=salt,
+            anti_replay_window_size=anti_replay_window_size,
         )
         objs.append(params.tra_sa_in)
         objs.append(params.tra_sa_out)
@@ -822,11 +825,6 @@ class TestIpsecEspAsync(TemplateIpsecEsp):
         self.p_async.spd.remove_vpp_config()
         self.p_async.sa.remove_vpp_config()
 
-        # async mode should have been disabled now that there are
-        # no async SAs. there's no API for this, so a reluctant
-        # screen scrape.
-        self.assertTrue("DISABLED" in self.vapi.cli("sh crypto async status"))
-
 
 class TestIpsecEspHandoff(
     TemplateIpsecEsp, IpsecTun6HandoffTests, IpsecTun4HandoffTests
@@ -1038,6 +1036,42 @@ class MyParameters:
                 "salt": 2020,
                 "key": b"JPjyOWBeVEQiMe7hJPjyOWBeVEQiMe7h",
             },
+            "AES-NULL-GMAC-128/NONE": {
+                "vpp-crypto": (
+                    VppEnum.vl_api_ipsec_crypto_alg_t.IPSEC_API_CRYPTO_ALG_AES_NULL_GMAC_128
+                ),
+                "vpp-integ": (
+                    VppEnum.vl_api_ipsec_integ_alg_t.IPSEC_API_INTEG_ALG_NONE
+                ),
+                "scapy-crypto": "AES-NULL-GMAC",
+                "scapy-integ": "NULL",
+                "key": b"JPjyOWBeVEQiMe7h",
+                "salt": 0,
+            },
+            "AES-NULL-GMAC-192/NONE": {
+                "vpp-crypto": (
+                    VppEnum.vl_api_ipsec_crypto_alg_t.IPSEC_API_CRYPTO_ALG_AES_NULL_GMAC_192
+                ),
+                "vpp-integ": (
+                    VppEnum.vl_api_ipsec_integ_alg_t.IPSEC_API_INTEG_ALG_NONE
+                ),
+                "scapy-crypto": "AES-NULL-GMAC",
+                "scapy-integ": "NULL",
+                "key": b"JPjyOWBeVEQiMe7h01234567",
+                "salt": 1010,
+            },
+            "AES-NULL-GMAC-256/NONE": {
+                "vpp-crypto": (
+                    VppEnum.vl_api_ipsec_crypto_alg_t.IPSEC_API_CRYPTO_ALG_AES_NULL_GMAC_256
+                ),
+                "vpp-integ": (
+                    VppEnum.vl_api_ipsec_integ_alg_t.IPSEC_API_INTEG_ALG_NONE
+                ),
+                "scapy-crypto": "AES-NULL-GMAC",
+                "scapy-integ": "NULL",
+                "key": b"JPjyOWBeVEQiMe7h0123456787654321",
+                "salt": 2020,
+            },
         }
 
 
@@ -1153,9 +1187,16 @@ class RunTestIpsecEspAll(ConfigIpsecESP, IpsecTra4, IpsecTra6, IpsecTun4, IpsecT
         #
         saf = VppEnum.vl_api_ipsec_sad_flags_t
         if flag & saf.IPSEC_API_SAD_FLAG_USE_ANTI_REPLAY:
-            self.unconfig_network()
-            self.config_network(self.params.values())
-            self.verify_tra_anti_replay()
+            for anti_replay_window_size in (
+                64,
+                131072,
+            ):
+                self.unconfig_network()
+                self.config_anti_replay(self.params.values(), anti_replay_window_size)
+                self.config_network(self.params.values())
+                self.verify_tra_anti_replay()
+                self.verify_tra_anti_replay_algorithm()
+            self.config_anti_replay(self.params.values())
 
         self.unconfig_network()
         self.config_network(self.params.values())
@@ -1187,7 +1228,8 @@ class RunTestIpsecEspAll(ConfigIpsecESP, IpsecTra4, IpsecTra6, IpsecTun4, IpsecT
 # GEN     AES-GCM-192/NONE AES-GCM-256/NONE AES-CBC-128/MD5-96 \
 # GEN     AES-CBC-192/SHA1-96 AES-CBC-256/SHA1-96 \
 # GEN     3DES-CBC/SHA1-96 NONE/SHA1-96 \
-# GEN     AES-CTR-128/SHA1-96 AES-CTR-192/SHA1-96 AES-CTR-256/SHA1-96; do \
+# GEN     AES-CTR-128/SHA1-96 AES-CTR-192/SHA1-96 AES-CTR-256/SHA1-96 \
+# GEN     AES-NULL-GMAC-128/NONE AES-NULL-GMAC-192/NONE AES-NULL-GMAC-256/NONE; do \
 # GEN      echo -en "\n\nclass "
 # GEN      echo -e "Test_${ENG}_${ESN}_${AR}_${ALG}(RunTestIpsecEspAll):" |
 # GEN             sed -e 's/-/_/g' -e 's#/#_#g' ;
@@ -2003,6 +2045,30 @@ class Test_openssl_ESNon_ARon_AES_CTR_256_SHA1_96(RunTestIpsecEspAll):
         self.run_test()
 
 
+class Test_openssl_ESNon_ARon_AES_NULL_GMAC_128_NONE(RunTestIpsecEspAll):
+    """openssl ESNon ARon AES-NULL-GMAC-128/NONE IPSec test"""
+
+    def test_ipsec(self):
+        """openssl ESNon ARon AES-NULL-GMAC-128/NONE IPSec test"""
+        self.run_test()
+
+
+class Test_openssl_ESNon_ARon_AES_NULL_GMAC_192_NONE(RunTestIpsecEspAll):
+    """openssl ESNon ARon AES-NULL-GMAC-192/NONE IPSec test"""
+
+    def test_ipsec(self):
+        """openssl ESNon ARon AES-NULL-GMAC-192/NONE IPSec test"""
+        self.run_test()
+
+
+class Test_openssl_ESNon_ARon_AES_NULL_GMAC_256_NONE(RunTestIpsecEspAll):
+    """openssl ESNon ARon AES-NULL-GMAC-256/NONE IPSec test"""
+
+    def test_ipsec(self):
+        """openssl ESNon ARon AES-NULL-GMAC-256/NONE IPSec test"""
+        self.run_test()
+
+
 class Test_openssl_ESNon_ARoff_AES_GCM_128_NONE(RunTestIpsecEspAll):
     """openssl ESNon ARoff AES-GCM-128/NONE IPSec test"""
 
@@ -2088,6 +2154,30 @@ class Test_openssl_ESNon_ARoff_AES_CTR_256_SHA1_96(RunTestIpsecEspAll):
 
     def test_ipsec(self):
         """openssl ESNon ARoff AES-CTR-256/SHA1-96 IPSec test"""
+        self.run_test()
+
+
+class Test_openssl_ESNon_ARoff_AES_NULL_GMAC_128_NONE(RunTestIpsecEspAll):
+    """openssl ESNon ARoff AES-NULL-GMAC-128/NONE IPSec test"""
+
+    def test_ipsec(self):
+        """openssl ESNon ARoff AES-NULL-GMAC-128/NONE IPSec test"""
+        self.run_test()
+
+
+class Test_openssl_ESNon_ARoff_AES_NULL_GMAC_192_NONE(RunTestIpsecEspAll):
+    """openssl ESNon ARoff AES-NULL-GMAC-192/NONE IPSec test"""
+
+    def test_ipsec(self):
+        """openssl ESNon ARoff AES-NULL-GMAC-192/NONE IPSec test"""
+        self.run_test()
+
+
+class Test_openssl_ESNon_ARoff_AES_NULL_GMAC_256_NONE(RunTestIpsecEspAll):
+    """openssl ESNon ARoff AES-NULL-GMAC-256/NONE IPSec test"""
+
+    def test_ipsec(self):
+        """openssl ESNon ARoff AES-NULL-GMAC-256/NONE IPSec test"""
         self.run_test()
 
 
@@ -2179,6 +2269,30 @@ class Test_openssl_ESNoff_ARon_AES_CTR_256_SHA1_96(RunTestIpsecEspAll):
         self.run_test()
 
 
+class Test_openssl_ESNoff_ARon_AES_NULL_GMAC_128_NONE(RunTestIpsecEspAll):
+    """openssl ESNoff ARon AES-NULL-GMAC-128/NONE IPSec test"""
+
+    def test_ipsec(self):
+        """openssl ESNoff ARon AES-NULL-GMAC-128/NONE IPSec test"""
+        self.run_test()
+
+
+class Test_openssl_ESNoff_ARon_AES_NULL_GMAC_192_NONE(RunTestIpsecEspAll):
+    """openssl ESNoff ARon AES-NULL-GMAC-192/NONE IPSec test"""
+
+    def test_ipsec(self):
+        """openssl ESNoff ARon AES-NULL-GMAC-192/NONE IPSec test"""
+        self.run_test()
+
+
+class Test_openssl_ESNoff_ARon_AES_NULL_GMAC_256_NONE(RunTestIpsecEspAll):
+    """openssl ESNoff ARon AES-NULL-GMAC-256/NONE IPSec test"""
+
+    def test_ipsec(self):
+        """openssl ESNoff ARon AES-NULL-GMAC-256/NONE IPSec test"""
+        self.run_test()
+
+
 class Test_openssl_ESNoff_ARoff_AES_GCM_128_NONE(RunTestIpsecEspAll):
     """openssl ESNoff ARoff AES-GCM-128/NONE IPSec test"""
 
@@ -2264,6 +2378,30 @@ class Test_openssl_ESNoff_ARoff_AES_CTR_256_SHA1_96(RunTestIpsecEspAll):
 
     def test_ipsec(self):
         """openssl ESNoff ARoff AES-CTR-256/SHA1-96 IPSec test"""
+        self.run_test()
+
+
+class Test_openssl_ESNoff_ARoff_AES_NULL_GMAC_128_NONE(RunTestIpsecEspAll):
+    """openssl ESNoff ARoff AES-NULL-GMAC-128/NONE IPSec test"""
+
+    def test_ipsec(self):
+        """openssl ESNoff ARoff AES-NULL-GMAC-128/NONE IPSec test"""
+        self.run_test()
+
+
+class Test_openssl_ESNoff_ARoff_AES_NULL_GMAC_192_NONE(RunTestIpsecEspAll):
+    """openssl ESNoff ARoff AES-NULL-GMAC-192/NONE IPSec test"""
+
+    def test_ipsec(self):
+        """openssl ESNoff ARoff AES-NULL-GMAC-192/NONE IPSec test"""
+        self.run_test()
+
+
+class Test_openssl_ESNoff_ARoff_AES_NULL_GMAC_256_NONE(RunTestIpsecEspAll):
+    """openssl ESNoff ARoff AES-NULL-GMAC-256/NONE IPSec test"""
+
+    def test_ipsec(self):
+        """openssl ESNoff ARoff AES-NULL-GMAC-256/NONE IPSec test"""
         self.run_test()
 
 

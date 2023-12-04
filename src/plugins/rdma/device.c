@@ -882,7 +882,7 @@ sysfs_path_to_pci_addr (char *path, vlib_pci_addr_t * addr)
   unformat_input_t in;
   u8 *s;
 
-  s = clib_sysfs_link_to_name (path);
+  s = clib_file_get_resolved_basename (path);
   if (!s)
     return 0;
 
@@ -1152,15 +1152,4 @@ rdma_init (vlib_main_t * vm)
   return 0;
 }
 
-VLIB_INIT_FUNCTION (rdma_init) =
-{
-  .runs_after = VLIB_INITS ("pci_bus_init"),
-};
-
-/*
- * fd.io coding-style-patch-verification: ON
- *
- * Local Variables:
- * eval: (c-set-style "gnu")
- * End:
- */
+VLIB_INIT_FUNCTION (rdma_init);

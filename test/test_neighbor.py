@@ -2,10 +2,9 @@
 
 import unittest
 import os
-from socket import AF_INET, AF_INET6, inet_pton
 
-from framework import tag_fixme_vpp_workers, tag_fixme_ubuntu2204, tag_fixme_debian11
-from framework import VppTestCase, VppTestRunner
+from framework import VppTestCase
+from asfframework import VppTestRunner, tag_fixme_vpp_workers, tag_fixme_ubuntu2204
 from vpp_neighbor import VppNeighbor, find_nbr
 from vpp_ip_route import (
     VppIpRoute,
@@ -16,10 +15,10 @@ from vpp_ip_route import (
     FibPathType,
     VppIpInterfaceAddress,
 )
-from vpp_papi import VppEnum
+from vpp_papi import VppEnum, MACAddress
 from vpp_ip import VppIpPuntRedirect
+from vpp_sub_interface import VppDot1ADSubint
 
-import scapy.compat
 from scapy.packet import Raw
 from scapy.layers.l2 import Ether, ARP, Dot1Q
 from scapy.layers.inet import IP, UDP, TCP
@@ -86,11 +85,11 @@ class ARPTestCase(VppTestCase):
 
         super(ARPTestCase, self).tearDown()
 
-    def verify_arp_req(self, rx, smac, sip, dip):
+    def verify_arp_req(self, rx, smac, sip, dip, etype=0x0806):
         ether = rx[Ether]
         self.assertEqual(ether.dst, "ff:ff:ff:ff:ff:ff")
         self.assertEqual(ether.src, smac)
-        self.assertEqual(ether.type, 0x0806)
+        self.assertEqual(ether.type, etype)
 
         arp = rx[ARP]
         self.assertEqual(arp.hwtype, 1)
@@ -844,6 +843,105 @@ class ARPTestCase(VppTestCase):
         self.pg2.unset_unnumbered(self.pg1.sw_if_index)
         self.pg2.admin_down()
         self.pg1.admin_down()
+
+    def test_arp_after_mac_change(self):
+        """ARP (after MAC address change)"""
+
+        #
+        # Prepare a subinterface
+        #
+        subif0 = VppDot1ADSubint(self, self.pg1, 0, 300, 400)
+        subif0.admin_up()
+        subif0.config_ip4()
+
+        #
+        # Send a packet to cause ARP generation for the parent interface's remote host
+        #
+        p1 = (
+            Ether(dst=self.pg0.local_mac, src=self.pg0.remote_mac)
+            / IP(src=self.pg0.remote_ip4, dst=self.pg1.remote_ip4)
+            / UDP(sport=1234, dport=1234)
+            / Raw()
+        )
+
+        self.pg0.add_stream(p1)
+        self.pg_enable_capture(self.pg_interfaces)
+        self.pg_start()
+
+        rx = self.pg1.get_capture(1)
+
+        self.verify_arp_req(
+            rx[0], self.pg1.local_mac, self.pg1.local_ip4, self.pg1.remote_ip4
+        )
+
+        #
+        # Send a packet to cause ARP generation for the subinterface's remote host
+        #
+        p2 = (
+            Ether(dst=self.pg0.local_mac, src=self.pg0.remote_mac)
+            / IP(src=self.pg0.remote_ip4, dst=subif0.remote_ip4)
+            / UDP(sport=1234, dport=1234)
+            / Raw()
+        )
+
+        self.pg0.add_stream(p2)
+        self.pg_enable_capture(self.pg_interfaces)
+        self.pg_start()
+
+        rx = self.pg1.get_capture(1)
+
+        self.verify_arp_req(
+            rx[0],
+            self.pg1.local_mac,
+            subif0.local_ip4,
+            subif0.remote_ip4,
+            subif0.DOT1AD_TYPE,
+        )
+
+        #
+        # Change MAC address of the parent interface
+        #
+        pg1_mac_saved = self.pg1.local_mac
+        self.pg1.set_mac(MACAddress("00:00:00:11:22:33"))
+
+        #
+        # Send a packet to cause ARP generation for the parent interface's remote host
+        #   - expect new MAC address is used as the source
+        #
+        self.pg0.add_stream(p1)
+        self.pg_enable_capture(self.pg_interfaces)
+        self.pg_start()
+
+        rx = self.pg1.get_capture(1)
+
+        self.verify_arp_req(
+            rx[0], self.pg1.local_mac, self.pg1.local_ip4, self.pg1.remote_ip4
+        )
+
+        #
+        # Send a packet to cause ARP generation for the subinterface's remote host
+        #   - expect new MAC address is used as the source
+        #
+
+        self.pg0.add_stream(p2)
+        self.pg_enable_capture(self.pg_interfaces)
+        self.pg_start()
+
+        rx = self.pg1.get_capture(1)
+
+        self.verify_arp_req(
+            rx[0],
+            self.pg1.local_mac,
+            subif0.local_ip4,
+            subif0.remote_ip4,
+            subif0.DOT1AD_TYPE,
+        )
+
+        #
+        # Cleanup
+        #
+        subif0.remove_vpp_config()
+        self.pg1.set_mac(MACAddress(pg1_mac_saved))
 
     def test_proxy_mirror_arp(self):
         """Interface Mirror Proxy ARP"""
@@ -2026,27 +2124,30 @@ class ARPTestCase(VppTestCase):
 
         #
         # add a local address in the same subnet
-        #  the source addresses are equivalent. VPP happens to
-        #  choose the last one that was added
+        #  the source addresses are equivalent.
+        # VPP leaves the glean address being used for a prefix
+        # in place until that address is deleted.
+        #
         conn3 = VppIpInterfaceAddress(self, self.pg1, "10.0.1.2", 24).add_vpp_config()
 
-        rxs = self.send_and_expect(self.pg0, [p2], self.pg1)
-        for rx in rxs:
-            self.verify_arp_req(rx, self.pg1.local_mac, "10.0.1.2", "10.0.1.128")
-
-        #
-        # remove
-        #
-        conn3.remove_vpp_config()
         rxs = self.send_and_expect(self.pg0, [p2], self.pg1)
         for rx in rxs:
             self.verify_arp_req(rx, self.pg1.local_mac, "10.0.1.1", "10.0.1.128")
 
         #
-        # add back, this time remove the first one
+        # remove first address, which is currently in use
+        # the second address should be used now
         #
-        conn3 = VppIpInterfaceAddress(self, self.pg1, "10.0.1.2", 24).add_vpp_config()
+        conn2.remove_vpp_config()
+        rxs = self.send_and_expect(self.pg0, [p2], self.pg1)
+        for rx in rxs:
+            self.verify_arp_req(rx, self.pg1.local_mac, "10.0.1.2", "10.0.1.128")
 
+        #
+        # add first address back. Second address should continue
+        # being used.
+        #
+        conn2 = VppIpInterfaceAddress(self, self.pg1, "10.0.1.1", 24).add_vpp_config()
         rxs = self.send_and_expect(self.pg0, [p2], self.pg1)
         for rx in rxs:
             self.verify_arp_req(rx, self.pg1.local_mac, "10.0.1.2", "10.0.1.128")
@@ -2068,6 +2169,28 @@ class ARPTestCase(VppTestCase):
         rxs = self.send_and_expect(self.pg3, [p2], self.pg1)
         for rx in rxs:
             self.verify_arp_req(rx, self.pg1.local_mac, "10.0.1.2", "10.0.1.128")
+
+        # apply an attached prefix to the interface
+        # since there's no local address in this prefix,
+        # any other address is used
+        p3 = (
+            Ether(src=self.pg0.remote_mac, dst=self.pg0.local_mac)
+            / IP(src=self.pg1.remote_ip4, dst="10.0.2.128")
+            / Raw(b"0x5" * 100)
+        )
+
+        VppIpRoute(
+            self,
+            "10.0.2.0",
+            24,
+            [VppRoutePath("0.0.0.0", self.pg1.sw_if_index)],
+        ).add_vpp_config()
+
+        rxs = self.send_and_expect(self.pg0, [p3], self.pg1)
+        for rx in rxs:
+            self.verify_arp_req(
+                rx, self.pg1.local_mac, self.pg1.local_ip4, "10.0.2.128"
+            )
 
         # cleanup
         conn3.remove_vpp_config()
@@ -2247,6 +2370,14 @@ class NeighborAgeTestCase(VppTestCase):
         self.assertEqual(arp.psrc, sip)
         self.assertEqual(arp.pdst, dip)
 
+    def verify_ip_neighbor_config(self, af, max_number, max_age, recycle):
+        config = self.vapi.ip_neighbor_config_get(af)
+
+        self.assertEqual(config.af, af)
+        self.assertEqual(config.max_number, max_number)
+        self.assertEqual(config.max_age, max_age)
+        self.assertEqual(config.recycle, recycle)
+
     def test_age(self):
         """Aging/Recycle"""
 
@@ -2263,12 +2394,22 @@ class NeighborAgeTestCase(VppTestCase):
         self.pg_enable_capture(self.pg_interfaces)
 
         #
+        # Verify neighbor configuration defaults
+        #
+        self.verify_ip_neighbor_config(
+            af=vaf.ADDRESS_IP4, max_number=50000, max_age=0, recycle=False
+        )
+
+        #
         # Set the neighbor configuration:
         #   limi = 200
         #   age  = 0 seconds
         #   recycle = false
         #
         self.vapi.ip_neighbor_config(
+            af=vaf.ADDRESS_IP4, max_number=200, max_age=0, recycle=False
+        )
+        self.verify_ip_neighbor_config(
             af=vaf.ADDRESS_IP4, max_number=200, max_age=0, recycle=False
         )
 
@@ -2298,6 +2439,9 @@ class NeighborAgeTestCase(VppTestCase):
         self.vapi.ip_neighbor_config(
             af=vaf.ADDRESS_IP4, max_number=200, max_age=0, recycle=True
         )
+        self.verify_ip_neighbor_config(
+            af=vaf.ADDRESS_IP4, max_number=200, max_age=0, recycle=True
+        )
 
         # now new additions are allowed
         VppNeighbor(
@@ -2319,6 +2463,9 @@ class NeighborAgeTestCase(VppTestCase):
         # change the config to age old neighbors
         #
         self.vapi.ip_neighbor_config(
+            af=vaf.ADDRESS_IP4, max_number=200, max_age=2, recycle=True
+        )
+        self.verify_ip_neighbor_config(
             af=vaf.ADDRESS_IP4, max_number=200, max_age=2, recycle=True
         )
 
@@ -2399,6 +2546,9 @@ class NeighborAgeTestCase(VppTestCase):
         self.vapi.ip_neighbor_config(
             af=vaf.ADDRESS_IP4, max_number=200, max_age=1000, recycle=True
         )
+        self.verify_ip_neighbor_config(
+            af=vaf.ADDRESS_IP4, max_number=200, max_age=1000, recycle=True
+        )
 
         #
         # load up some neighbours again, then disable the aging
@@ -2412,6 +2562,9 @@ class NeighborAgeTestCase(VppTestCase):
                 self.pg0.remote_hosts[ii].ip4,
             ).add_vpp_config()
         self.vapi.ip_neighbor_config(
+            af=vaf.ADDRESS_IP4, max_number=200, max_age=0, recycle=False
+        )
+        self.verify_ip_neighbor_config(
             af=vaf.ADDRESS_IP4, max_number=200, max_age=0, recycle=False
         )
 

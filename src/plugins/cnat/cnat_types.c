@@ -16,8 +16,7 @@
 #include <cnat/cnat_types.h>
 
 cnat_main_t cnat_main;
-fib_source_t cnat_fib_source;
-cnat_timestamp_t *cnat_timestamps;
+cnat_timestamp_mpool_t cnat_timestamps;
 
 char *cnat_error_strings[] = {
 #define cnat_error(n,s) s,
@@ -152,19 +151,6 @@ format_cnat_endpoint (u8 * s, va_list * args)
   return (s);
 }
 
-static clib_error_t *
-cnat_types_init (vlib_main_t * vm)
-{
-  cnat_fib_source = fib_source_allocate ("cnat",
-					 CNAT_FIB_SOURCE_PRIORITY,
-					 FIB_SOURCE_BH_SIMPLE);
-
-
-  clib_rwlock_init (&cnat_main.ts_lock);
-
-  return (NULL);
-}
-
 void
 cnat_enable_disable_scanner (cnat_scanner_cmd_t event_type)
 {
@@ -191,6 +177,8 @@ cnat_config (vlib_main_t * vm, unformat_input_t * input)
   cm->session_hash_buckets = CNAT_DEFAULT_SESSION_BUCKETS;
   cm->translation_hash_memory = CNAT_DEFAULT_TRANSLATION_MEMORY;
   cm->translation_hash_buckets = CNAT_DEFAULT_TRANSLATION_BUCKETS;
+  cm->client_hash_memory = CNAT_DEFAULT_CLIENT_MEMORY;
+  cm->client_hash_buckets = CNAT_DEFAULT_CLIENT_BUCKETS;
   cm->snat_hash_memory = CNAT_DEFAULT_SNAT_MEMORY;
   cm->snat_hash_buckets = CNAT_DEFAULT_SNAT_BUCKETS;
   cm->snat_if_map_length = CNAT_DEFAULT_SNAT_IF_MAP_LEN;
@@ -214,6 +202,12 @@ cnat_config (vlib_main_t * vm, unformat_input_t * input)
 	;
       else if (unformat (input, "translation-db-memory %U",
 			 unformat_memory_size, &cm->translation_hash_memory))
+	;
+      else if (unformat (input, "client-db-buckets %u",
+			 &cm->client_hash_buckets))
+	;
+      else if (unformat (input, "client-db-memory %U", unformat_memory_size,
+			 &cm->client_hash_memory))
 	;
       else if (unformat (input, "snat-db-buckets %u", &cm->snat_hash_buckets))
 	;
@@ -250,7 +244,6 @@ cnat_get_main ()
 }
 
 VLIB_EARLY_CONFIG_FUNCTION (cnat_config, "cnat");
-VLIB_INIT_FUNCTION (cnat_types_init);
 
 /*
  * fd.io coding-style-patch-verification: ON

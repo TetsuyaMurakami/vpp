@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
 import unittest
-from random import shuffle, choice, randrange
+from random import shuffle, randrange
 
-from framework import VppTestCase, VppTestRunner
+from framework import VppTestCase
+from asfframework import VppTestRunner
 
-import scapy.compat
 from scapy.packet import Raw
 from scapy.layers.l2 import Ether, GRE
 from scapy.layers.inet import IP, UDP, ICMP, icmptypes
@@ -21,11 +21,9 @@ from scapy.layers.inet6 import (
     ICMPv6EchoRequest,
     ICMPv6EchoReply,
 )
-from framework import VppTestCase, VppTestRunner
-from util import ppp, ppc, fragment_rfc791, fragment_rfc8200
+from util import ppp, fragment_rfc791, fragment_rfc8200
 from vpp_gre_interface import VppGreInterface
-from vpp_ip import DpoProto
-from vpp_ip_route import VppIpRoute, VppRoutePath, FibPathProto
+from vpp_ip_route import VppIpRoute, VppRoutePath
 from vpp_papi import VppEnum
 
 # 35 is enough to have >257 400-byte fragments
@@ -1098,7 +1096,7 @@ class TestIPv4MWReassembly(VppTestCase):
         first_packets = [[] for n in range(self.vpp_worker_count)]
         second_packets = [[] for n in range(self.vpp_worker_count)]
         rest_of_packets = [[] for n in range(self.vpp_worker_count)]
-        for (_, p) in self.pkt_infos:
+        for _, p in self.pkt_infos:
             wi = randrange(self.vpp_worker_count)
             second_packets[wi].append(p[0])
             if len(p) <= 1:
@@ -1930,7 +1928,7 @@ class TestIPv6MWReassembly(VppTestCase):
         first_packets = [[] for n in range(self.vpp_worker_count)]
         second_packets = [[] for n in range(self.vpp_worker_count)]
         rest_of_packets = [[] for n in range(self.vpp_worker_count)]
-        for (_, p) in self.pkt_infos:
+        for _, p in self.pkt_infos:
             wi = randrange(self.vpp_worker_count)
             second_packets[wi].append(p[0])
             if len(p) <= 1:

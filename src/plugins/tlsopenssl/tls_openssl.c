@@ -72,7 +72,7 @@ openssl_ctx_free (tls_ctx_t * ctx)
 
       SSL_free (oc->ssl);
       vec_free (ctx->srv_hostname);
-
+      SSL_CTX_free (oc->client_ssl_ctx);
 #ifdef HAVE_OPENSSL_ASYNC
   openssl_evt_free (ctx->evt_index, ctx->c_thread_index);
 #endif
@@ -163,7 +163,7 @@ openssl_lctx_get (u32 lctx_index)
     return -1;
 
 static int
-openssl_read_from_ssl_into_fifo (svm_fifo_t * f, SSL * ssl)
+openssl_read_from_ssl_into_fifo (svm_fifo_t *f, SSL *ssl, u32 max_len)
 {
   int read, rv, n_fs, i;
   const int n_segs = 2;
@@ -174,6 +174,7 @@ openssl_read_from_ssl_into_fifo (svm_fifo_t * f, SSL * ssl)
   if (!max_enq)
     return 0;
 
+  max_enq = clib_min (max_len, max_enq);
   n_fs = svm_fifo_provision_chunks (f, fs, n_segs, max_enq);
   if (n_fs < 0)
     return 0;
@@ -273,10 +274,10 @@ openssl_handle_handshake_failure (tls_ctx_t * ctx)
       if (app_session)
 	{
 	  session_free (app_session);
-	  ctx->no_app_session = 1;
 	  ctx->c_s_index = SESSION_INVALID_INDEX;
 	  tls_disconnect_transport (ctx);
 	}
+      ctx->no_app_session = 1;
     }
   else
     {
@@ -533,9 +534,10 @@ static inline int
 openssl_ctx_read_tls (tls_ctx_t *ctx, session_t *tls_session)
 {
   openssl_ctx_t *oc = (openssl_ctx_t *) ctx;
+  const u32 max_len = 128 << 10;
   session_t *app_session;
-  int read;
   svm_fifo_t *f;
+  int read;
 
   if (PREDICT_FALSE (SSL_in_init (oc->ssl)))
     {
@@ -549,7 +551,7 @@ openssl_ctx_read_tls (tls_ctx_t *ctx, session_t *tls_session)
   app_session = session_get_from_handle (ctx->app_session_handle);
   f = app_session->rx_fifo;
 
-  read = openssl_read_from_ssl_into_fifo (f, oc->ssl);
+  read = openssl_read_from_ssl_into_fifo (f, oc->ssl, max_len);
 
   /* Unrecoverable protocol error. Reset connection */
   if (PREDICT_FALSE (read < 0))
@@ -558,8 +560,7 @@ openssl_ctx_read_tls (tls_ctx_t *ctx, session_t *tls_session)
       return 0;
     }
 
-  /* If handshake just completed, session may still be in accepting state */
-  if (read && app_session->session_state >= SESSION_STATE_READY)
+  if (read)
     tls_notify_app_enqueue (ctx, app_session);
 
   if ((SSL_pending (oc->ssl) > 0) ||
@@ -738,30 +739,31 @@ openssl_ctx_init_client (tls_ctx_t * ctx)
       return -1;
     }
 
-  oc->ssl_ctx = SSL_CTX_new (method);
-  if (oc->ssl_ctx == NULL)
+  oc->client_ssl_ctx = SSL_CTX_new (method);
+  if (oc->client_ssl_ctx == NULL)
     {
       TLS_DBG (1, "SSL_CTX_new returned null");
       return -1;
     }
 
-  SSL_CTX_set_ecdh_auto (oc->ssl_ctx, 1);
-  SSL_CTX_set_mode (oc->ssl_ctx, SSL_MODE_ENABLE_PARTIAL_WRITE);
+  SSL_CTX_set_ecdh_auto (oc->client_ssl_ctx, 1);
+  SSL_CTX_set_mode (oc->client_ssl_ctx, SSL_MODE_ENABLE_PARTIAL_WRITE);
 #ifdef HAVE_OPENSSL_ASYNC
   if (om->async)
-    SSL_CTX_set_mode (oc->ssl_ctx, SSL_MODE_ASYNC);
+    SSL_CTX_set_mode (oc->client_ssl_ctx, SSL_MODE_ASYNC);
 #endif
-  rv = SSL_CTX_set_cipher_list (oc->ssl_ctx, (const char *) om->ciphers);
+  rv =
+    SSL_CTX_set_cipher_list (oc->client_ssl_ctx, (const char *) om->ciphers);
   if (rv != 1)
     {
       TLS_DBG (1, "Couldn't set cipher");
       return -1;
     }
 
-  SSL_CTX_set_options (oc->ssl_ctx, flags);
-  SSL_CTX_set_cert_store (oc->ssl_ctx, om->cert_store);
+  SSL_CTX_set_options (oc->client_ssl_ctx, flags);
+  SSL_CTX_set1_cert_store (oc->client_ssl_ctx, om->cert_store);
 
-  oc->ssl = SSL_new (oc->ssl_ctx);
+  oc->ssl = SSL_new (oc->client_ssl_ctx);
   if (oc->ssl == NULL)
     {
       TLS_DBG (1, "Couldn't initialize ssl struct");

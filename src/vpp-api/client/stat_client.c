@@ -433,6 +433,8 @@ stat_segment_dump_r (uint32_t * stats, stat_client_main_t * sm)
 
   fprintf (stderr, "Epoch changed while reading, invalid results\n");
   // TODO increase counter
+  if (res)
+    stat_segment_data_free (res);
   return 0;
 }
 
@@ -512,6 +514,11 @@ stat_segment_index_to_name_r (uint32_t index, stat_client_main_t * sm)
     return 0;
   vec = get_stat_vector_r (sm);
   ep = vec_elt_at_index (vec, index);
+  if (ep->type == STAT_DIR_TYPE_EMPTY)
+    {
+      stat_segment_access_end (&sa, sm);
+      return 0;
+    }
   if (!stat_segment_access_end (&sa, sm))
     return 0;
   return strdup (ep->name);
