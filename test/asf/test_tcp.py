@@ -4,8 +4,12 @@ import unittest
 
 from asfframework import VppAsfTestCase, VppTestRunner
 from vpp_ip_route import VppIpTable, VppIpRoute, VppRoutePath
+from config import config
 
 
+@unittest.skipIf(
+    "hs_apps" in config.excluded_plugins, "Exclude tests requiring hs_apps plugin"
+)
 class TestTCP(VppAsfTestCase):
     """TCP Test Case"""
 
@@ -44,6 +48,12 @@ class TestTCP(VppAsfTestCase):
         )
 
     def tearDown(self):
+        self.vapi.app_namespace_add_del_v4(
+            is_add=0, namespace_id="0", sw_if_index=self.loop0.sw_if_index
+        )
+        self.vapi.app_namespace_add_del_v4(
+            is_add=0, namespace_id="1", sw_if_index=self.loop1.sw_if_index
+        )
         for i in self.lo_interfaces:
             i.unconfig_ip4()
             i.set_table_ip4(0)

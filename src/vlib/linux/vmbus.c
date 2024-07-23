@@ -165,19 +165,19 @@ format_vlib_vmbus_addr (u8 *s, va_list *va)
   u8 *bytes = addr->guid;
 
   for (int i = 0; i < 4; i++)
-    s = format (s, "%02X", bytes++[0]);
+    s = format (s, "%02x", bytes++[0]);
   vec_add1 (s, '-');
   for (int i = 0; i < 2; i++)
-    s = format (s, "%02X", bytes++[0]);
+    s = format (s, "%02x", bytes++[0]);
   vec_add1 (s, '-');
   for (int i = 0; i < 2; i++)
-    s = format (s, "%02X", bytes++[0]);
+    s = format (s, "%02x", bytes++[0]);
   vec_add1 (s, '-');
   for (int i = 0; i < 2; i++)
-    s = format (s, "%02X", bytes++[0]);
+    s = format (s, "%02x", bytes++[0]);
   vec_add1 (s, '-');
   for (int i = 0; i < 6; i++)
-    s = format (s, "%02X", bytes++[0]);
+    s = format (s, "%02x", bytes++[0]);
 
   return s;
 }
@@ -455,12 +455,10 @@ linux_vmbus_init (vlib_main_t * vm)
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_INIT_FUNCTION (linux_vmbus_init) =
 {
   .runs_before = VLIB_INITS("unix_input_init"),
 };
-/* *INDENT-ON* */
 
 /*
  * fd.io coding-style-patch-verification: ON

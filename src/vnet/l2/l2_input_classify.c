@@ -442,7 +442,6 @@ VLIB_NODE_FN (l2_input_classify_node) (vlib_main_t * vm,
   return frame->n_vectors;
 }
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (l2_input_classify_node) = {
   .name = "l2-input-classify",
   .vector_size = sizeof (u32),
@@ -462,10 +461,8 @@ VLIB_REGISTER_NODE (l2_input_classify_node) = {
     [L2_INPUT_CLASSIFY_NEXT_ETHERNET_INPUT] = "ethernet-input-not-l2",
     [L2_INPUT_CLASSIFY_NEXT_IP4_INPUT] = "ip4-input",
     [L2_INPUT_CLASSIFY_NEXT_IP6_INPUT] = "ip6-input",
-    [L2_INPUT_CLASSIFY_NEXT_LI] = "li-hit",
   },
 };
-/* *INDENT-ON* */
 
 #ifndef CLIB_MARCH_VARIANT
 /** l2 input classsifier feature initialization. */
@@ -642,7 +639,6 @@ int_l2_input_classify_command_fn (vlib_main_t * vm,
  * @todo This is incomplete. This needs a detailed description and a
  * practical example.
  ?*/
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (int_l2_input_classify_cli, static) = {
   .path = "set interface l2 input classify",
   .short_help =
@@ -650,7 +646,6 @@ VLIB_CLI_COMMAND (int_l2_input_classify_cli, static) = {
   "  [ip6-table <n>] [other-table <n>]",
   .function = int_l2_input_classify_command_fn,
 };
-/* *INDENT-ON* */
 
 /*
  * fd.io coding-style-patch-verification: ON

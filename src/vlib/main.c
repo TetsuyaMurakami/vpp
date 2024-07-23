@@ -240,13 +240,11 @@ show_frame_stats (vlib_main_t * vm,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (show_frame_stats_cli, static) = {
   .path = "show vlib frame-allocation",
   .short_help = "Show node dispatch frame statistics",
   .function = show_frame_stats,
 };
-/* *INDENT-ON* */
 
 /* Change ownership of enqueue rights to given next node. */
 static void
@@ -634,13 +632,11 @@ vlib_cli_elog_clear (vlib_main_t * vm,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (elog_clear_cli, static) = {
   .path = "event-logger clear",
   .short_help = "Clear the event log",
   .function = vlib_cli_elog_clear,
 };
-/* *INDENT-ON* */
 
 #ifdef CLIB_UNIX
 static clib_error_t *
@@ -659,7 +655,7 @@ elog_save_buffer (vlib_main_t * vm,
     }
 
   /* It's fairly hard to get "../oopsie" through unformat; just in case */
-  if (strstr (file, "..") || index (file, '/'))
+  if (strstr (file, "..") || strchr (file, '/'))
     {
       vlib_cli_output (vm, "illegal characters in filename '%s'", file);
       return 0;
@@ -689,13 +685,11 @@ vlib_post_mortem_dump (void)
     (vgm->post_mortem_callbacks[i]) ();
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (elog_save_cli, static) = {
   .path = "event-logger save",
   .short_help = "event-logger save <filename> (saves log in /tmp/<filename>)",
   .function = elog_save_buffer,
 };
-/* *INDENT-ON* */
 
 static clib_error_t *
 elog_stop (vlib_main_t * vm,
@@ -709,13 +703,11 @@ elog_stop (vlib_main_t * vm,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (elog_stop_cli, static) = {
   .path = "event-logger stop",
   .short_help = "Stop the event-logger",
   .function = elog_stop,
 };
-/* *INDENT-ON* */
 
 static clib_error_t *
 elog_restart (vlib_main_t * vm,
@@ -729,13 +721,11 @@ elog_restart (vlib_main_t * vm,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (elog_restart_cli, static) = {
   .path = "event-logger restart",
   .short_help = "Restart the event-logger",
   .function = elog_restart,
 };
-/* *INDENT-ON* */
 
 static clib_error_t *
 elog_resize_command_fn (vlib_main_t * vm,
@@ -759,13 +749,11 @@ elog_resize_command_fn (vlib_main_t * vm,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (elog_resize_cli, static) = {
   .path = "event-logger resize",
   .short_help = "event-logger resize <nnn>",
   .function = elog_resize_command_fn,
 };
-/* *INDENT-ON* */
 
 #endif /* CLIB_UNIX */
 
@@ -818,13 +806,11 @@ elog_show_buffer (vlib_main_t * vm,
   return error;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (elog_show_cli, static) = {
   .path = "show event-logger",
   .short_help = "Show event logger info",
   .function = elog_show_buffer,
 };
-/* *INDENT-ON* */
 
 void
 vlib_gdb_show_event_log (void)
@@ -981,7 +967,6 @@ dispatch_node (vlib_main_t * vm,
      polling mode and vice versa. */
   if (PREDICT_FALSE (node->flags & VLIB_NODE_FLAG_ADAPTIVE_MODE))
     {
-      /* *INDENT-OFF* */
       ELOG_TYPE_DECLARE (e) =
         {
           .function = (char *) __FUNCTION__,
@@ -992,7 +977,6 @@ dispatch_node (vlib_main_t * vm,
             "interrupt", "polling",
           },
         };
-      /* *INDENT-ON* */
       struct
       {
 	u32 node_name, vector_length, is_polling;
@@ -1354,7 +1338,8 @@ vlib_start_process (vlib_main_t * vm, uword process_index)
 {
   vlib_node_main_t *nm = &vm->node_main;
   vlib_process_t *p = vec_elt (nm->processes, process_index);
-  dispatch_process (vm, p, /* frame */ 0, /* cpu_time_now */ 0);
+  u64 cpu_time_now = clib_cpu_time_now ();
+  dispatch_process (vm, p, /* frame */ 0, cpu_time_now);
 }
 
 static u64
@@ -1438,12 +1423,6 @@ dispatch_suspended_process (vlib_main_t * vm,
   return t;
 }
 
-void vl_api_send_pending_rpc_requests (vlib_main_t *) __attribute__ ((weak));
-void
-vl_api_send_pending_rpc_requests (vlib_main_t * vm)
-{
-}
-
 static_always_inline void
 vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
 {
@@ -1506,7 +1485,7 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
       if (PREDICT_FALSE (_vec_len (vm->pending_rpc_requests) > 0))
 	{
 	  if (!is_main)
-	    vl_api_send_pending_rpc_requests (vm);
+	    vlib_worker_flush_pending_rpc_requests (vm);
 	}
 
       if (!is_main)
@@ -1602,7 +1581,6 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
 
       if (is_main)
 	{
-          /* *INDENT-OFF* */
           ELOG_TYPE_DECLARE (es) =
             {
               .format = "process tw start",
@@ -1613,7 +1591,6 @@ vlib_main_or_worker_loop (vlib_main_t * vm, int is_main)
               .format = "process tw end: %d",
               .format_args = "i4",
             };
-          /* *INDENT-ON* */
 
 	  struct
 	  {

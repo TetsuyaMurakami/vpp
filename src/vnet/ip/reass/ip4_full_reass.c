@@ -1424,11 +1424,11 @@ VLIB_REGISTER_NODE (ip4_full_reass_node_feature) = {
 };
 
 VNET_FEATURE_INIT (ip4_full_reass_feature, static) = {
-    .arc_name = "ip4-unicast",
-    .node_name = "ip4-full-reassembly-feature",
-    .runs_before = VNET_FEATURES ("ip4-lookup",
-                                  "ipsec4-input-feature"),
-    .runs_after = 0,
+  .arc_name = "ip4-unicast",
+  .node_name = "ip4-full-reassembly-feature",
+  .runs_before = VNET_FEATURES ("ip4-lookup", "ipsec4-input-feature",
+				"ip4-sv-reassembly-feature"),
+  .runs_after = 0,
 };
 
 VLIB_NODE_FN (ip4_full_reass_node_custom) (vlib_main_t * vm,
@@ -1452,15 +1452,6 @@ VLIB_REGISTER_NODE (ip4_full_reass_node_custom) = {
                 [IP4_FULL_REASS_NEXT_HANDOFF] = "ip4-full-reass-custom-hoff",
         },
 };
-
-VNET_FEATURE_INIT (ip4_full_reass_custom, static) = {
-    .arc_name = "ip4-unicast",
-    .node_name = "ip4-full-reassembly-feature",
-    .runs_before = VNET_FEATURES ("ip4-lookup",
-                                  "ipsec4-input-feature"),
-    .runs_after = 0,
-};
-
 
 #ifndef CLIB_MARCH_VARIANT
 uword
@@ -2068,7 +2059,7 @@ ip4_full_reass_enable_disable_with_refcnt (u32 sw_if_index, int is_enable)
 					    "ip4-full-reassembly-feature",
 					    sw_if_index, 0, 0, 0);
     }
-  return -1;
+  return 0;
 }
 
 void

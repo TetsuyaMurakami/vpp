@@ -106,6 +106,8 @@ typedef struct app_listener_
   session_handle_t ls_handle;	/**< session handle of the local or global
 				     listening session that also identifies
 				     the app listener */
+  u32 *cl_listeners;		/**< vector that maps app workers to their
+				     cl sessions with fifos */
 } app_listener_t;
 
 typedef enum app_rx_mq_flags_
@@ -148,9 +150,6 @@ typedef struct application_
   u32 ns_index;
 
   u16 proxied_transports;
-
-  /** Pool of listeners for the app */
-  app_listener_t *listeners;
 
   /** Preferred tls engine */
   u8 tls_engine;
@@ -197,6 +196,9 @@ typedef struct app_main_
    * Pool from which we allocate all applications
    */
   application_t *app_pool;
+
+  /** Pool of app listeners */
+  app_listener_t *listeners;
 
   /**
    * Hash table of apps by api client index
@@ -246,7 +248,7 @@ typedef struct _vnet_app_worker_add_del_args
 #define APP_NS_INVALID_INDEX ((u32)~0)
 #define APP_INVALID_SEGMENT_MANAGER_INDEX ((u32) ~0)
 
-app_listener_t *app_listener_get (application_t * app, u32 al_index);
+app_listener_t *app_listener_get (u32 al_index);
 int app_listener_alloc_and_init (application_t * app,
 				 session_endpoint_cfg_t * sep,
 				 app_listener_t ** listener);
@@ -254,6 +256,8 @@ void app_listener_cleanup (app_listener_t * app_listener);
 session_handle_t app_listener_handle (app_listener_t * app_listener);
 app_listener_t *app_listener_lookup (application_t * app,
 				     session_endpoint_cfg_t * sep);
+session_t *app_listener_select_wrk_cl_session (session_t *ls,
+					       session_dgram_hdr_t *hdr);
 
 /**
  * Get app listener handle for listening session
@@ -277,9 +281,9 @@ session_handle_t app_listen_session_handle (session_t * ls);
  * @return		pointer to app listener or 0
  */
 app_listener_t *app_listener_get_w_handle (session_handle_t handle);
-app_listener_t *app_listener_get_w_session (session_t * ls);
 session_t *app_listener_get_session (app_listener_t * al);
 session_t *app_listener_get_local_session (app_listener_t * al);
+session_t *app_listener_get_wrk_cl_session (app_listener_t *al, u32 wrk_index);
 
 application_t *application_get (u32 index);
 application_t *application_get_if_valid (u32 index);
@@ -338,7 +342,7 @@ session_error_t app_worker_start_listen (app_worker_t *app_wrk,
 int app_worker_stop_listen (app_worker_t * app_wrk, app_listener_t * al);
 int app_worker_init_accepted (session_t * s);
 int app_worker_listened_notify (app_worker_t *app_wrk, session_handle_t alsh,
-				u32 opaque, int err);
+				u32 opaque, session_error_t err);
 int app_worker_unlisten_reply (app_worker_t *app_wrk, session_handle_t sh,
 			       u32 opaque, session_error_t err);
 int app_worker_accept_notify (app_worker_t * app_wrk, session_t * s);
@@ -402,13 +406,6 @@ app_cert_key_pair_t *app_cert_key_pair_get (u32 index);
 app_cert_key_pair_t *app_cert_key_pair_get_if_valid (u32 index);
 app_cert_key_pair_t *app_cert_key_pair_get_default ();
 
-/* Needed while we support both bapi and mq ctrl messages */
-int mq_send_session_bound_cb (u32 app_wrk_index, u32 api_context,
-			      session_handle_t handle, int rv);
-int mq_send_session_connected_cb (u32 app_wrk_index, u32 api_context,
-				  session_t * s, session_error_t err);
-void mq_send_unlisten_reply (app_worker_t * app_wrk, session_handle_t sh,
-			     u32 context, int rv);
 void sapi_socket_close_w_handle (u32 api_handle);
 
 crypto_engine_type_t app_crypto_engine_type_add (void);

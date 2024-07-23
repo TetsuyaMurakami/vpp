@@ -17,6 +17,7 @@ from vpp_ip_route import (
 )
 from vpp_neighbor import VppNeighbor
 from vpp_papi import VppEnum
+from config import config
 
 from scapy.packet import Raw
 from scapy.layers.l2 import Ether
@@ -679,6 +680,9 @@ class TestUdpEncap(VppTestCase):
 
 
 @tag_fixme_vpp_workers
+@unittest.skipIf(
+    "hs_apps" in config.excluded_plugins, "Exclude tests requiring hs_apps plugin"
+)
 class TestUDP(VppTestCase):
     """UDP Test Case"""
 
@@ -721,6 +725,14 @@ class TestUDP(VppTestCase):
             i.unconfig_ip4()
             i.set_table_ip4(0)
             i.admin_down()
+        # Unconfigure namespaces - remove our locks to the vrf tables
+        self.vapi.app_namespace_add_del_v4(
+            is_add=0, namespace_id="0", sw_if_index=self.loop0.sw_if_index
+        )
+        self.vapi.app_namespace_add_del_v4(
+            is_add=0, namespace_id="1", sw_if_index=self.loop1.sw_if_index
+        )
+
         self.vapi.session_enable_disable(is_enable=0)
         super(TestUDP, self).tearDown()
 

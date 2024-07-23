@@ -11,6 +11,7 @@
 import unittest
 
 from scapy.packet import Raw
+from scapy.layers.l2 import GRE
 from scapy.layers.inet6 import IPv6, Ether, IP, ICMPv6PacketTooBig
 from scapy.layers.inet6 import ipv6nh, IPerror6
 from scapy.layers.inet import TCP, ICMP
@@ -23,6 +24,8 @@ from asfframework import VppTestRunner
 from vpp_ip_route import VppIpRoute, VppRoutePath, FibPathProto
 from vpp_ipip_tun_interface import VppIpIpTunInterface
 from vpp_vxlan_tunnel import VppVxlanTunnel
+from vpp_gre_interface import VppGreInterface
+from config import config
 
 from vpp_ipsec import VppIpsecSA, VppIpsecTunProtect
 from template_ipsec import (
@@ -88,6 +91,9 @@ class TestGSO(VppTestCase):
         self.ipip6 = VppIpIpTunInterface(
             self, self.pg0, self.pg0.local_ip6, self.pg0.remote_ip6
         )
+
+        self.gre4 = VppGreInterface(self, self.pg0.local_ip4, self.pg0.remote_ip4)
+        self.gre6 = VppGreInterface(self, self.pg0.local_ip6, self.pg0.remote_ip6)
 
     def tearDown(self):
         super(TestGSO, self).tearDown()
@@ -373,6 +379,9 @@ class TestGSO(VppTestCase):
             sw_if_index=self.pg1.sw_if_index, enable_disable=0
         )
 
+    @unittest.skipIf(
+        "vxlan" in config.excluded_plugins, "Exclude tests requiring VXLAN plugin"
+    )
     def test_gso_vxlan(self):
         """GSO VXLAN test"""
         self.logger.info(self.vapi.cli("sh int addr"))
@@ -400,7 +409,7 @@ class TestGSO(VppTestCase):
         # IPv4/IPv4 - VXLAN
         #
         p45 = (
-            Ether(src=self.pg2.remote_mac, dst="02:fe:60:1e:a2:79")
+            Ether(src=self.pg2.remote_mac, dst=self.pg2.local_mac)
             / IP(src=self.pg2.remote_ip4, dst="172.16.3.3", flags="DF")
             / TCP(sport=1234, dport=1234)
             / Raw(b"\xa5" * 65200)
@@ -414,12 +423,12 @@ class TestGSO(VppTestCase):
             self.assertEqual(rx[IP].src, self.pg0.local_ip4)
             self.assertEqual(rx[IP].dst, self.pg0.remote_ip4)
             self.assert_ip_checksum_valid(rx)
-            self.assert_udp_checksum_valid(rx, ignore_zero_checksum=False)
+            self.assert_udp_checksum_valid(rx, ignore_zero_checksum=True)
             self.assertEqual(rx[VXLAN].vni, 10)
             inner = rx[VXLAN].payload
             self.assertEqual(rx[IP].len - 20 - 8 - 8, len(inner))
             self.assertEqual(inner[Ether].src, self.pg2.remote_mac)
-            self.assertEqual(inner[Ether].dst, "02:fe:60:1e:a2:79")
+            self.assertEqual(inner[Ether].dst, self.pg2.local_mac)
             self.assertEqual(inner[IP].src, self.pg2.remote_ip4)
             self.assertEqual(inner[IP].dst, "172.16.3.3")
             self.assert_ip_checksum_valid(inner)
@@ -433,7 +442,7 @@ class TestGSO(VppTestCase):
         # IPv4/IPv6 - VXLAN
         #
         p65 = (
-            Ether(src=self.pg2.remote_mac, dst="02:fe:60:1e:a2:79")
+            Ether(src=self.pg2.remote_mac, dst=self.pg2.local_mac)
             / IPv6(src=self.pg2.remote_ip6, dst="fd01:3::3")
             / TCP(sport=1234, dport=1234)
             / Raw(b"\xa5" * 65200)
@@ -447,12 +456,12 @@ class TestGSO(VppTestCase):
             self.assertEqual(rx[IP].src, self.pg0.local_ip4)
             self.assertEqual(rx[IP].dst, self.pg0.remote_ip4)
             self.assert_ip_checksum_valid(rx)
-            self.assert_udp_checksum_valid(rx, ignore_zero_checksum=False)
+            self.assert_udp_checksum_valid(rx, ignore_zero_checksum=True)
             self.assertEqual(rx[VXLAN].vni, 10)
             inner = rx[VXLAN].payload
             self.assertEqual(rx[IP].len - 20 - 8 - 8, len(inner))
             self.assertEqual(inner[Ether].src, self.pg2.remote_mac)
-            self.assertEqual(inner[Ether].dst, "02:fe:60:1e:a2:79")
+            self.assertEqual(inner[Ether].dst, self.pg2.local_mac)
             self.assertEqual(inner[IPv6].src, self.pg2.remote_ip6)
             self.assertEqual(inner[IPv6].dst, "fd01:3::3")
             self.assert_tcp_checksum_valid(inner)
@@ -478,7 +487,7 @@ class TestGSO(VppTestCase):
         # IPv6/IPv4 - VXLAN
         #
         p46 = (
-            Ether(src=self.pg2.remote_mac, dst="02:fe:60:1e:a2:79")
+            Ether(src=self.pg2.remote_mac, dst=self.pg2.local_mac)
             / IP(src=self.pg2.remote_ip4, dst="172.16.3.3", flags="DF")
             / TCP(sport=1234, dport=1234)
             / Raw(b"\xa5" * 65200)
@@ -496,7 +505,7 @@ class TestGSO(VppTestCase):
             inner = rx[VXLAN].payload
             self.assertEqual(rx[IPv6].plen - 8 - 8, len(inner))
             self.assertEqual(inner[Ether].src, self.pg2.remote_mac)
-            self.assertEqual(inner[Ether].dst, "02:fe:60:1e:a2:79")
+            self.assertEqual(inner[Ether].dst, self.pg2.local_mac)
             self.assertEqual(inner[IP].src, self.pg2.remote_ip4)
             self.assertEqual(inner[IP].dst, "172.16.3.3")
             self.assert_ip_checksum_valid(inner)
@@ -510,7 +519,7 @@ class TestGSO(VppTestCase):
         # IPv6/IPv6 - VXLAN
         #
         p66 = (
-            Ether(src=self.pg2.remote_mac, dst="02:fe:60:1e:a2:79")
+            Ether(src=self.pg2.remote_mac, dst=self.pg2.local_mac)
             / IPv6(src=self.pg2.remote_ip6, dst="fd01:3::3")
             / TCP(sport=1234, dport=1234)
             / Raw(b"\xa5" * 65200)
@@ -528,7 +537,7 @@ class TestGSO(VppTestCase):
             inner = rx[VXLAN].payload
             self.assertEqual(rx[IPv6].plen - 8 - 8, len(inner))
             self.assertEqual(inner[Ether].src, self.pg2.remote_mac)
-            self.assertEqual(inner[Ether].dst, "02:fe:60:1e:a2:79")
+            self.assertEqual(inner[Ether].dst, self.pg2.local_mac)
             self.assertEqual(inner[IPv6].src, self.pg2.remote_ip6)
             self.assertEqual(inner[IPv6].dst, "fd01:3::3")
             self.assert_tcp_checksum_valid(inner)
@@ -585,7 +594,7 @@ class TestGSO(VppTestCase):
         # IPv4/IPv4 - IPIP
         #
         p47 = (
-            Ether(src=self.pg2.remote_mac, dst="02:fe:60:1e:a2:79")
+            Ether(src=self.pg2.remote_mac, dst=self.pg2.local_mac)
             / IP(src=self.pg2.remote_ip4, dst="172.16.10.3", flags="DF")
             / TCP(sport=1234, dport=1234)
             / Raw(b"\xa5" * 65200)
@@ -628,7 +637,7 @@ class TestGSO(VppTestCase):
         # IPv4/IPv6 - IPIP
         #
         p67 = (
-            Ether(src=self.pg2.remote_mac, dst="02:fe:60:1e:a2:79")
+            Ether(src=self.pg2.remote_mac, dst=self.pg2.local_mac)
             / IPv6(src=self.pg2.remote_ip6, dst="fd01:10::3")
             / TCP(sport=1234, dport=1234)
             / Raw(b"\xa5" * 65200)
@@ -726,7 +735,7 @@ class TestGSO(VppTestCase):
         # IPv6/IPv4 - IPIP
         #
         p48 = (
-            Ether(src=self.pg2.remote_mac, dst="02:fe:60:1e:a2:79")
+            Ether(src=self.pg2.remote_mac, dst=self.pg2.local_mac)
             / IP(src=self.pg2.remote_ip4, dst="172.16.10.3", flags="DF")
             / TCP(sport=1234, dport=1234)
             / Raw(b"\xa5" * 65200)
@@ -769,7 +778,7 @@ class TestGSO(VppTestCase):
         # IPv6/IPv6 - IPIP
         #
         p68 = (
-            Ether(src=self.pg2.remote_mac, dst="02:fe:60:1e:a2:79")
+            Ether(src=self.pg2.remote_mac, dst=self.pg2.local_mac)
             / IPv6(src=self.pg2.remote_ip6, dst="fd01:10::3")
             / TCP(sport=1234, dport=1234)
             / Raw(b"\xa5" * 65200)
@@ -803,6 +812,202 @@ class TestGSO(VppTestCase):
         self.vapi.feature_gso_enable_disable(
             sw_if_index=self.pg0.sw_if_index, enable_disable=0
         )
+
+    def test_gso_gre(self):
+        """GSO GRE test"""
+        #
+        # Send jumbo frame with gso enabled only on gre tunnel interface.
+        # create GRE tunnel on VPP pg0.
+        #
+
+        #
+        # create gre 4 tunnel
+        #
+        self.gre4.add_vpp_config()
+        self.gre4.admin_up()
+        self.gre4.config_ip4()
+
+        #
+        # Add a route that resolves the tunnel's destination
+        #
+        # Add IPv4 routes via tunnel interface
+        self.ip4_via_gre4_tunnel = VppIpRoute(
+            self,
+            "172.16.10.0",
+            24,
+            [
+                VppRoutePath(
+                    "0.0.0.0",
+                    self.gre4.sw_if_index,
+                    proto=FibPathProto.FIB_PATH_NH_PROTO_IP4,
+                )
+            ],
+        )
+        self.ip4_via_gre4_tunnel.add_vpp_config()
+
+        pgre4 = (
+            Ether(src=self.pg2.remote_mac, dst=self.pg2.local_mac)
+            / IP(src=self.pg2.remote_ip4, dst="172.16.10.3", flags="DF")
+            / TCP(sport=1234, dport=1234)
+            / Raw(b"\xa5" * 65200)
+        )
+
+        # test when GSO segmentation is disabled, Packets are truncated
+        rxs = self.send_and_expect(self.pg2, 5 * [pgre4], self.pg0, 5)
+        for rx in rxs:
+            self.assertEqual(rx[Ether].src, self.pg0.local_mac)
+            self.assertEqual(rx[Ether].dst, self.pg0.remote_mac)
+            self.assertEqual(rx[IP].src, self.pg0.local_ip4)
+            self.assertEqual(rx[IP].dst, self.pg0.remote_ip4)
+            self.assert_ip_checksum_valid(rx)
+            self.assertEqual(rx[IP].proto, 0x2F)  # GRE encap
+            self.assertEqual(rx[GRE].proto, 0x0800)  # IPv4
+            inner = rx[GRE].payload
+            self.assertNotEqual(rx[IP].len - 20 - 4, len(inner))
+            self.assertEqual(inner[IP].src, self.pg2.remote_ip4)
+            self.assertEqual(inner[IP].dst, "172.16.10.3")
+            self.assert_ip_checksum_valid(inner)
+            payload_len = inner[IP].len - 20 - 20
+            self.assertEqual(payload_len, 65200)
+            # truncated packet to MTU size
+            self.assertNotEqual(payload_len, len(inner[Raw]))
+
+        # enable the GSO segmentation on GRE tunnel
+        self.vapi.feature_gso_enable_disable(
+            sw_if_index=self.gre4.sw_if_index, enable_disable=1
+        )
+
+        # test again, this time payload will be chuncked to GSO size (i.e. 1448)
+        rxs = self.send_and_expect(self.pg2, 5 * [pgre4], self.pg0, 225)
+        size = 0
+        for rx in rxs:
+            self.assertEqual(rx[Ether].src, self.pg0.local_mac)
+            self.assertEqual(rx[Ether].dst, self.pg0.remote_mac)
+            self.assertEqual(rx[IP].src, self.pg0.local_ip4)
+            self.assertEqual(rx[IP].dst, self.pg0.remote_ip4)
+            self.assert_ip_checksum_valid(rx)
+            self.assertEqual(rx[IP].proto, 0x2F)  # GRE encap
+            self.assertEqual(rx[GRE].proto, 0x0800)  # IPv4
+            inner = rx[GRE].payload
+            self.assertEqual(rx[IP].len - 20 - 4, len(inner))
+            self.assertEqual(inner[IP].src, self.pg2.remote_ip4)
+            self.assertEqual(inner[IP].dst, "172.16.10.3")
+            self.assert_ip_checksum_valid(inner)
+            self.assert_tcp_checksum_valid(inner)
+            payload_len = inner[IP].len - 20 - 20
+            self.assertEqual(payload_len, len(inner[Raw]))
+            size += payload_len
+        self.assertEqual(size, 65200 * 5)
+
+        # Disable the GSO segmentation on GRE tunnel
+        self.vapi.feature_gso_enable_disable(
+            sw_if_index=self.gre4.sw_if_index, enable_disable=0
+        )
+
+        # test again when GSO segmentation is disabled, Packets are truncated
+        rxs = self.send_and_expect(self.pg2, 5 * [pgre4], self.pg0, 5)
+        for rx in rxs:
+            self.assertEqual(rx[Ether].src, self.pg0.local_mac)
+            self.assertEqual(rx[Ether].dst, self.pg0.remote_mac)
+            self.assertEqual(rx[IP].src, self.pg0.local_ip4)
+            self.assertEqual(rx[IP].dst, self.pg0.remote_ip4)
+            self.assert_ip_checksum_valid(rx)
+            self.assertEqual(rx[IP].proto, 0x2F)  # GRE encap
+            self.assertEqual(rx[GRE].proto, 0x0800)  # IPv4
+            inner = rx[GRE].payload
+            self.assertNotEqual(rx[IP].len - 20 - 4, len(inner))
+            self.assertEqual(inner[IP].src, self.pg2.remote_ip4)
+            self.assertEqual(inner[IP].dst, "172.16.10.3")
+            self.assert_ip_checksum_valid(inner)
+            payload_len = inner[IP].len - 20 - 20
+            self.assertEqual(payload_len, 65200)
+            # truncated packet to MTU size
+            self.assertNotEqual(payload_len, len(inner[Raw]))
+
+        self.ip4_via_gre4_tunnel.remove_vpp_config()
+        self.gre4.remove_vpp_config()
+
+        self.gre6.add_vpp_config()
+        self.gre6.admin_up()
+        self.gre6.config_ip4()
+
+        #
+        # Add a route that resolves the tunnel's destination
+        # Add IPv6 routes via tunnel interface
+        #
+        self.vapi.feature_gso_enable_disable(
+            sw_if_index=self.gre6.sw_if_index, enable_disable=1
+        )
+        self.ip6_via_gre6_tunnel = VppIpRoute(
+            self,
+            "fd01:10::",
+            64,
+            [
+                VppRoutePath(
+                    "::",
+                    self.gre6.sw_if_index,
+                    proto=FibPathProto.FIB_PATH_NH_PROTO_IP6,
+                )
+            ],
+        )
+        self.ip6_via_gre6_tunnel.add_vpp_config()
+
+        #
+        # Create IPv6 packet
+        #
+        pgre6 = (
+            Ether(src=self.pg2.remote_mac, dst=self.pg2.local_mac)
+            / IPv6(src=self.pg2.remote_ip6, dst="fd01:10::3")
+            / TCP(sport=1234, dport=1234)
+            / Raw(b"\xa5" * 65200)
+        )
+
+        # test when GSO segmentation is enabled, payload will be segmented
+        # into GSO size (i.e. 1448)
+        rxs = self.send_and_expect(self.pg2, 5 * [pgre6], self.pg0, 225)
+        size = 0
+        for rx in rxs:
+            self.assertEqual(rx[Ether].src, self.pg0.local_mac)
+            self.assertEqual(rx[Ether].dst, self.pg0.remote_mac)
+            self.assertEqual(rx[IPv6].src, self.pg0.local_ip6)
+            self.assertEqual(rx[IPv6].dst, self.pg0.remote_ip6)
+            self.assertEqual(ipv6nh[rx[IPv6].nh], "GRE")
+            self.assertEqual(rx[GRE].proto, 0x86DD)  # IPv6
+            inner = rx[GRE].payload
+            self.assertEqual(rx[IPv6].plen - 4, len(inner))
+            self.assertEqual(inner[IPv6].src, self.pg2.remote_ip6)
+            self.assertEqual(inner[IPv6].dst, "fd01:10::3")
+            self.assert_tcp_checksum_valid(inner)
+            payload_len = inner[IPv6].plen - 20
+            self.assertEqual(payload_len, len(inner[Raw]))
+            size += payload_len
+        self.assertEqual(size, 65200 * 5)
+
+        # disable GSO segmentation
+        self.vapi.feature_gso_enable_disable(
+            sw_if_index=self.gre6.sw_if_index, enable_disable=0
+        )
+
+        # test again, this time packets will be truncated
+        rxs = self.send_and_expect(self.pg2, 5 * [pgre6], self.pg0, 5)
+        for rx in rxs:
+            self.assertEqual(rx[Ether].src, self.pg0.local_mac)
+            self.assertEqual(rx[Ether].dst, self.pg0.remote_mac)
+            self.assertEqual(rx[IPv6].src, self.pg0.local_ip6)
+            self.assertEqual(rx[IPv6].dst, self.pg0.remote_ip6)
+            self.assertEqual(ipv6nh[rx[IPv6].nh], "GRE")
+            self.assertEqual(rx[GRE].proto, 0x86DD)  # IPv6
+            inner = rx[GRE].payload
+            self.assertNotEqual(rx[IPv6].plen - 4, len(inner))
+            self.assertEqual(inner[IPv6].src, self.pg2.remote_ip6)
+            self.assertEqual(inner[IPv6].dst, "fd01:10::3")
+            payload_len = inner[IPv6].plen - 20
+            self.assertEqual(payload_len, 65200)
+            # packets are truncated to MTU size
+            self.assertNotEqual(payload_len, len(inner[Raw]))
+
+        self.ip6_via_gre6_tunnel.remove_vpp_config()
+        self.gre6.remove_vpp_config()
 
     def test_gso_ipsec(self):
         """GSO IPSEC test"""
@@ -877,7 +1082,7 @@ class TestGSO(VppTestCase):
         # IPv4/IPv4 - IPSEC
         #
         ipsec44 = (
-            Ether(src=self.pg2.remote_mac, dst="02:fe:60:1e:a2:79")
+            Ether(src=self.pg2.remote_mac, dst=self.pg2.local_mac)
             / IP(src=self.pg2.remote_ip4, dst="172.16.10.3", flags="DF")
             / TCP(sport=1234, dport=1234)
             / Raw(b"\xa5" * 65200)
@@ -915,7 +1120,7 @@ class TestGSO(VppTestCase):
         # IPv4/IPv6 - IPSEC
         #
         ipsec46 = (
-            Ether(src=self.pg2.remote_mac, dst="02:fe:60:1e:a2:79")
+            Ether(src=self.pg2.remote_mac, dst=self.pg2.local_mac)
             / IPv6(src=self.pg2.remote_ip6, dst="fd01:10::3")
             / TCP(sport=1234, dport=1234)
             / Raw(b"\xa5" * 65200)
@@ -1012,7 +1217,7 @@ class TestGSO(VppTestCase):
         # IPv6/IPv4 - IPSEC
         #
         ipsec64 = (
-            Ether(src=self.pg2.remote_mac, dst="02:fe:60:1e:a2:79")
+            Ether(src=self.pg2.remote_mac, dst=self.pg2.local_mac)
             / IP(src=self.pg2.remote_ip4, dst="172.16.10.3", flags="DF")
             / TCP(sport=1234, dport=1234)
             / Raw(b"\xa5" * 65200)
@@ -1051,7 +1256,7 @@ class TestGSO(VppTestCase):
         # IPv6/IPv6 - IPSEC
         #
         ipsec66 = (
-            Ether(src=self.pg2.remote_mac, dst="02:fe:60:1e:a2:79")
+            Ether(src=self.pg2.remote_mac, dst=self.pg2.local_mac)
             / IPv6(src=self.pg2.remote_ip6, dst="fd01:10::3")
             / TCP(sport=1234, dport=1234)
             / Raw(b"\xa5" * 65200)

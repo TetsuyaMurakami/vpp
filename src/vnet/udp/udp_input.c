@@ -123,8 +123,8 @@ udp_connection_accept (udp_connection_t * listener, session_dgram_hdr_t * hdr,
       udp_connection_free (uc);
       return 0;
     }
-  transport_share_local_endpoint (TRANSPORT_PROTO_UDP, &uc->c_lcl_ip,
-				  uc->c_lcl_port);
+
+  udp_connection_share_port (uc->c_lcl_port, uc->c_is_ip4);
   return uc;
 }
 
@@ -136,39 +136,46 @@ udp_connection_enqueue (udp_connection_t * uc0, session_t * s0,
   int wrote0;
 
   if (!(uc0->flags & UDP_CONN_F_CONNECTED))
-    clib_spinlock_lock (&uc0->rx_lock);
+    {
+      clib_spinlock_lock (&uc0->rx_lock);
+
+      wrote0 = session_enqueue_dgram_connection_cl (
+	s0, hdr0, b, TRANSPORT_PROTO_UDP, queue_event);
+
+      clib_spinlock_unlock (&uc0->rx_lock);
+
+      /* Expect cl udp enqueue to fail because fifo enqueue */
+      if (PREDICT_FALSE (wrote0 == 0))
+	*error0 = UDP_ERROR_FIFO_FULL;
+
+      return;
+    }
 
   if (svm_fifo_max_enqueue_prod (s0->rx_fifo)
       < hdr0->data_length + sizeof (session_dgram_hdr_t))
     {
       *error0 = UDP_ERROR_FIFO_FULL;
-      goto unlock_rx_lock;
+      return;
     }
 
   /* If session is owned by another thread and rx event needed,
    * enqueue event now while we still have the peeker lock */
   if (s0->thread_index != thread_index)
     {
-      wrote0 = session_enqueue_dgram_connection_cl (
+      wrote0 = session_enqueue_dgram_connection2 (
 	s0, hdr0, b, TRANSPORT_PROTO_UDP,
-	/* queue event */ queue_event && !svm_fifo_has_event (s0->rx_fifo));
+	queue_event && !svm_fifo_has_event (s0->rx_fifo));
     }
   else
     {
-      wrote0 = session_enqueue_dgram_connection (s0, hdr0, b,
-						 TRANSPORT_PROTO_UDP,
-						 queue_event);
+      wrote0 = session_enqueue_dgram_connection (
+	s0, hdr0, b, TRANSPORT_PROTO_UDP, queue_event);
     }
 
   /* In some rare cases, session_enqueue_dgram_connection can fail because a
    * chunk cannot be allocated in the RX FIFO */
   if (PREDICT_FALSE (wrote0 == 0))
     *error0 = UDP_ERROR_FIFO_NOMEM;
-
-unlock_rx_lock:
-
-  if (!(uc0->flags & UDP_CONN_F_CONNECTED))
-    clib_spinlock_unlock (&uc0->rx_lock);
 }
 
 always_inline session_t *
@@ -216,6 +223,10 @@ udp_parse_and_lookup_buffer (vlib_buffer_t * b, session_dgram_hdr_t * hdr,
 				&ip60->src_address, udp->dst_port,
 				udp->src_port, TRANSPORT_PROTO_UDP);
     }
+
+  /* Set the sw_if_index[VLIB_RX] to the interface we received
+   * the connection on (the local interface) */
+  vnet_buffer (b)->sw_if_index[VLIB_RX] = vnet_buffer (b)->ip.rx_sw_if_index;
 
   if (PREDICT_TRUE (!(b->flags & VLIB_BUFFER_NEXT_PRESENT)))
     b->current_length = hdr->data_length;
@@ -337,7 +348,6 @@ udp4_input (vlib_main_t * vm, vlib_node_runtime_t * node,
   return udp46_input_inline (vm, node, frame, 1);
 }
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (udp4_input_node) =
 {
   .function = udp4_input,
@@ -354,7 +364,6 @@ VLIB_REGISTER_NODE (udp4_input_node) =
 #undef _
   },
 };
-/* *INDENT-ON* */
 
 static uword
 udp6_input (vlib_main_t * vm, vlib_node_runtime_t * node,
@@ -363,7 +372,6 @@ udp6_input (vlib_main_t * vm, vlib_node_runtime_t * node,
   return udp46_input_inline (vm, node, frame, 0);
 }
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (udp6_input_node) =
 {
   .function = udp6_input,
@@ -380,7 +388,6 @@ VLIB_REGISTER_NODE (udp6_input_node) =
 #undef _
   },
 };
-/* *INDENT-ON* */
 
 /*
  * fd.io coding-style-patch-verification: ON

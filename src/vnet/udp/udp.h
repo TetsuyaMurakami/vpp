@@ -154,6 +154,7 @@ typedef struct
   u16 default_mtu;
   u16 msg_id_base;
   u8 csum_offload;
+  u8 is_init;
 
   u8 icmp_send_unreachable_disabled;
 } udp_main_t;
@@ -205,6 +206,7 @@ udp_connection_from_transport (transport_connection_t * tc)
 
 void udp_connection_free (udp_connection_t * uc);
 udp_connection_t *udp_connection_alloc (u32 thread_index);
+void udp_connection_share_port (u16 lcl_port, u8 is_ip4);
 
 always_inline udp_connection_t *
 udp_connection_clone_safe (u32 connection_index, u32 thread_index)

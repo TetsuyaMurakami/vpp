@@ -34,6 +34,7 @@ from vpp_papi import vpp_papi, VppEnum
 from vpp_neighbor import VppNeighbor
 from vpp_lo_interface import VppLoInterface
 from vpp_policer import VppPolicer, PolicerAction
+from config import config
 
 NUM_PKTS = 67
 
@@ -244,12 +245,13 @@ class TestIPv4RouteLookup(VppTestCase):
     """IPv4 Route Lookup Test Case"""
 
     routes = []
+    tables = []
 
-    def route_lookup(self, prefix, exact):
+    def route_lookup(self, prefix, exact, table_id=0):
         return self.vapi.api(
             self.vapi.papi.ip_route_lookup,
             {
-                "table_id": 0,
+                "table_id": table_id,
                 "exact": exact,
                 "prefix": prefix,
             },
@@ -283,10 +285,29 @@ class TestIPv4RouteLookup(VppTestCase):
         r.add_vpp_config()
         self.routes.append(r)
 
+        custom_vrf = VppIpTable(self, 200)
+        custom_vrf.add_vpp_config()
+        self.tables.append(custom_vrf)
+
+        r = VppIpRoute(self, "2.2.0.0", 16, [drop_nh], 200)
+        r.add_vpp_config()
+        self.routes.append(r)
+
+        r = VppIpRoute(self, "2.2.2.0", 24, [drop_nh], 200)
+        r.add_vpp_config()
+        self.routes.append(r)
+
+        r = VppIpRoute(self, "2.2.2.2", 32, [drop_nh], 200)
+        r.add_vpp_config()
+        self.routes.append(r)
+
     def tearDown(self):
         # Remove the routes we added
         for r in self.routes:
             r.remove_vpp_config()
+
+        for vrf in self.tables:
+            vrf.remove_vpp_config()
 
         super(TestIPv4RouteLookup, self).tearDown()
 
@@ -305,6 +326,20 @@ class TestIPv4RouteLookup(VppTestCase):
         with self.vapi.assert_negative_api_retval():
             self.route_lookup("1.1.1.2/32", True)
 
+        # Verify we find the host route
+        prefix = "2.2.2.2/32"
+        result = self.route_lookup(prefix, True, 200)
+        assert prefix == str(result.route.prefix)
+
+        # Verify we find a middle prefix route
+        prefix = "2.2.2.0/24"
+        result = self.route_lookup(prefix, True, 200)
+        assert prefix == str(result.route.prefix)
+
+        # Verify we do not find an available LPM.
+        with self.vapi.assert_negative_api_retval():
+            self.route_lookup("2.2.2.1/32", True, 200)
+
     def test_longest_prefix_match(self):
         # verify we find lpm
         lpm_prefix = "1.1.1.0/24"
@@ -313,6 +348,15 @@ class TestIPv4RouteLookup(VppTestCase):
 
         # Verify we find the exact when not requested
         result = self.route_lookup(lpm_prefix, False)
+        assert lpm_prefix == str(result.route.prefix)
+
+        # verify we find lpm
+        lpm_prefix = "2.2.2.0/24"
+        result = self.route_lookup("2.2.2.1/32", False, 200)
+        assert lpm_prefix == str(result.route.prefix)
+
+        # Verify we find the exact when not requested
+        result = self.route_lookup(lpm_prefix, False, 200)
         assert lpm_prefix == str(result.route.prefix)
 
         # Can't seem to delete the default route so no negative LPM test.
@@ -459,6 +503,9 @@ class TestIPv4IfAddrRoute(VppTestCase):
             )
 
 
+@unittest.skipIf(
+    "ping" in config.excluded_plugins, "Exclude tests requiring Ping plugin"
+)
 class TestICMPEcho(VppTestCase):
     """ICMP Echo Test Case"""
 
@@ -928,6 +975,19 @@ class TestIPNull(VppTestCase):
         self.send_and_assert_no_replies(self.pg0, p * NUM_PKTS, "Drop Route")
         r2.remove_vpp_config()
         rx = self.send_and_expect(self.pg0, p * NUM_PKTS, self.pg1)
+
+        t = VppIpTable(self, 2, False)
+        t.add_vpp_config()
+        r3 = VppIpRoute(
+            self,
+            "1.1.1.0",
+            31,
+            [VppRoutePath("0.0.0.0", 0xFFFFFFFF, type=FibPathType.FIB_PATH_TYPE_DROP)],
+            table_id=2,
+        )
+        r3.add_vpp_config()
+        r3.remove_vpp_config()
+        t.remove_vpp_config()
 
 
 class TestIPDisabled(VppTestCase):
@@ -3293,6 +3353,139 @@ class TestIPv4ItfRebind(VppTestCase):
             i.set_table_ip4(0)
             i.set_table_ip6(0)
             i.admin_down()
+
+
+class TestIP4InterfaceRx(VppTestCase):
+    """IPv4 Interface Receive"""
+
+    @classmethod
+    def setUpClass(cls):
+        super(TestIP4InterfaceRx, cls).setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        super(TestIP4InterfaceRx, cls).tearDownClass()
+
+    def setUp(self):
+        super(TestIP4InterfaceRx, self).setUp()
+
+        self.create_pg_interfaces(range(3))
+
+        table_id = 0
+
+        for i in self.pg_interfaces:
+            i.admin_up()
+
+            if table_id != 0:
+                table = VppIpTable(self, table_id)
+                table.add_vpp_config()
+
+            i.set_table_ip4(table_id)
+            i.config_ip4()
+            i.resolve_arp()
+            table_id += 1
+
+    def tearDown(self):
+        for i in self.pg_interfaces:
+            i.unconfig_ip4()
+            i.admin_down()
+            i.set_table_ip4(0)
+
+        super(TestIP4InterfaceRx, self).tearDown()
+
+    def test_interface_rx(self):
+        """IPv4 Interface Receive"""
+
+        #
+        # add a route in the default table to receive ...
+        #
+        route_to_dst = VppIpRoute(
+            self,
+            "1.1.1.0",
+            24,
+            [
+                VppRoutePath(
+                    "0.0.0.0",
+                    self.pg1.sw_if_index,
+                    type=FibPathType.FIB_PATH_TYPE_INTERFACE_RX,
+                )
+            ],
+        )
+        route_to_dst.add_vpp_config()
+
+        #
+        # packets to these destination are dropped, since they'll
+        # hit the respective default routes in table 1
+        #
+        p_dst = (
+            Ether(src=self.pg0.remote_mac, dst=self.pg0.local_mac)
+            / IP(src="5.5.5.5", dst="1.1.1.1")
+            / TCP(sport=1234, dport=1234)
+            / Raw(b"\xa5" * 100)
+        )
+        pkts_dst = p_dst * 10
+
+        self.send_and_assert_no_replies(self.pg0, pkts_dst, "IP in table 1")
+
+        #
+        # add a route in the dst table to forward via pg1
+        #
+        route_in_dst = VppIpRoute(
+            self,
+            "1.1.1.1",
+            32,
+            [VppRoutePath(self.pg1.remote_ip4, self.pg1.sw_if_index)],
+            table_id=1,
+        )
+        route_in_dst.add_vpp_config()
+
+        self.send_and_expect(self.pg0, pkts_dst, self.pg1)
+
+        #
+        # add a route in the default table to receive ...
+        #
+        route_to_dst = VppIpRoute(
+            self,
+            "1.1.1.0",
+            24,
+            [
+                VppRoutePath(
+                    "0.0.0.0",
+                    self.pg2.sw_if_index,
+                    type=FibPathType.FIB_PATH_TYPE_INTERFACE_RX,
+                )
+            ],
+            table_id=1,
+        )
+        route_to_dst.add_vpp_config()
+
+        #
+        # packets to these destination are dropped, since they'll
+        # hit the respective default routes in table 2
+        #
+        p_dst = (
+            Ether(src=self.pg0.remote_mac, dst=self.pg0.local_mac)
+            / IP(src="6.6.6.6", dst="1.1.1.2")
+            / TCP(sport=1234, dport=1234)
+            / Raw(b"\xa5" * 100)
+        )
+        pkts_dst = p_dst * 10
+
+        self.send_and_assert_no_replies(self.pg0, pkts_dst, "IP in table 2")
+
+        #
+        # add a route in the table 2 to forward via pg2
+        #
+        route_in_dst = VppIpRoute(
+            self,
+            "1.1.1.2",
+            32,
+            [VppRoutePath(self.pg2.remote_ip4, self.pg2.sw_if_index)],
+            table_id=2,
+        )
+        route_in_dst.add_vpp_config()
+
+        self.send_and_expect(self.pg0, pkts_dst, self.pg2)
 
 
 if __name__ == "__main__":

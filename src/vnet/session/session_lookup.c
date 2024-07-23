@@ -29,13 +29,14 @@
 #include <vnet/session/session.h>
 #include <vnet/session/application.h>
 
+static session_lookup_main_t sl_main;
+
 /**
  * Network namespace index (i.e., fib index) to session lookup table. We
  * should have one per network protocol type but for now we only support IP4/6
  */
 static u32 *fib_index_to_table_index[2];
 
-/* *INDENT-OFF* */
 /* 16 octets */
 typedef CLIB_PACKED (struct {
   union
@@ -72,7 +73,6 @@ typedef CLIB_PACKED (struct {
       u64 as_u64[6];
     };
 }) v6_connection_key_t;
-/* *INDENT-ON* */
 
 typedef clib_bihash_kv_16_8_t session_kv4_t;
 typedef clib_bihash_kv_48_8_t session_kv6_t;
@@ -155,29 +155,70 @@ make_v6_ss_kv_from_tc (session_kv6_t * kv, transport_connection_t * tc)
 		 tc->rmt_port, tc->proto);
 }
 
+static inline u8
+session_table_alloc_needs_sync (void)
+{
+  return !vlib_thread_is_main_w_barrier () && (vlib_num_workers () > 1);
+}
+
+static_always_inline u8
+session_table_is_alloced (u8 fib_proto, u32 fib_index)
+{
+  return (vec_len (fib_index_to_table_index[fib_proto]) > fib_index &&
+	  fib_index_to_table_index[fib_proto][fib_index] != ~0);
+}
+
 static session_table_t *
 session_table_get_or_alloc (u8 fib_proto, u32 fib_index)
 {
   session_table_t *st;
   u32 table_index;
+
   ASSERT (fib_index != ~0);
-  if (vec_len (fib_index_to_table_index[fib_proto]) > fib_index &&
-      fib_index_to_table_index[fib_proto][fib_index] != ~0)
+
+  if (session_table_is_alloced (fib_proto, fib_index))
     {
       table_index = fib_index_to_table_index[fib_proto][fib_index];
       return session_table_get (table_index);
     }
+
+  u8 needs_sync = session_table_alloc_needs_sync ();
+  session_lookup_main_t *slm = &sl_main;
+
+  /* Stop workers, otherwise consumers might be affected. This is
+   * acceptable because new tables should seldom be allocated */
+  if (needs_sync)
+    {
+      vlib_workers_sync ();
+
+      /* We might have a race, only one worker allowed at once */
+      clib_spinlock_lock (&slm->st_alloc_lock);
+    }
+
+  /* Another worker just allocated this table */
+  if (session_table_is_alloced (fib_proto, fib_index))
+    {
+      table_index = fib_index_to_table_index[fib_proto][fib_index];
+      st = session_table_get (table_index);
+    }
   else
     {
       st = session_table_alloc ();
-      table_index = session_table_index (st);
-      vec_validate_init_empty (fib_index_to_table_index[fib_proto], fib_index,
-			       ~0);
-      fib_index_to_table_index[fib_proto][fib_index] = table_index;
       st->active_fib_proto = fib_proto;
       session_table_init (st, fib_proto);
-      return st;
+      vec_validate_init_empty (fib_index_to_table_index[fib_proto], fib_index,
+			       ~0);
+      table_index = session_table_index (st);
+      fib_index_to_table_index[fib_proto][fib_index] = table_index;
     }
+
+  if (needs_sync)
+    {
+      clib_spinlock_unlock (&slm->st_alloc_lock);
+      vlib_workers_continue ();
+    }
+
+  return st;
 }
 
 static session_table_t *
@@ -1143,7 +1184,6 @@ session_lookup_connection_wt6 (u32 fib_index, ip6_address_t * lcl,
   rv = clib_bihash_search_inline_48_8 (&st->v6_session_hash, &kv6);
   if (rv == 0)
     {
-      ASSERT ((u32) (kv6.value >> 32) == thread_index);
       if (PREDICT_FALSE ((u32) (kv6.value >> 32) != thread_index))
 	{
 	  *result = SESSION_LOOKUP_RESULT_WRONG_THREAD;
@@ -1569,7 +1609,6 @@ done:
   return error;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (session_rule_command, static) =
 {
   .path = "session rule",
@@ -1577,7 +1616,6 @@ VLIB_CLI_COMMAND (session_rule_command, static) =
       "<lcl-ip/plen> <lcl-port> <rmt-ip/plen> <rmt-port> action <action>",
   .function = session_rule_command_fn,
 };
-/* *INDENT-ON* */
 
 void
 session_lookup_dump_rules_table (u32 fib_index, u8 fib_proto,
@@ -1627,9 +1665,9 @@ show_session_rules_command_fn (vlib_main_t * vm, unformat_input_t * input,
       else if (unformat (input, "appns %_%v%_", &ns_id))
 	;
       else if (unformat (input, "scope global"))
-	scope = 1;
+	scope = SESSION_RULE_SCOPE_GLOBAL;
       else if (unformat (input, "scope local"))
-	scope = 2;
+	scope = SESSION_RULE_SCOPE_LOCAL;
       else if (unformat (input, "%U/%d %d %U/%d %d", unformat_ip4_address,
 			 &lcl_ip.ip4, &lcl_plen, &lcl_port,
 			 unformat_ip4_address, &rmt_ip.ip4, &rmt_plen,
@@ -1671,7 +1709,7 @@ show_session_rules_command_fn (vlib_main_t * vm, unformat_input_t * input,
       app_ns = app_namespace_get_default ();
     }
 
-  if (scope == 1 || scope == 0)
+  if (scope == SESSION_RULE_SCOPE_GLOBAL || scope == 0)
     {
       fib_proto = is_ip4 ? FIB_PROTOCOL_IP4 : FIB_PROTOCOL_IP6;
       fib_index = is_ip4 ? app_ns->ip4_fib_index : app_ns->ip6_fib_index;
@@ -1692,15 +1730,41 @@ show_session_rules_command_fn (vlib_main_t * vm, unformat_input_t * input,
 
   vlib_cli_output (vm, "%U rules table", format_transport_proto,
 		   transport_proto);
-  srt = &st->session_rules[transport_proto];
-  session_rules_table_cli_dump (vm, srt, FIB_PROTOCOL_IP4);
-  session_rules_table_cli_dump (vm, srt, FIB_PROTOCOL_IP6);
+  if (scope == SESSION_RULE_SCOPE_LOCAL)
+    {
+      if (st)
+	{
+	  srt = &st->session_rules[transport_proto];
+	  session_rules_table_cli_dump (vm, srt, FIB_PROTOCOL_IP4);
+	  session_rules_table_cli_dump (vm, srt, FIB_PROTOCOL_IP6);
+	}
+    }
+  else
+    {
+      /*
+       * 2 separate session tables for global entries, 1 for ip4 and 1 for ip6
+       */
+      st = session_table_get_for_fib_index (FIB_PROTOCOL_IP4,
+					    app_ns->ip4_fib_index);
+      if (st)
+	{
+	  srt = &st->session_rules[transport_proto];
+	  session_rules_table_cli_dump (vm, srt, FIB_PROTOCOL_IP4);
+	}
+
+      st = session_table_get_for_fib_index (FIB_PROTOCOL_IP6,
+					    app_ns->ip6_fib_index);
+      if (st)
+	{
+	  srt = &st->session_rules[transport_proto];
+	  session_rules_table_cli_dump (vm, srt, FIB_PROTOCOL_IP6);
+	}
+    }
 
   vec_free (ns_id);
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (show_session_rules_command, static) =
 {
   .path = "show session rules",
@@ -1708,7 +1772,6 @@ VLIB_CLI_COMMAND (show_session_rules_command, static) =
       "<lcl-port> <rmt-ip/plen> <rmt-port> scope <scope>]",
   .function = show_session_rules_command_fn,
 };
-/* *INDENT-ON* */
 
 u8 *
 format_session_lookup_tables (u8 *s, va_list *args)
@@ -1792,6 +1855,10 @@ VLIB_CLI_COMMAND (show_session_lookup_command, static) = {
 void
 session_lookup_init (void)
 {
+  session_lookup_main_t *slm = &sl_main;
+
+  clib_spinlock_init (&slm->st_alloc_lock);
+
   /*
    * Allocate default table and map it to fib_index 0
    */

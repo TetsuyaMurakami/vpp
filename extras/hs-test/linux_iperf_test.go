@@ -1,6 +1,16 @@
 package main
 
-func (s *TapSuite) TestLinuxIperf() {
+import (
+	. "fd.io/hs-test/infra"
+	"fmt"
+	. "github.com/onsi/ginkgo/v2"
+)
+
+func init() {
+	RegisterTapTests(LinuxIperfTest)
+}
+
+func LinuxIperfTest(s *TapSuite) {
 	clnCh := make(chan error)
 	stopServerCh := make(chan struct{})
 	srvCh := make(chan error, 1)
@@ -9,16 +19,22 @@ func (s *TapSuite) TestLinuxIperf() {
 		stopServerCh <- struct{}{}
 	}()
 
-	go s.startServerApp(srvCh, stopServerCh, nil)
+	go func() {
+		defer GinkgoRecover()
+		s.StartServerApp(srvCh, stopServerCh, nil)
+	}()
 	err := <-srvCh
-	s.assertNil(err)
-	s.log("server running")
+	s.AssertNil(err, fmt.Sprint(err))
+	s.Log("server running")
 
-	ipAddress := s.netInterfaces[tapInterfaceName].ip4AddressString()
-	go s.startClientApp(ipAddress, nil, clnCh, clnRes)
-	s.log("client running")
-	s.log(<-clnRes)
+	ipAddress := s.GetInterfaceByName(TapInterfaceName).Ip4AddressString()
+	go func() {
+		defer GinkgoRecover()
+		s.StartClientApp(ipAddress, nil, clnCh, clnRes)
+	}()
+	s.Log("client running")
+	s.Log(<-clnRes)
 	err = <-clnCh
-	s.assertNil(err)
-	s.log("Test completed")
+	s.AssertNil(err, "err: '%s', ip: '%s'", err, ipAddress)
+	s.Log("Test completed")
 }

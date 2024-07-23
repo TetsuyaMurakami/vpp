@@ -22,7 +22,6 @@
 #include <unistd.h>
 
 #include <vppinfra/clib.h>
-#include <vppinfra/linux/sysfs.h>
 #include <vlib/vlib.h>
 #include <vlib/physmem.h>
 #include <vlib/unix/unix.h>
@@ -104,8 +103,10 @@ vlib_physmem_init (vlib_main_t * vm)
     vpm->flags |= VLIB_PHYSMEM_MAIN_F_HAVE_PAGEMAP;
   vec_free (pt);
 
+#ifdef __linux__
   if ((error = linux_vfio_init (vm)))
     return error;
+#endif /* __linux__ */
 
   p = clib_mem_alloc_aligned (sizeof (clib_pmalloc_main_t),
 			      CLIB_CACHE_LINE_BYTES);
@@ -161,13 +162,11 @@ show_physmem (vlib_main_t * vm,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (show_physmem_command, static) = {
   .path = "show physmem",
   .short_help = "show physmem [verbose | detail | map]",
   .function = show_physmem,
 };
-/* *INDENT-ON* */
 
 static clib_error_t *
 vlib_physmem_config (vlib_main_t * vm, unformat_input_t * input)

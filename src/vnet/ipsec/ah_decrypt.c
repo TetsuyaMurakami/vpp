@@ -450,7 +450,6 @@ VLIB_NODE_FN (ah4_decrypt_node) (vlib_main_t * vm,
   return ah_decrypt_inline (vm, node, from_frame, 0 /* is_ip6 */ );
 }
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (ah4_decrypt_node) = {
   .name = "ah4-decrypt",
   .vector_size = sizeof (u32),
@@ -468,7 +467,6 @@ VLIB_REGISTER_NODE (ah4_decrypt_node) = {
     [AH_DECRYPT_NEXT_HANDOFF] = "ah4-decrypt-handoff",
   },
 };
-/* *INDENT-ON* */
 
 VLIB_NODE_FN (ah6_decrypt_node) (vlib_main_t * vm,
 				 vlib_node_runtime_t * node,
@@ -477,7 +475,6 @@ VLIB_NODE_FN (ah6_decrypt_node) (vlib_main_t * vm,
   return ah_decrypt_inline (vm, node, from_frame, 1 /* is_ip6 */ );
 }
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (ah6_decrypt_node) = {
   .name = "ah6-decrypt",
   .vector_size = sizeof (u32),
@@ -495,7 +492,6 @@ VLIB_REGISTER_NODE (ah6_decrypt_node) = {
     [AH_DECRYPT_NEXT_HANDOFF] = "ah6-decrypt-handoff",
   },
 };
-/* *INDENT-ON* */
 
 #ifndef CLIB_MARCH_VARIANT
 
@@ -504,10 +500,10 @@ ah_decrypt_init (vlib_main_t *vm)
 {
   ipsec_main_t *im = &ipsec_main;
 
-  im->ah4_dec_fq_index =
-    vlib_frame_queue_main_init (ah4_decrypt_node.index, 0);
-  im->ah6_dec_fq_index =
-    vlib_frame_queue_main_init (ah6_decrypt_node.index, 0);
+  im->ah4_dec_fq_index = vlib_frame_queue_main_init (ah4_decrypt_node.index,
+						     im->handoff_queue_size);
+  im->ah6_dec_fq_index = vlib_frame_queue_main_init (ah6_decrypt_node.index,
+						     im->handoff_queue_size);
 
   return 0;
 }

@@ -414,7 +414,6 @@ svmdb_local_dump_strings (svmdb_client_t * client)
 
   h = client->shm->namespaces[SVMDB_NAMESPACE_STRING];
 
-  /* *INDENT-OFF* */
   hash_foreach_mem(key, value, h,
   ({
     svmdb_value_t *v = pool_elt_at_index (shm->values, value);
@@ -422,7 +421,6 @@ svmdb_local_dump_strings (svmdb_client_t * client)
     fformat(stdout, "%s: %s\n", key,
             vec_len(v->value) ? v->value : (u8 *)"(nil)");
   }));
-  /* *INDENT-ON* */
   region_unlock (client->db_rp);
 }
 
@@ -438,7 +436,7 @@ svmdb_local_serialize_strings (svmdb_client_t * client, char *filename)
   u8 *sanitized_name = 0;
   int fd = 0;
 
-  if (strstr (filename, "..") || index (filename, '/'))
+  if (strstr (filename, "..") || strchr (filename, '/'))
     {
       error = clib_error_return (0, "Illegal characters in filename '%s'",
 				 filename);
@@ -463,7 +461,6 @@ svmdb_local_serialize_strings (svmdb_client_t * client, char *filename)
 
   serialize_likely_small_unsigned_integer (sm, hash_elts (h));
 
-  /* *INDENT-OFF* */
   hash_foreach_mem(key, value, h,
   ({
     svmdb_value_t *v = pool_elt_at_index (shm->values, value);
@@ -475,7 +472,6 @@ svmdb_local_serialize_strings (svmdb_client_t * client, char *filename)
         serialize_cstring (sm, (char *)v->value);
       }
   }));
-  /* *INDENT-ON* */
   region_unlock (client->db_rp);
 
   serialize_close (sm);
@@ -610,7 +606,6 @@ svmdb_local_dump_vecs (svmdb_client_t * client)
 
   h = client->shm->namespaces[SVMDB_NAMESPACE_VEC];
 
-  /* *INDENT-OFF* */
   hash_foreach_mem(key, value, h,
   ({
     svmdb_value_t *v = pool_elt_at_index (shm->values, value);
@@ -618,7 +613,6 @@ svmdb_local_dump_vecs (svmdb_client_t * client)
                    format_hex_bytes, v->value,
                    vec_len(v->value)*v->elsize, ((f64 *)(v->value))[0]);
   }));
-  /* *INDENT-ON* */
 
   region_unlock (client->db_rp);
 }

@@ -49,7 +49,7 @@ format_stn_rule (u8 * s, va_list * args)
   s = format (s, "%Uiface: %U (%d)\n", format_white_space, indent,
   	      format_vnet_sw_if_index_name, vnet_get_main(), r->sw_if_index,
 	      r->sw_if_index);
-  s = format (s, "%Unext_node: %s (%d)", format_white_space, indent,
+  s = format (s, "%Unext_node: %v (%d)", format_white_space, indent,
 	      next_node->name, next_node->index);
   return s;
 }
@@ -195,7 +195,6 @@ stn_ip6_punt_fn (vlib_main_t * vm,
   return stn_ip46_punt_fn(vm, node, frame, 0);
 }
 
-/** *INDENT-OFF* */
 VLIB_REGISTER_NODE (stn_ip6_punt, static) =
 {
   .function = stn_ip6_punt_fn,
@@ -215,7 +214,6 @@ VNET_FEATURE_INIT (stn_ip6_punt_feat_node, static) = {
   .node_name = "stn-ip6-punt",
   .runs_before = VNET_FEATURES("ip6-punt-redirect"),
 };
-/** *INDENT-ON* */
 
 u8 *
 format_stn_ip4_punt_trace (u8 * s, va_list * args)
@@ -230,7 +228,6 @@ stn_ip4_punt_fn (vlib_main_t * vm,
   return stn_ip46_punt_fn(vm, node, frame, 1);
 }
 
-/** *INDENT-OFF* */
 VLIB_REGISTER_NODE (stn_ip4_punt, static) =
 {
   .function = stn_ip4_punt_fn,
@@ -250,7 +247,6 @@ VNET_FEATURE_INIT (stn_ip4_punt_feat_node, static) = {
   .node_name = "stn-ip4-punt",
   .runs_before = VNET_FEATURES("ip4-punt-redirect"),
 };
-/** *INDENT-ON* */
 
 clib_error_t *
 stn_init (vlib_main_t * vm)
@@ -275,12 +271,10 @@ stn_init (vlib_main_t * vm)
 
 VLIB_INIT_FUNCTION (stn_init);
 
-/* *INDENT-OFF* */
 VLIB_PLUGIN_REGISTER () = {
     .version = VPP_BUILD_VER,
     .description = "VPP Steals the NIC (STN) for Container Integration",
 };
-/* *INDENT-ON* */
 
 int stn_rule_add_del (stn_rule_add_del_args_t *args)
 {

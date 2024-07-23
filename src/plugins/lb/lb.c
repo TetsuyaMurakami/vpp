@@ -373,9 +373,9 @@ void lb_garbage_collection()
   }
 
   vec_foreach(i, to_be_removed_vips) {
-    vip = &lbm->vips[*i];
-    pool_put(lbm->vips, vip);
-    pool_free(vip->as_indexes);
+      vip = &lbm->vips[*i];
+      pool_free (vip->as_indexes);
+      pool_put (lbm->vips, vip);
   }
 
   vec_free(to_be_removed_vips);
@@ -1256,12 +1256,10 @@ int lb_vip_del(u32 vip_index)
   return rv;
 }
 
-/* *INDENT-OFF* */
 VLIB_PLUGIN_REGISTER () = {
     .version = VPP_BUILD_VER,
     .description = "Load Balancer (LB)",
 };
-/* *INDENT-ON* */
 
 u8 *format_lb_dpo (u8 * s, va_list * va)
 {

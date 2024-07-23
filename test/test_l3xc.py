@@ -11,6 +11,7 @@ from scapy.layers.l2 import Ether
 from scapy.layers.inet import IP, UDP
 
 from vpp_object import VppObject
+from config import config
 
 NUM_PKTS = 67
 
@@ -56,6 +57,7 @@ class VppL3xc(VppObject):
         return "l3xc-%d" % self.intf.sw_if_index
 
 
+@unittest.skipIf("l3xc" in config.excluded_plugins, "Exclude L3XC plugin tests")
 class TestL3xc(VppTestCase):
     """L3XC Test Case"""
 
@@ -126,7 +128,7 @@ class TestL3xc(VppTestCase):
         p_2 = []
         for ii in range(NUM_PKTS):
             p_2.append(
-                Ether(src=self.pg0.remote_mac, dst=self.pg0.local_mac)
+                Ether(src=self.pg2.remote_mac, dst=self.pg2.local_mac)
                 / IP(src="1.1.1.1", dst="1.1.1.2")
                 / UDP(sport=1000 + ii, dport=1234)
                 / Raw(b"\xa5" * 100)

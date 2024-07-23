@@ -148,7 +148,14 @@ ipip64_fixup (vlib_main_t * vm, const ip_adjacency_t * adj, vlib_buffer_t * b,
   ip4->length = clib_host_to_net_u16 (vlib_buffer_length_in_chain (vm, b));
   tunnel_encap_fixup_6o4 (flags, ((ip6_header_t *) (ip4 + 1)), ip4);
 
-  ip4->checksum = ip4_header_checksum (ip4);
+  if (PREDICT_FALSE (b->flags & VNET_BUFFER_F_GSO))
+    {
+      vnet_buffer2 (b)->outer_l3_hdr_offset = (u8 *) ip4 - b->data;
+      vnet_buffer_offload_flags_set (b, VNET_BUFFER_OFFLOAD_F_OUTER_IP_CKSUM |
+					  VNET_BUFFER_OFFLOAD_F_TNL_IPIP);
+    }
+  else
+    ip4->checksum = ip4_header_checksum (ip4);
 }
 
 static void
@@ -164,7 +171,14 @@ ipip44_fixup (vlib_main_t * vm, const ip_adjacency_t * adj, vlib_buffer_t * b,
   ip4->length = clib_host_to_net_u16 (vlib_buffer_length_in_chain (vm, b));
   tunnel_encap_fixup_4o4 (flags, ip4 + 1, ip4);
 
-  ip4->checksum = ip4_header_checksum (ip4);
+  if (PREDICT_FALSE (b->flags & VNET_BUFFER_F_GSO))
+    {
+      vnet_buffer2 (b)->outer_l3_hdr_offset = (u8 *) ip4 - b->data;
+      vnet_buffer_offload_flags_set (b, VNET_BUFFER_OFFLOAD_F_OUTER_IP_CKSUM |
+					  VNET_BUFFER_OFFLOAD_F_TNL_IPIP);
+    }
+  else
+    ip4->checksum = ip4_header_checksum (ip4);
 }
 
 static void
@@ -185,6 +199,12 @@ ipip46_fixup (vlib_main_t * vm, const ip_adjacency_t * adj, vlib_buffer_t * b,
     clib_host_to_net_u16 (vlib_buffer_length_in_chain (vm, b) -
 			  sizeof (*ip6));
   tunnel_encap_fixup_4o6 (flags, b, ((ip4_header_t *) (ip6 + 1)), ip6);
+
+  if (PREDICT_FALSE (b->flags & VNET_BUFFER_F_GSO))
+    {
+      vnet_buffer2 (b)->outer_l3_hdr_offset = (u8 *) ip6 - b->data;
+      vnet_buffer_offload_flags_set (b, VNET_BUFFER_OFFLOAD_F_TNL_IPIP);
+    }
 }
 
 static void
@@ -205,6 +225,12 @@ ipip66_fixup (vlib_main_t * vm,
     clib_host_to_net_u16 (vlib_buffer_length_in_chain (vm, b) -
 			  sizeof (*ip6));
   tunnel_encap_fixup_6o6 (flags, ip6 + 1, ip6);
+
+  if (PREDICT_FALSE (b->flags & VNET_BUFFER_F_GSO))
+    {
+      vnet_buffer2 (b)->outer_l3_hdr_offset = (u8 *) ip6 - b->data;
+      vnet_buffer_offload_flags_set (b, VNET_BUFFER_OFFLOAD_F_TNL_IPIP);
+    }
 }
 
 static void
@@ -226,6 +252,12 @@ ipipm6_fixup (vlib_main_t *vm, const ip_adjacency_t *adj, vlib_buffer_t *b,
     clib_host_to_net_u16 (vlib_buffer_length_in_chain (vm, b) - sizeof (*ip6));
   tunnel_encap_fixup_mplso6 (flags, b, (mpls_unicast_header_t *) (ip6 + 1),
 			     ip6);
+
+  if (PREDICT_FALSE (b->flags & VNET_BUFFER_F_GSO))
+    {
+      vnet_buffer2 (b)->outer_l3_hdr_offset = (u8 *) ip6 - b->data;
+      vnet_buffer_offload_flags_set (b, VNET_BUFFER_OFFLOAD_F_TNL_IPIP);
+    }
 }
 
 static void
@@ -245,7 +277,15 @@ ipipm4_fixup (vlib_main_t *vm, const ip_adjacency_t *adj, vlib_buffer_t *b,
   ip4->length =
     clib_host_to_net_u16 (vlib_buffer_length_in_chain (vm, b) - sizeof (*ip4));
   tunnel_encap_fixup_mplso4 (flags, (mpls_unicast_header_t *) (ip4 + 1), ip4);
-  ip4->checksum = ip4_header_checksum (ip4);
+
+  if (PREDICT_FALSE (b->flags & VNET_BUFFER_F_GSO))
+    {
+      vnet_buffer2 (b)->outer_l3_hdr_offset = (u8 *) ip4 - b->data;
+      vnet_buffer_offload_flags_set (b, VNET_BUFFER_OFFLOAD_F_OUTER_IP_CKSUM |
+					  VNET_BUFFER_OFFLOAD_F_TNL_IPIP);
+    }
+  else
+    ip4->checksum = ip4_header_checksum (ip4);
 }
 
 static void
@@ -269,7 +309,6 @@ ipip_tunnel_stack (adj_index_t ai)
     }
   else
     {
-      /* *INDENT-OFF* */
       fib_prefix_t dst = {
         .fp_len = t->transport == IPIP_TRANSPORT_IP6 ? 128 : 32,
         .fp_proto = (t->transport == IPIP_TRANSPORT_IP6 ?
@@ -277,7 +316,6 @@ ipip_tunnel_stack (adj_index_t ai)
                      FIB_PROTOCOL_IP4),
         .fp_addr = t->tunnel_dst
       };
-      /* *INDENT-ON* */
 
       adj_midchain_delegate_stack (ai, t->fib_index, &dst);
     }
@@ -512,7 +550,6 @@ ipip_tunnel_desc (u32 sw_if_index,
   return (0);
 }
 
-/* *INDENT-OFF* */
 VNET_DEVICE_CLASS(ipip_device_class) = {
     .name = "IPIP tunnel device",
     .format_device_name = format_ipip_tunnel_name,
@@ -542,7 +579,6 @@ VNET_HW_INTERFACE_CLASS(mipip_hw_interface_class) = {
     .update_adjacency = mipip_update_adj,
     .flags = VNET_HW_INTERFACE_CLASS_FLAG_NBMA,
 };
-/* *INDENT-ON* */
 
 ipip_tunnel_t *
 ipip_tunnel_db_find (const ipip_tunnel_key_t * key)

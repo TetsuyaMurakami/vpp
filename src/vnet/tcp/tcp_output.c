@@ -838,10 +838,9 @@ tcp_send_fin (tcp_connection_t * tc)
       /* Out of buffers so program fin retransmit ASAP */
       tcp_timer_update (&wrk->timer_wheel, tc, TCP_TIMER_RETRANSMIT,
 			tcp_cfg.alloc_err_timeout);
-      if (fin_snt)
-	tc->snd_nxt += 1;
-      else
-	/* Make sure retransmit retries a fin not data */
+      tc->snd_nxt += 1;
+      /* Make sure retransmit retries a fin not data with right snd_nxt */
+      if (!fin_snt)
 	tc->flags |= TCP_CONN_FINSNT;
       tcp_worker_stats_inc (wrk, no_buffer, 1);
       return;
@@ -1392,7 +1391,7 @@ tcp_timer_retransmit_handler (tcp_connection_t * tc)
       tc->rtt_ts = 0;
 
       /* Passive open establish timeout */
-      if (tc->rto > TCP_ESTABLISH_TIME >> 1)
+      if (tc->rto > tcp_cfg.syn_rcvd_time >> 1)
 	{
 	  tcp_connection_set_state (tc, TCP_STATE_CLOSED);
 	  tcp_connection_timers_reset (tc);
@@ -1811,7 +1810,11 @@ tcp_retransmit_sack (tcp_worker_ctx_t * wrk, tcp_connection_t * tc,
 	  break;
 	}
 
-      max_bytes = clib_min (hole->end - sb->high_rxt, snd_space);
+      max_bytes = hole->end - sb->high_rxt;
+      /* Avoid retransmitting segment less than mss if possible */
+      if (snd_space < tc->snd_mss && max_bytes > snd_space)
+	break;
+      max_bytes = clib_min (max_bytes, snd_space);
       max_bytes = snd_limited ? clib_min (max_bytes, tc->snd_mss) : max_bytes;
       if (max_bytes == 0)
 	break;
@@ -2296,7 +2299,6 @@ VLIB_NODE_FN (tcp6_output_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
   return tcp46_output_inline (vm, node, from_frame, 0 /* is_ip4 */ );
 }
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (tcp4_output_node) =
 {
   .name = "tcp4-output",
@@ -2314,9 +2316,7 @@ VLIB_REGISTER_NODE (tcp4_output_node) =
   .format_buffer = format_tcp_header,
   .format_trace = format_tcp_tx_trace,
 };
-/* *INDENT-ON* */
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (tcp6_output_node) =
 {
   .name = "tcp6-output",
@@ -2334,7 +2334,6 @@ VLIB_REGISTER_NODE (tcp6_output_node) =
   .format_buffer = format_tcp_header,
   .format_trace = format_tcp_tx_trace,
 };
-/* *INDENT-ON* */
 
 typedef enum _tcp_reset_next
 {
@@ -2445,7 +2444,6 @@ VLIB_NODE_FN (tcp6_reset_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
   return tcp46_reset_inline (vm, node, from_frame, 0);
 }
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (tcp4_reset_node) = {
   .name = "tcp4-reset",
   .vector_size = sizeof (u32),
@@ -2459,9 +2457,7 @@ VLIB_REGISTER_NODE (tcp4_reset_node) = {
   },
   .format_trace = format_tcp_tx_trace,
 };
-/* *INDENT-ON* */
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (tcp6_reset_node) = {
   .name = "tcp6-reset",
   .vector_size = sizeof (u32),
@@ -2475,7 +2471,6 @@ VLIB_REGISTER_NODE (tcp6_reset_node) = {
   },
   .format_trace = format_tcp_tx_trace,
 };
-/* *INDENT-ON* */
 
 /*
  * fd.io coding-style-patch-verification: ON

@@ -11,10 +11,12 @@ from scapy.layers.inet import IP, UDP
 from scapy.layers.inet6 import IPv6
 
 from vpp_papi import VppEnum
+from config import config
 
 N_PKTS = 63
 
 
+@unittest.skipIf("urpf" in config.excluded_plugins, "Exclude URPF plugin tests")
 class TestURPF(VppTestCase):
     """Unicast Reverse Path Forwarding Test Case"""
 
@@ -315,6 +317,61 @@ class TestURPF(VppTestCase):
             mode=e.vl_api_urpf_mode_t.URPF_API_MODE_OFF,
             af=e.vl_api_address_family_t.ADDRESS_IP6,
             sw_if_index=self.pg1.sw_if_index,
+        )
+
+    def test_interface_dump(self):
+        """uRPF Interface Dump"""
+
+        self.create_loopback_interfaces(3)
+        e = VppEnum
+        self.vapi.urpf_update(
+            is_input=True,
+            mode=e.vl_api_urpf_mode_t.URPF_API_MODE_STRICT,
+            af=e.vl_api_address_family_t.ADDRESS_IP4,
+            sw_if_index=self.loop1.sw_if_index,
+        )
+        self.vapi.urpf_update(
+            is_input=False,
+            mode=e.vl_api_urpf_mode_t.URPF_API_MODE_LOOSE,
+            af=e.vl_api_address_family_t.ADDRESS_IP6,
+            sw_if_index=self.loop2.sw_if_index,
+        )
+
+        ret = self.vapi.urpf_interface_dump()
+        self.assertEqual(len(ret), 2)
+
+        dump_loop1 = ret[0]
+        dump_loop2 = ret[1]
+        self.assertEqual(dump_loop1.sw_if_index, self.loop1.sw_if_index)
+        self.assertTrue(dump_loop1.is_input)
+        self.assertEqual(dump_loop1.mode, e.vl_api_urpf_mode_t.URPF_API_MODE_STRICT)
+        self.assertEqual(dump_loop1.af, e.vl_api_address_family_t.ADDRESS_IP4)
+        self.assertEqual(dump_loop2.sw_if_index, self.loop2.sw_if_index)
+        self.assertFalse(dump_loop2.is_input)
+        self.assertEqual(dump_loop2.mode, e.vl_api_urpf_mode_t.URPF_API_MODE_LOOSE)
+        self.assertEqual(dump_loop2.af, e.vl_api_address_family_t.ADDRESS_IP6)
+
+        ret = self.vapi.urpf_interface_dump(sw_if_index=self.loop1.sw_if_index)
+        self.assertEqual(len(ret), 1)
+
+        dump_loop1 = ret[0]
+        self.assertEqual(dump_loop1.sw_if_index, self.loop1.sw_if_index)
+        self.assertTrue(dump_loop1.is_input)
+        self.assertEqual(dump_loop1.mode, e.vl_api_urpf_mode_t.URPF_API_MODE_STRICT)
+        self.assertEqual(dump_loop1.af, e.vl_api_address_family_t.ADDRESS_IP4)
+
+        # cleanup
+        self.vapi.urpf_update(
+            is_input=False,
+            mode=e.vl_api_urpf_mode_t.URPF_API_MODE_OFF,
+            af=e.vl_api_address_family_t.ADDRESS_IP4,
+            sw_if_index=self.loop1.sw_if_index,
+        )
+        self.vapi.urpf_update(
+            is_input=False,
+            mode=e.vl_api_urpf_mode_t.URPF_API_MODE_OFF,
+            af=e.vl_api_address_family_t.ADDRESS_IP6,
+            sw_if_index=self.loop2.sw_if_index,
         )
 
 

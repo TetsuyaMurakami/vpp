@@ -43,6 +43,7 @@
 #include <vppinfra/callback.h>
 #include <vppinfra/cpu.h>
 #include <vppinfra/elog.h>
+#include <vppinfra/cJSON.h>
 #include <unistd.h>
 #include <ctype.h>
 
@@ -55,36 +56,28 @@ int vl_api_get_elog_trace_api_messages (void);
 static void *current_traced_heap;
 
 /* Root of all show commands. */
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (vlib_cli_show_command, static) = {
   .path = "show",
   .short_help = "Show commands",
 };
-/* *INDENT-ON* */
 
 /* Root of all clear commands. */
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (vlib_cli_clear_command, static) = {
   .path = "clear",
   .short_help = "Clear commands",
 };
-/* *INDENT-ON* */
 
 /* Root of all set commands. */
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (vlib_cli_set_command, static) = {
   .path = "set",
   .short_help = "Set commands",
 };
-/* *INDENT-ON* */
 
 /* Root of all test commands. */
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (vlib_cli_test_command, static) = {
   .path = "test",
   .short_help = "Test commands",
 };
-/* *INDENT-ON* */
 
 /* Returns bitmap of commands which match key. */
 static uword *
@@ -363,7 +356,6 @@ vlib_cli_get_possible_completions (u8 * str)
   /* if we have a space at the end of input, and a unique match,
    * autocomplete the next level of subcommands */
   help_next_level = (vec_len (str) == 0) || isspace (str[vec_len (str) - 1]);
-  /* *INDENT-OFF* */
   clib_bitmap_foreach (index, match_bitmap) {
     if (help_next_level && is_unique) {
 	c = get_sub_command (vcm, c, index);
@@ -375,7 +367,6 @@ vlib_cli_get_possible_completions (u8 * str)
     sc = &c->sub_commands[index];
     vec_add1(result, (u8*) sc->name);
   }
-  /* *INDENT-ON* */
 
 done:
   clib_bitmap_free (match_bitmap);
@@ -625,13 +616,11 @@ vlib_cli_dispatch_sub_commands (vlib_main_t * vm,
 	    {
 	      if (PREDICT_FALSE (vm->elog_trace_cli_commands))
 		{
-                  /* *INDENT-OFF* */
                   ELOG_TYPE_DECLARE (e) =
                     {
                       .format = "cli-cmd: %s",
                       .format_args = "T4",
                     };
-                  /* *INDENT-ON* */
 		  struct
 		  {
 		    u32 c;
@@ -657,13 +646,11 @@ vlib_cli_dispatch_sub_commands (vlib_main_t * vm,
 
 	      if (PREDICT_FALSE (vm->elog_trace_cli_commands))
 		{
-                  /* *INDENT-OFF* */
                   ELOG_TYPE_DECLARE (e) =
                     {
                       .format = "cli-cmd: %s %s",
                       .format_args = "T4T4",
                     };
-                  /* *INDENT-ON* */
 		  struct
 		  {
 		    u32 c, err;
@@ -977,14 +964,12 @@ show_memory_usage (vlib_main_t * vm,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (show_memory_usage_command, static) = {
   .path = "show memory",
   .short_help = "show memory [api-segment][stats-segment][verbose]\n"
 		"            [numa-heaps][map][main-heap]",
   .function = show_memory_usage,
 };
-/* *INDENT-ON* */
 
 static clib_error_t *
 show_cpu (vlib_main_t * vm, unformat_input_t * input,
@@ -1011,13 +996,11 @@ show_cpu (vlib_main_t * vm, unformat_input_t * input,
  * Base Frequency:           3.20 GHz
  * @cliexend
 ?*/
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (show_cpu_command, static) = {
   .path = "show cpu",
   .short_help = "Show cpu information",
   .function = show_cpu,
 };
-/* *INDENT-ON* */
 
 static clib_error_t *
 enable_disable_memory_trace (vlib_main_t * vm,
@@ -1125,14 +1108,117 @@ enable_disable_memory_trace (vlib_main_t * vm,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (enable_disable_memory_trace_command, static) = {
   .path = "memory-trace",
   .short_help = "memory-trace on|off [api-segment][stats-segment][main-heap]\n"
   "                   [numa-heap <numa-id>]\n",
   .function = enable_disable_memory_trace,
 };
-/* *INDENT-ON* */
+
+static clib_error_t *
+save_memory_trace (vlib_main_t *vm, unformat_input_t *input,
+		   vlib_cli_command_t *cmd)
+{
+  char *file, *chroot_file;
+  uword was_enabled;
+  mheap_trace_t *t, *mem_traces = 0;
+  u8 *tmp;
+  cJSON *traces, *trace, *traceback, *symbol;
+  int i;
+  FILE *fp;
+  char *json_str = 0;
+
+  cJSON_Hooks cjson_hooks = {
+    .malloc_fn = clib_mem_alloc,
+    .free_fn = clib_mem_free,
+    .realloc_fn = clib_mem_realloc,
+  };
+  cJSON_InitHooks (&cjson_hooks);
+
+  if (!unformat (input, "%s", &file))
+    {
+      vlib_cli_output (vm, "expected file name, got `%U'",
+		       format_unformat_error, input);
+      return 0;
+    }
+
+  /* It's fairly hard to get "../oopsie" through unformat; just in case */
+  if (strstr (file, "..") || strchr (file, '/'))
+    {
+      vlib_cli_output (vm, "illegal characters in filename '%s'", file);
+      return 0;
+    }
+  chroot_file = (char *) format (0, "/tmp/%s%c", file, 0);
+  vec_free (file);
+  fp = fopen ((char *) chroot_file, "w");
+  if (fp == NULL)
+    {
+      vlib_cli_output (vm, "couldn't open output file %s '%s'", chroot_file);
+      vec_free (chroot_file);
+      return 0;
+    }
+
+  was_enabled = clib_mem_trace_enable_disable (0);
+  vlib_cli_output (vm, "Saving trace to '%s'", chroot_file);
+  mem_traces = clib_mem_trace_dup (current_traced_heap);
+  traces = cJSON_CreateArray ();
+  vec_foreach (t, mem_traces)
+    {
+      /* Skip over free elements. */
+      if (t->n_allocations == 0)
+	continue;
+
+      trace = cJSON_CreateObject ();
+      cJSON_AddNumberToObject (trace, "count", t->n_allocations);
+      cJSON_AddNumberToObject (trace, "bytes", t->n_bytes);
+      tmp = format (0, "%p%c", t->offset, 0);
+      cJSON_AddStringToObject (trace, "sample", (char *) tmp);
+      vec_free (tmp);
+      traceback = cJSON_AddArrayToObject (trace, "traceback");
+      for (i = 0; i < ARRAY_LEN (t->callers) && t->callers[i]; i++)
+	{
+#if defined(CLIB_UNIX) && !defined(__APPLE__)
+	  tmp = format (0, "%U%c\n", format_clib_elf_symbol_with_address,
+			t->callers[i], 0);
+	  symbol = cJSON_CreateString ((char *) tmp);
+	  cJSON_AddItemToArray (traceback, symbol);
+	  vec_free (tmp);
+#else
+	  tmp = format (0, "%p%c\n", t->callers[i], 0);
+	  symbol = cJSON_CreateString ((char *) tmp);
+	  cJSON_AddItemToArray (traceback, symbol);
+	  vec_free (tmp);
+#endif
+	}
+
+      cJSON_AddItemToArray (traces, trace);
+    }
+  json_str = cJSON_PrintUnformatted (traces);
+  cJSON_Delete (traces);
+  fputs (json_str, fp);
+  fclose (fp);
+  clib_mem_free (json_str);
+
+  vec_free (mem_traces);
+  clib_mem_trace_enable_disable (was_enabled);
+
+  vec_free (chroot_file);
+
+  return 0;
+}
+
+/*?
+ * Save memory traces of the currently traced heap in JSON format to file.
+ * Only filename can be specified, path is fixed (/tmp/<filename>).
+ *
+ * @cliexpar
+ * @cliexcmd{save memory-trace mem_trace.json}
+?*/
+VLIB_CLI_COMMAND (save_memory_trace_command, static) = {
+  .path = "save memory-trace",
+  .short_help = "save memory-trace <filename>",
+  .function = save_memory_trace,
+};
 
 static clib_error_t *
 restart_cmd_fn (vlib_main_t * vm, unformat_input_t * input,
@@ -1146,13 +1232,11 @@ restart_cmd_fn (vlib_main_t * vm, unformat_input_t * input,
   extern char **environ;
 
   /* Close all known open files */
-  /* *INDENT-OFF* */
   pool_foreach (f, fm->file_pool)
      {
       if (f->file_descriptor > 2)
         close(f->file_descriptor);
     }
-  /* *INDENT-ON* */
 
   /* Exec ourself */
   execve (vgm->name, (char **) vgm->argv, environ);
@@ -1160,13 +1244,11 @@ restart_cmd_fn (vlib_main_t * vm, unformat_input_t * input,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (restart_cmd,static) = {
     .path = "restart",
     .short_help = "restart process",
     .function = restart_cmd_fn,
 };
-/* *INDENT-ON* */
 
 #ifdef TEST_CODE
 /*
@@ -1192,13 +1274,11 @@ sleep_ten_seconds (vlib_main_t * vm,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (ping_command, static) = {
   .path = "test sleep",
   .function = sleep_ten_seconds,
   .short_help = "Sleep for 10 seconds",
 };
-/* *INDENT-ON* */
 #endif /* ifdef TEST_CODE */
 
 static uword
@@ -1649,7 +1729,6 @@ print_status:
  * @cliend
  * @cliexcmd{event-logger trace [api][cli][barrier][disable]}
 ?*/
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (event_logger_trace_command, static) =
 {
   .path = "event-logger trace",
@@ -1657,7 +1736,6 @@ VLIB_CLI_COMMAND (event_logger_trace_command, static) =
   "[circuit-node <name> e.g. ethernet-input][disable]",
   .function = event_logger_trace_command_fn,
 };
-/* *INDENT-ON* */
 
 static clib_error_t *
 suspend_command_fn (vlib_main_t * vm,
@@ -1667,7 +1745,6 @@ suspend_command_fn (vlib_main_t * vm,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (suspend_command, static) =
 {
   .path = "suspend",
@@ -1675,7 +1752,6 @@ VLIB_CLI_COMMAND (suspend_command, static) =
   .function = suspend_command_fn,
   .is_mp_safe = 1,
 };
-/* *INDENT-ON* */
 
 
 static int
@@ -1866,7 +1942,6 @@ show_cli_command_fn (vlib_main_t * vm,
  * @cliexend
 ?*/
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (show_cli_command, static) =
 {
   .path = "show cli",
@@ -1874,7 +1949,6 @@ VLIB_CLI_COMMAND (show_cli_command, static) =
   .function = show_cli_command_fn,
   .is_mp_safe = 1,
 };
-/* *INDENT-ON* */
 
 static clib_error_t *
 vlib_cli_init (vlib_main_t * vm)

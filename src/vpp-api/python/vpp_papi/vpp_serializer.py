@@ -135,7 +135,7 @@ class String(Packer):
     def __init__(self, name, num, options):
         self.name = name
         self.num = num
-        self.size = 1
+        self.size = num if num else 1
         self.length_field_packer = BaseTypes("u32")
         self.limit = options["limit"] if "limit" in options else num
         self.fixed = True if num else False
@@ -644,10 +644,15 @@ class VPPType(Packer):
             else:
                 arg = data[a]
                 kwarg = kwargs[a] if a in kwargs else None
-            if isinstance(self.packers[i], VPPType):
-                b += self.packers[i].pack(arg, kwarg)
-            else:
-                b += self.packers[i].pack(arg, kwargs)
+            try:
+                if isinstance(self.packers[i], VPPType):
+                    b += self.packers[i].pack(arg, kwarg)
+                else:
+                    b += self.packers[i].pack(arg, kwargs)
+            except Exception as e:
+                raise VPPSerializerValueError(
+                    f"Exception while packing {data} for {self.name}.{a}."
+                ) from e
 
         return bytes(b)
 

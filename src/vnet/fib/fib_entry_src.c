@@ -757,6 +757,7 @@ fib_entry_src_action_uninstall (fib_entry_t *fib_entry)
 	    &fib_entry->fe_prefix,
 	    &fib_entry->fe_lb);
 
+	vlib_worker_wait_one_loop();
 	dpo_reset(&fib_entry->fe_lb);
     }
 }
@@ -874,8 +875,12 @@ fib_entry_src_covered_inherit_add_i (fib_entry_t *fib_entry,
              * The covered's source data has been inherited, presumably
              * from this cover, i.e. this is a modify.
              */
-            esrc = fib_entry_src_action_update_from_cover(fib_entry, cover_src);
-            fib_entry_source_change(fib_entry, esrc->fes_src, esrc->fes_src);
+            fib_source_t best_source;
+
+            best_source = fib_entry_get_best_source(
+                fib_entry_get_index(fib_entry));
+            fib_entry_src_action_update_from_cover(fib_entry, cover_src);
+            fib_entry_source_change(fib_entry, best_source, cover_src->fes_src);
         }
         else
         {
@@ -1536,6 +1541,10 @@ fib_entry_flags_update (const fib_entry_t *fib_entry,
             if (rpath->frp_flags & FIB_ROUTE_PATH_DEAG)
             {
                 esrc->fes_entry_flags |= FIB_ENTRY_FLAG_LOOSE_URPF_EXEMPT;
+            }
+            if (rpath->frp_flags & FIB_ROUTE_PATH_DROP)
+            {
+                esrc->fes_entry_flags |= FIB_ENTRY_FLAG_NO_ATTACHED_EXPORT;
             }
         }
         if (fib_route_attached_cross_table(fib_entry, rpath) &&

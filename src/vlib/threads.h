@@ -17,7 +17,11 @@
 
 #include <vlib/main.h>
 #include <vppinfra/callback.h>
+#ifdef __linux__
 #include <linux/sched.h>
+#elif __FreeBSD__
+#include <sys/sched.h>
+#endif /* __linux__ */
 
 void vlib_set_thread_name (char *name);
 
@@ -44,22 +48,6 @@ typedef struct vlib_thread_registration_
   u32 first_index;
   uword *coremask;
 } vlib_thread_registration_t;
-
-/*
- * Frames have their cpu / vlib_main_t index in the low-order N bits
- * Make VLIB_MAX_CPUS a power-of-two, please...
- */
-
-#ifndef VLIB_MAX_CPUS
-#define VLIB_MAX_CPUS 256
-#endif
-
-#if VLIB_MAX_CPUS > CLIB_MAX_MHEAPS
-#error Please increase number of per-cpu mheaps
-#endif
-
-#define VLIB_CPU_MASK (VLIB_MAX_CPUS - 1)	/* 0x3f, max */
-#define VLIB_OFFSET_MASK (~VLIB_CPU_MASK)
 
 #define VLIB_LOG2_THREAD_STACK_SIZE (21)
 #define VLIB_THREAD_STACK_SIZE (1<<VLIB_LOG2_THREAD_STACK_SIZE)
@@ -190,6 +178,10 @@ void vlib_worker_thread_node_refork (void);
  * Wait until each of the workers has been once around the track
  */
 void vlib_worker_wait_one_loop (void);
+/**
+ * Flush worker's pending rpc requests to main thread's rpc queue
+ */
+void vlib_worker_flush_pending_rpc_requests (vlib_main_t *vm);
 
 static_always_inline uword
 vlib_get_thread_index (void)
@@ -208,7 +200,7 @@ vlib_smp_unsafe_warning (void)
 }
 
 always_inline int
-__foreach_vlib_main_helper (vlib_main_t *ii, vlib_main_t **p)
+__foreach_vlib_main_helper (vlib_main_t *ii, vlib_main_t **p, int checks)
 {
   vlib_main_t *vm;
   u32 index = ii - (vlib_main_t *) 0;
@@ -217,21 +209,31 @@ __foreach_vlib_main_helper (vlib_main_t *ii, vlib_main_t **p)
     return 0;
 
   *p = vm = vlib_global_main.vlib_mains[index];
-  ASSERT (index == 0 || vm->parked_at_barrier == 1);
+  ASSERT (!checks || index == 0 || vm->parked_at_barrier == 1);
   return 1;
 }
 
-#define foreach_vlib_main()                                                   \
+#define foreach_vlib_main__(checks)                                           \
   for (vlib_main_t *ii = 0, *this_vlib_main;                                  \
-       __foreach_vlib_main_helper (ii, &this_vlib_main); ii++)                \
+       __foreach_vlib_main_helper (ii, &this_vlib_main, checks); ii++)        \
     if (this_vlib_main)
 
-#define foreach_sched_policy \
-  _(SCHED_OTHER, OTHER, "other") \
-  _(SCHED_BATCH, BATCH, "batch") \
-  _(SCHED_IDLE, IDLE, "idle")   \
-  _(SCHED_FIFO, FIFO, "fifo")   \
-  _(SCHED_RR, RR, "rr")
+#define foreach_vlib_main() foreach_vlib_main__ (1)
+
+#define foreach_sched_policy_posix                                            \
+  _ (SCHED_OTHER, OTHER, "other")                                             \
+  _ (SCHED_FIFO, FIFO, "fifo")                                                \
+  _ (SCHED_RR, RR, "rr")
+#define foreach_sched_policy_linux                                            \
+  _ (SCHED_BATCH, BATCH, "batch")                                             \
+  _ (SCHED_IDLE, IDLE, "idle")
+
+#ifdef __linux__
+#define foreach_sched_policy                                                  \
+  foreach_sched_policy_posix foreach_sched_policy_linux
+#else
+#define foreach_sched_policy foreach_sched_policy_posix
+#endif /* __linux__ */
 
 typedef enum
 {
@@ -363,12 +365,10 @@ vlib_worker_thread_barrier_check (void)
       if (PREDICT_FALSE (vlib_worker_threads->barrier_elog_enabled))
 	{
 	  vlib_worker_thread_t *w = vlib_worker_threads + thread_index;
-	  /* *INDENT-OFF* */
 	  ELOG_TYPE_DECLARE (e) = {
 	    .format = "barrier-wait-thread-%d",
 	    .format_args = "i4",
 	  };
-	  /* *INDENT-ON* */
 
 	  struct
 	  {
@@ -412,12 +412,10 @@ vlib_worker_thread_barrier_check (void)
 	    {
 	      t = vlib_time_now (vm) - t;
 	      vlib_worker_thread_t *w = vlib_worker_threads + thread_index;
-              /* *INDENT-OFF* */
               ELOG_TYPE_DECLARE (e) = {
                 .format = "barrier-refork-thread-%d",
                 .format_args = "i4",
               };
-              /* *INDENT-ON* */
 
 	      struct
 	      {
@@ -439,12 +437,10 @@ vlib_worker_thread_barrier_check (void)
 	{
 	  t = vlib_time_now (vm) - t;
 	  vlib_worker_thread_t *w = vlib_worker_threads + thread_index;
-	  /* *INDENT-OFF* */
 	  ELOG_TYPE_DECLARE (e) = {
 	    .format = "barrier-released-thread-%d: %dus",
 	    .format_args = "i4i4",
 	  };
-	  /* *INDENT-ON* */
 
 	  struct
 	  {

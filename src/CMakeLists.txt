@@ -13,7 +13,26 @@
 
 cmake_minimum_required(VERSION 3.13)
 
-set(CMAKE_C_COMPILER_NAMES clang gcc cc)
+if(DEFINED VPP_PLATFORM AND VPP_PLATFORM STREQUAL "default")
+  unset(VPP_PLATFORM)
+  unset(VPP_PLATFORM CACHE)
+  set(VPP_PLATFORM_NAME "default")
+elseif(DEFINED VPP_PLATFORM)
+  set(platform_file ${CMAKE_SOURCE_DIR}/cmake/platform/${VPP_PLATFORM}.cmake)
+  if(NOT EXISTS ${platform_file})
+     message(FATAL_ERROR "unknown platform ${VPP_PLATFORM}")
+  endif()
+  include(${platform_file})
+  set(VPP_PLATFORM_NAME ${VPP_PLATFORM})
+else()
+  set(VPP_PLATFORM_NAME "default")
+endif()
+
+if (DEFINED VPP_PLATFORM_C_COMPILER_NAMES)
+  set(CMAKE_C_COMPILER_NAMES ${VPP_PLATFORM_C_COMPILER_NAME})
+else()
+  set(CMAKE_C_COMPILER_NAMES clang gcc cc)
+endif()
 
 project(vpp C)
 
@@ -37,6 +56,11 @@ execute_process(
   OUTPUT_VARIABLE VPP_VERSION
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
+
+if (VPP_PLATFORM)
+  set(VPP_VERSION ${VPP_VERSION}-${VPP_PLATFORM_NAME})
+endif()
+
 string(REPLACE "-" ";" VPP_LIB_VERSION ${VPP_VERSION})
 list(GET VPP_LIB_VERSION 0 VPP_LIB_VERSION)
 
@@ -88,13 +112,20 @@ endif()
 ##############################################################################
 # cross compiling
 ##############################################################################
+
 if(CMAKE_CROSSCOMPILING)
+  if (${CMAKE_SYSTEM_NAME} MATCHES "Linux")
+    set(COMPILER_SUFFIX "linux-gnu")
+  elseif (${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD")
+    set(COMPILER_SUFFIX "freebsd")
+  endif()
+
   set(CMAKE_IGNORE_PATH
-    /usr/lib/${CMAKE_HOST_SYSTEM_PROCESSOR}-linux-gnu/
-    /usr/lib/${CMAKE_HOST_SYSTEM_PROCESSOR}-linux-gnu/lib/
+    /usr/lib/${CMAKE_HOST_SYSTEM_PROCESSOR}-${COMPILER_SUFFIX}/
+    /usr/lib/${CMAKE_HOST_SYSTEM_PROCESSOR}-${COMPILER_SUFFIX}/lib/
   )
+  set(CMAKE_C_COMPILER_TARGET ${CMAKE_SYSTEM_PROCESSOR}-${COMPILER_SUFFIX})
 endif()
-set(CMAKE_C_COMPILER_TARGET ${CMAKE_SYSTEM_PROCESSOR}-linux-gnu)
 
 ##############################################################################
 # build config
@@ -183,7 +214,7 @@ if(VPP_ENABLE_TRAJECTORY_TRACE)
 endif()
 
 ##############################################################################
-# unittest with clang ode coverage
+# unittest with clang code coverage
 ##############################################################################
 
 if("${CMAKE_VERSION}" VERSION_GREATER_EQUAL "3.13" AND "${CMAKE_C_COMPILER_ID}" MATCHES "(Apple)?[Cc]lang")
@@ -215,12 +246,35 @@ include(cmake/exec.cmake)
 include(cmake/plugin.cmake)
 
 ##############################################################################
+# FreeBSD - use epoll-shim
+##############################################################################
+set(EPOLL_LIB "")
+if("${CMAKE_SYSTEM_NAME}" STREQUAL "FreeBSD")
+  find_path(EPOLL_SHIM_INCLUDE_DIR NAMES sys/epoll.h HINTS /usr/local/include/libepoll-shim)
+  find_library(EPOLL_SHIM_LIB NAMES epoll-shim HINTS /usr/local/lib)
+
+  if(EPOLL_SHIM_INCLUDE_DIR AND EPOLL_SHIM_LIB)
+    message(STATUS "Found epoll-shim in ${EPOLL_SHIM_INCLUDE_DIR}")
+    include_directories(${EPOLL_SHIM_INCLUDE_DIR})
+    string(JOIN " " EPOLL_LIB "${EPOLL_SHIM_LIB}")
+  endif()
+endif()
+
+##############################################################################
 # subdirs - order matters
 ##############################################################################
 option(VPP_HOST_TOOLS_ONLY "Build only host tools" OFF)
 if(VPP_HOST_TOOLS_ONLY)
   set(SUBDIRS tools/vppapigen cmake)
-elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
+  install(
+    PROGRAMS
+    vpp-api/vapi/vapi_c_gen.py
+    vpp-api/vapi/vapi_cpp_gen.py
+    vpp-api/vapi/vapi_json_parser.py
+    DESTINATION ${VPP_RUNTIME_DIR}
+    COMPONENT vpp-dev
+  )
+elseif(${CMAKE_SYSTEM_NAME} MATCHES "Linux|FreeBSD")
   find_package(OpenSSL)
   set(SUBDIRS
     vppinfra svm vlib vlibmemory vlibapi vnet vpp vat vat2 vcl vpp-api
@@ -299,6 +353,7 @@ mark_as_advanced(CLEAR
 # print configuration
 ##############################################################################
 message(STATUS "Configuration:")
+pr("VPP platform" ${VPP_PLATFORM_NAME})
 pr("VPP version" ${VPP_VERSION})
 pr("VPP library version" ${VPP_LIB_VERSION})
 pr("GIT toplevel dir" ${VPP_GIT_TOPLEVEL_DIR})

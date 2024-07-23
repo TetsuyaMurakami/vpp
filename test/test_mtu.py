@@ -99,7 +99,7 @@ class TestMTU(VppTestCase):
             chksum=0x2DBB,
         )
         icmp4_reply = (
-            IP(src=self.pg0.local_ip4, dst=self.pg0.remote_ip4, ttl=254, len=576, id=0)
+            IP(src=self.pg0.local_ip4, dst=self.pg0.remote_ip4, ttl=255, len=576, id=0)
             / p_icmp4
             / p_ip4
             / p_payload
@@ -112,6 +112,8 @@ class TestMTU(VppTestCase):
             # p.show2()
             # n.show2()
             self.validate_bytes(bytes(p[1]), icmp4_reply)
+
+        self.assert_error_counter_equal("/err/ip4-input/mtu_exceeded", 11)
 
         # Now with DF off. Expect fragments.
         # First go with 1500 byte packets.
@@ -190,6 +192,8 @@ class TestMTU(VppTestCase):
         rx = self.send_and_expect_some(self.pg0, p6 * 9, self.pg0)
         for p in rx:
             self.validate_bytes(bytes(p[1]), icmp6_reply_str)
+
+        self.assert_error_counter_equal("/err/ip6-input/mtu_exceeded", 9)
 
         # Reset MTU
         self.vapi.sw_interface_set_mtu(self.pg1.sw_if_index, [current_mtu, 0, 0, 0])

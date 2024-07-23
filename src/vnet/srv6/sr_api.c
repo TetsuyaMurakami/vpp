@@ -163,7 +163,7 @@ vl_api_sr_policy_add_v2_t_handler (vl_api_sr_policy_add_v2_t *mp)
 		   mp->type, ntohl (mp->fib_table), mp->is_encap, 0, NULL);
   vec_free (segments);
 
-  REPLY_MACRO (VL_API_SR_POLICY_ADD_REPLY);
+  REPLY_MACRO (VL_API_SR_POLICY_ADD_V2_REPLY);
 }
 
 static void
@@ -321,12 +321,10 @@ static void vl_api_sr_localsids_dump_t_handler
   if (!reg)
     return;
 
-  /* *INDENT-OFF* */
   pool_foreach (t, sm->localsids)
    {
     send_sr_localsid_details(t, reg, mp->context);
   }
-  /* *INDENT-ON* */
 }
 
 static void
@@ -453,12 +451,10 @@ vl_api_sr_policies_dump_t_handler (vl_api_sr_policies_dump_t * mp)
   if (!reg)
     return;
 
-  /* *INDENT-OFF* */
   pool_foreach (t, sm->sr_policies)
    {
     send_sr_policies_details(t, reg, mp->context);
   }
-  /* *INDENT-ON* */
 }
 
 static void
@@ -583,12 +579,10 @@ static void
   if (!reg)
     return;
 
-  /* *INDENT-OFF* */
   pool_foreach (t, sm->sr_policies)
    {
     send_sr_policies_details_with_sl_index(t, reg, mp->context);
   }
-  /* *INDENT-ON* */
 }
 
 static void send_sr_steering_pol_details
@@ -630,12 +624,10 @@ static void vl_api_sr_steering_pol_dump_t_handler
   if (!reg)
     return;
 
-  /* *INDENT-OFF* */
   pool_foreach (t, sm->steer_policies)
    {
     send_sr_steering_pol_details(t, reg, mp->context);
   }
-  /* *INDENT-ON* */
 }
 
 #include <vnet/srv6/sr.api.c>

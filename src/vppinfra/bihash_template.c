@@ -106,8 +106,10 @@ static inline void *BV (alloc_aligned) (BVT (clib_bihash) * h, uword nbytes)
       void *base, *rv;
       uword alloc = alloc_arena_next (h) - alloc_arena_mapped (h);
       int mmap_flags = MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS;
+#if __linux__
       int mmap_flags_huge = (mmap_flags | MAP_HUGETLB | MAP_LOCKED |
 			     BIHASH_LOG2_HUGEPAGE_SIZE << MAP_HUGE_SHIFT);
+#endif /* __linux__ */
 
       /* new allocation is 25% of existing one */
       if (alloc_arena_mapped (h) >> 2 > alloc)
@@ -118,7 +120,11 @@ static inline void *BV (alloc_aligned) (BVT (clib_bihash) * h, uword nbytes)
 
       base = (void *) (uword) (alloc_arena (h) + alloc_arena_mapped (h));
 
+#if __linux__
       rv = mmap (base, alloc, PROT_READ | PROT_WRITE, mmap_flags_huge, -1, 0);
+#elif __FreeBSD__
+      rv = MAP_FAILED;
+#endif /* __linux__ */
 
       /* fallback - maybe we are still able to allocate normal pages */
       if (rv == MAP_FAILED || mlock (base, alloc) != 0)
@@ -694,12 +700,10 @@ static_always_inline int BV (clib_bihash_add_del_inline_with_hash) (
   int mark_bucket_linear;
   int resplit_once;
 
-  /* *INDENT-OFF* */
   static const BVT (clib_bihash_bucket) mask = {
     .linear_search = 1,
     .log2_pages = -1
   };
-  /* *INDENT-ON* */
 
 #if BIHASH_LAZY_INSTANTIATE
   /*

@@ -15,10 +15,15 @@
 
 #define _GNU_SOURCE
 #include <pthread.h>
+#ifdef __FreeBSD__
+#include <pthread_np.h>
+#endif /* __FreeBSD__ */
 #include <sched.h>
 
 #include <vppinfra/clib.h>
 #include <vppinfra/cpu.h>
+#include <vppinfra/bitmap.h>
+#include <vppinfra/unix.h>
 #include <vlib/vlib.h>
 #include <vlib/unix/unix.h>
 #include <vlib/threads.h>
@@ -40,25 +45,26 @@ static void
 vpp_find_plugin_path ()
 {
   extern char *vat_plugin_path;
-  char *p, path[PATH_MAX];
-  int rv;
-  u8 *s;
+  char *p;
+  u8 *s, *path;
 
   /* find executable path */
-  if ((rv = readlink ("/proc/self/exe", path, PATH_MAX - 1)) == -1)
+  path = os_get_exec_path ();
+
+  if (!path)
     return;
 
-  /* readlink doesn't provide null termination */
-  path[rv] = 0;
+  /* add null termination */
+  vec_add1 (path, 0);
 
   /* strip filename */
-  if ((p = strrchr (path, '/')) == 0)
-    return;
+  if ((p = strrchr ((char *) path, '/')) == 0)
+    goto done;
   *p = 0;
 
   /* strip bin/ */
-  if ((p = strrchr (path, '/')) == 0)
-    return;
+  if ((p = strrchr ((char *) path, '/')) == 0)
+    goto done;
   *p = 0;
 
   s = format (0, "%s/" CLIB_LIB_DIR "/vpp_plugins", path, path);
@@ -68,6 +74,9 @@ vpp_find_plugin_path ()
   s = format (0, "%s/" CLIB_LIB_DIR "/vpp_api_test_plugins", path, path);
   vec_add1 (s, 0);
   vat_plugin_path = (char *) s;
+
+done:
+  vec_free (path);
 }
 
 static void
@@ -320,12 +329,22 @@ defaulted:
 
   unformat_free (&input);
 
+  /* if main thread affinity is unspecified, set to current running cpu */
+  if (main_core == ~0)
+    main_core = sched_getcpu ();
+
   /* set process affinity for main thread */
   if (main_core != ~0)
     {
       CPU_ZERO (&cpuset);
       CPU_SET (main_core, &cpuset);
-      pthread_setaffinity_np (pthread_self (), sizeof (cpu_set_t), &cpuset);
+      if (pthread_setaffinity_np (pthread_self (), sizeof (cpu_set_t),
+				  &cpuset))
+	{
+	  clib_unix_error (
+	    "pthread_setaffinity_np() on cpu %d failed for main thread",
+	    main_core);
+	}
     }
 
   /* Set up the plugin message ID allocator right now... */
@@ -503,14 +522,12 @@ show_bihash_command_fn (vlib_main_t * vm,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (show_bihash_command, static) =
 {
   .path = "show bihash",
   .short_help = "show bihash",
   .function = show_bihash_command_fn,
 };
-/* *INDENT-ON* */
 
 #ifdef CLIB_SANITIZE_ADDR
 /* default options for Address Sanitizer */

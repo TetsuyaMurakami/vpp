@@ -17,12 +17,17 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#ifdef __FreeBSD__
+#include <sys/memrange.h>
+#endif /* __FreeBSD__ */
 #include <fcntl.h>
 #include <unistd.h>
 #include <sched.h>
 
 #include <vppinfra/format.h>
+#ifdef __linux__
 #include <vppinfra/linux/sysfs.h>
+#endif
 #include <vppinfra/mem.h>
 #include <vppinfra/hash.h>
 #include <vppinfra/pmalloc.h>
@@ -182,8 +187,9 @@ next_chunk:
 }
 
 static void
-pmalloc_update_lookup_table (clib_pmalloc_main_t * pm, u32 first, u32 count)
+pmalloc_update_lookup_table (clib_pmalloc_main_t *pm, u32 first, u32 count)
 {
+#ifdef __linux
   uword seek, va, pa, p;
   int fd;
   u32 elts_per_page = 1U << (pm->def_log2_page_sz - pm->lookup_log2_page_sz);
@@ -221,6 +227,45 @@ pmalloc_update_lookup_table (clib_pmalloc_main_t * pm, u32 first, u32 count)
 
   if (fd != -1)
     close (fd);
+#elif defined(__FreeBSD__)
+  struct mem_extract meme;
+  uword p;
+  int fd;
+  u32 elts_per_page = 1U << (pm->def_log2_page_sz - pm->lookup_log2_page_sz);
+
+  vec_validate_aligned (pm->lookup_table,
+			vec_len (pm->pages) * elts_per_page - 1,
+			CLIB_CACHE_LINE_BYTES);
+
+  p = (uword) first * elts_per_page;
+  if (pm->flags & CLIB_PMALLOC_F_NO_PAGEMAP)
+    {
+      while (p < (uword) elts_per_page * count)
+	{
+	  pm->lookup_table[p] =
+	    pointer_to_uword (pm->base) + (p << pm->lookup_log2_page_sz);
+	  p++;
+	}
+      return;
+    }
+
+  fd = open ((char *) "/dev/mem", O_RDONLY);
+  if (fd == -1)
+    return;
+
+  while (p < (uword) elts_per_page * count)
+    {
+      meme.me_vaddr =
+	pointer_to_uword (pm->base) + (p << pm->lookup_log2_page_sz);
+      if (ioctl (fd, MEM_EXTRACT_PADDR, &meme) == -1)
+	continue;
+      pm->lookup_table[p] = meme.me_vaddr - meme.me_paddr;
+      p++;
+    }
+  return;
+#else
+#error "Unsupported OS"
+#endif
 }
 
 static inline clib_pmalloc_page_t *
@@ -241,6 +286,7 @@ pmalloc_map_pages (clib_pmalloc_main_t * pm, clib_pmalloc_arena_t * a,
       return 0;
     }
 
+#ifdef __linux__
   if (a->log2_subpage_sz != clib_mem_get_log2_page_size ())
     {
       pm->error = clib_sysfs_prealloc_hugepages (numa_node,
@@ -249,6 +295,7 @@ pmalloc_map_pages (clib_pmalloc_main_t * pm, clib_pmalloc_arena_t * a,
       if (pm->error)
 	return 0;
     }
+#endif /* __linux__ */
 
   rv = clib_mem_set_numa_affinity (numa_node, /* force */ 1);
   if (rv == CLIB_MEM_ERROR && numa_node != 0)
@@ -271,8 +318,10 @@ pmalloc_map_pages (clib_pmalloc_main_t * pm, clib_pmalloc_arena_t * a,
     }
   else
     {
+#ifdef __linux__
       if (a->log2_subpage_sz != clib_mem_get_log2_page_size ())
 	mmap_flags |= MAP_HUGETLB;
+#endif /* __linux__ */
 
       mmap_flags |= MAP_PRIVATE | MAP_ANONYMOUS;
       a->fd = -1;
@@ -627,7 +676,6 @@ format_pmalloc (u8 * s, va_list * va)
 		format_clib_error, pm->error);
 
 
-  /* *INDENT-OFF* */
   pool_foreach (a, pm->arenas)
     {
       u32 *page_index;
@@ -645,7 +693,6 @@ format_pmalloc (u8 * s, va_list * va)
 			format_pmalloc_page, pp, verbose);
 	  }
     }
-  /* *INDENT-ON* */
 
   return s;
 }

@@ -35,10 +35,27 @@
   WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <vppinfra/error.h>
 #include <vppinfra/os.h>
+#include <vppinfra/bitmap.h>
 #include <vppinfra/unix.h>
 #include <vppinfra/format.h>
+#ifdef __linux__
+#include <vppinfra/linux/sysfs.h>
+#include <sched.h>
+#elif defined(__FreeBSD__)
+#define _WANT_FREEBSD_BITSET
+#include <sys/cdefs.h>
+#include <sys/param.h>
+#include <sys/types.h>
+#include <sys/cpuset.h>
+#include <sys/domainset.h>
+#include <sys/sysctl.h>
+#endif
 
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -202,27 +219,20 @@ unix_proc_file_contents (char *file, u8 ** result)
   return 0;
 }
 
-void os_panic (void) __attribute__ ((weak));
-
-__clib_export void
+__clib_export __clib_weak void
 os_panic (void)
 {
   abort ();
 }
 
-void os_exit (int) __attribute__ ((weak));
-
-void
+__clib_export __clib_weak void
 os_exit (int code)
 {
   exit (code);
 }
 
-void os_puts (u8 * string, uword string_length, uword is_error)
-  __attribute__ ((weak));
-
-void
-os_puts (u8 * string, uword string_length, uword is_error)
+__clib_export __clib_weak void
+os_puts (u8 *string, uword string_length, uword is_error)
 {
   int cpu = os_get_thread_index ();
   int nthreads = os_get_nthreads ();
@@ -258,6 +268,151 @@ __clib_export __clib_weak uword
 os_get_nthreads (void)
 {
   return 1;
+}
+
+__clib_export clib_bitmap_t *
+os_get_online_cpu_core_bitmap ()
+{
+#if __linux__
+  return clib_sysfs_read_bitmap ("/sys/devices/system/cpu/online");
+#else
+  return 0;
+#endif
+}
+
+__clib_export clib_bitmap_t *
+os_get_cpu_affinity_bitmap (int pid)
+{
+#if __linux
+  int index, ret;
+  cpu_set_t cpuset;
+  uword *affinity_cpus;
+
+  clib_bitmap_alloc (affinity_cpus, sizeof (cpu_set_t));
+  clib_bitmap_zero (affinity_cpus);
+
+  CPU_ZERO_S (sizeof (cpu_set_t), &cpuset);
+
+  ret = sched_getaffinity (0, sizeof (cpu_set_t), &cpuset);
+
+  if (ret < 0)
+    {
+      clib_bitmap_free (affinity_cpus);
+      return 0;
+    }
+
+  for (index = 0; index < sizeof (cpu_set_t); index++)
+    if (CPU_ISSET_S (index, sizeof (cpu_set_t), &cpuset))
+      clib_bitmap_set (affinity_cpus, index, 1);
+  return affinity_cpus;
+#elif defined(__FreeBSD__)
+  cpuset_t mask;
+  uword *r = NULL;
+
+  if (cpuset_getaffinity (CPU_LEVEL_CPUSET, CPU_WHICH_CPUSET, -1,
+			  sizeof (mask), &mask) != 0)
+    {
+      clib_bitmap_free (r);
+      return NULL;
+    }
+
+  for (int bit = 0; bit < CPU_SETSIZE; bit++)
+    clib_bitmap_set (r, bit, CPU_ISSET (bit, &mask));
+
+  return r;
+#else
+  return NULL;
+#endif
+}
+
+__clib_export clib_bitmap_t *
+os_get_online_cpu_node_bitmap ()
+{
+#if __linux__
+  return clib_sysfs_read_bitmap ("/sys/devices/system/node/online");
+#elif defined(__FreeBSD__)
+  domainset_t domain;
+  uword *r = NULL;
+  int policy;
+
+  if (cpuset_getdomain (CPU_LEVEL_CPUSET, CPU_WHICH_CPUSET, -1,
+			sizeof (domain), &domain, &policy) != 0)
+    {
+      clib_bitmap_free (r);
+      return NULL;
+    }
+
+  for (int bit = 0; bit < CPU_SETSIZE; bit++)
+    clib_bitmap_set (r, bit, CPU_ISSET (bit, &domain));
+  return r;
+#else
+  return 0;
+#endif
+}
+__clib_export clib_bitmap_t *
+os_get_cpu_on_node_bitmap (int node)
+{
+#if __linux__
+  return clib_sysfs_read_bitmap ("/sys/devices/system/node/node%u/cpulist",
+				 node);
+#else
+  return 0;
+#endif
+}
+
+__clib_export clib_bitmap_t *
+os_get_cpu_with_memory_bitmap ()
+{
+#if __linux__
+  return clib_sysfs_read_bitmap ("/sys/devices/system/node/has_memory");
+#else
+  return 0;
+#endif
+}
+
+__clib_export int
+os_get_cpu_phys_core_id (int cpu_id)
+{
+#if __linux
+  int core_id = -1;
+  clib_error_t *err;
+  u8 *p;
+
+  p =
+    format (0, "/sys/devices/system/cpu/cpu%u/topology/core_id%c", cpu_id, 0);
+  err = clib_sysfs_read ((char *) p, "%d", &core_id);
+  vec_free (p);
+  if (err)
+    {
+      clib_error_free (err);
+      return -1;
+    }
+  return core_id;
+#else
+  return -1;
+#endif
+}
+
+__clib_export u8 *
+os_get_exec_path ()
+{
+  u8 *rv = 0;
+#ifdef __linux__
+  char tmp[PATH_MAX];
+  ssize_t sz = readlink ("/proc/self/exe", tmp, sizeof (tmp));
+
+  if (sz <= 0)
+    return 0;
+#else
+  char tmp[MAXPATHLEN];
+  int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
+  size_t sz = MAXPATHLEN;
+
+  if (sysctl (mib, 4, tmp, &sz, NULL, 0) == -1)
+    return 0;
+#endif
+  vec_add (rv, tmp, sz);
+  return rv;
 }
 
 /*

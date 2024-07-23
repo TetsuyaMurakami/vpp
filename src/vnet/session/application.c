@@ -31,10 +31,12 @@ static app_main_t app_main;
 static app_listener_t *
 app_listener_alloc (application_t * app)
 {
+  app_main_t *am = &app_main;
   app_listener_t *app_listener;
-  pool_get (app->listeners, app_listener);
+
+  pool_get (am->listeners, app_listener);
   clib_memset (app_listener, 0, sizeof (*app_listener));
-  app_listener->al_index = app_listener - app->listeners;
+  app_listener->al_index = app_listener - am->listeners;
   app_listener->app_index = app->app_index;
   app_listener->session_index = SESSION_INVALID_INDEX;
   app_listener->local_index = SESSION_INVALID_INDEX;
@@ -43,18 +45,23 @@ app_listener_alloc (application_t * app)
 }
 
 app_listener_t *
-app_listener_get (application_t * app, u32 app_listener_index)
+app_listener_get (u32 app_listener_index)
 {
-  return pool_elt_at_index (app->listeners, app_listener_index);
+  app_main_t *am = &app_main;
+
+  return pool_elt_at_index (am->listeners, app_listener_index);
 }
 
 static void
 app_listener_free (application_t * app, app_listener_t * app_listener)
 {
+  app_main_t *am = &app_main;
+
   clib_bitmap_free (app_listener->workers);
+  vec_free (app_listener->cl_listeners);
   if (CLIB_DEBUG)
     clib_memset (app_listener, 0xfa, sizeof (*app_listener));
-  pool_put (app->listeners, app_listener);
+  pool_put (am->listeners, app_listener);
 }
 
 session_handle_t
@@ -63,24 +70,14 @@ app_listener_handle (app_listener_t * al)
   return al->ls_handle;
 }
 
-app_listener_t *
-app_listener_get_w_session (session_t * ls)
-{
-  application_t *app;
-
-  app = application_get_if_valid (ls->app_index);
-  if (!app)
-    return 0;
-  return app_listener_get (app, ls->al_index);
-}
-
 session_handle_t
 app_listen_session_handle (session_t * ls)
 {
   app_listener_t *al;
-  al = app_listener_get_w_session (ls);
-  if (!al)
+  /* TODO(fcoras): quic session handles */
+  if (ls->al_index == SESSION_INVALID_INDEX)
     return listen_session_get_handle (ls);
+  al = app_listener_get (ls->al_index);
   return al->ls_handle;
 }
 
@@ -91,7 +88,7 @@ app_listener_get_w_handle (session_handle_t handle)
   ls = session_get_from_handle_if_valid (handle);
   if (!ls)
     return 0;
-  return app_listener_get_w_session (ls);
+  return app_listener_get (ls->al_index);
 }
 
 app_listener_t *
@@ -112,7 +109,7 @@ app_listener_lookup (application_t * app, session_endpoint_cfg_t * sep_ext)
       if (handle != SESSION_INVALID_HANDLE)
 	{
 	  ls = listen_session_get_from_handle (handle);
-	  return app_listener_get_w_session (ls);
+	  return app_listener_get (ls->al_index);
 	}
     }
 
@@ -122,7 +119,7 @@ app_listener_lookup (application_t * app, session_endpoint_cfg_t * sep_ext)
   if (handle != SESSION_INVALID_HANDLE)
     {
       ls = listen_session_get_from_handle (handle);
-      return app_listener_get_w_session ((session_t *) ls);
+      return app_listener_get (ls->al_index);
     }
 
   /*
@@ -144,7 +141,7 @@ app_listener_lookup (application_t * app, session_endpoint_cfg_t * sep_ext)
 	  if (handle != SESSION_INVALID_HANDLE)
 	    {
 	      ls = listen_session_get_from_handle (handle);
-	      return app_listener_get_w_session ((session_t *) ls);
+	      return app_listener_get (ls->al_index);
 	    }
 	}
     }
@@ -181,7 +178,6 @@ app_listener_alloc_and_init (application_t * app,
       local_st = session_type_from_proto_and_ip (TRANSPORT_PROTO_NONE,
 						 sep->is_ip4);
       ls = listen_session_alloc (0, local_st);
-      ls->app_index = app->app_index;
       ls->app_wrk_index = sep->app_wrk_index;
       lh = session_handle (ls);
 
@@ -194,7 +190,7 @@ app_listener_alloc_and_init (application_t * app,
 	}
 
       ls = session_get_from_handle (lh);
-      app_listener = app_listener_get (app, al_index);
+      app_listener = app_listener_get (al_index);
       app_listener->local_index = ls->session_index;
       app_listener->ls_handle = lh;
       ls->al_index = al_index;
@@ -213,7 +209,6 @@ app_listener_alloc_and_init (application_t * app,
        * build it's own specific listening connection.
        */
       ls = listen_session_alloc (0, st);
-      ls->app_index = app->app_index;
       ls->app_wrk_index = sep->app_wrk_index;
 
       /* Listen pool can be reallocated if the transport is
@@ -228,7 +223,7 @@ app_listener_alloc_and_init (application_t * app,
 	  return rv;
 	}
       ls = listen_session_get_from_handle (lh);
-      app_listener = app_listener_get (app, al_index);
+      app_listener = app_listener_get (al_index);
       app_listener->session_index = ls->session_index;
       app_listener->ls_handle = lh;
       ls->al_index = al_index;
@@ -290,8 +285,9 @@ app_listener_cleanup (app_listener_t * al)
 }
 
 static app_worker_t *
-app_listener_select_worker (application_t * app, app_listener_t * al)
+app_listener_select_worker (app_listener_t *al)
 {
+  application_t *app;
   u32 wrk_index;
 
   app = application_get (al->app_index);
@@ -319,6 +315,13 @@ app_listener_get_local_session (app_listener_t * al)
   if (al->local_index == SESSION_INVALID_INDEX)
     return 0;
   return listen_session_get (al->local_index);
+}
+
+session_t *
+app_listener_get_wrk_cl_session (app_listener_t *al, u32 wrk_map_index)
+{
+  u32 si = vec_elt (al->cl_listeners, wrk_map_index);
+  return session_get (si, 0 /* listener thread */);
 }
 
 static app_worker_map_t *
@@ -884,12 +887,10 @@ application_free (application_t * app)
    * Free workers
    */
 
-  /* *INDENT-OFF* */
   pool_flush (wrk_map, app->worker_maps, ({
     app_wrk = app_worker_get (wrk_map->wrk_index);
     app_worker_free (app_wrk);
   }));
-  /* *INDENT-ON* */
   pool_free (app->worker_maps);
 
   /*
@@ -932,13 +933,11 @@ application_detach_process (application_t * app, u32 api_client_index)
   APP_DBG ("Detaching for app %v index %u api client index %u", app->name,
 	   app->app_index, api_client_index);
 
-  /* *INDENT-OFF* */
   pool_foreach (wrk_map, app->worker_maps)  {
     app_wrk = app_worker_get (wrk_map->wrk_index);
     if (app_wrk->api_client_index == api_client_index)
       vec_add1 (wrks, app_wrk->wrk_index);
   }
-  /* *INDENT-ON* */
 
   if (!vec_len (wrks))
     {
@@ -969,7 +968,7 @@ application_namespace_cleanup (app_namespace_t *app_ns)
   ns_index = app_namespace_index (app_ns);
   pool_foreach (app, app_main.app_pool)
     if (app->ns_index == ns_index)
-      vec_add1 (app_indices, app->ns_index);
+      vec_add1 (app_indices, app->app_index);
 
   vec_foreach (app_index, app_indices)
     {
@@ -1009,12 +1008,55 @@ application_n_workers (application_t * app)
 app_worker_t *
 application_listener_select_worker (session_t * ls)
 {
-  application_t *app;
   app_listener_t *al;
 
-  app = application_get (ls->app_index);
-  al = app_listener_get (app, ls->al_index);
-  return app_listener_select_worker (app, al);
+  al = app_listener_get (ls->al_index);
+  return app_listener_select_worker (al);
+}
+
+always_inline u32
+app_listener_cl_flow_hash (session_dgram_hdr_t *hdr)
+{
+  u32 hash = 0;
+
+  if (hdr->is_ip4)
+    {
+      hash = clib_crc32c_u32 (hash, hdr->rmt_ip.ip4.as_u32);
+      hash = clib_crc32c_u32 (hash, hdr->lcl_ip.ip4.as_u32);
+      hash = clib_crc32c_u16 (hash, hdr->rmt_port);
+      hash = clib_crc32c_u16 (hash, hdr->lcl_port);
+    }
+  else
+    {
+      hash = clib_crc32c_u64 (hash, hdr->rmt_ip.ip6.as_u64[0]);
+      hash = clib_crc32c_u64 (hash, hdr->rmt_ip.ip6.as_u64[1]);
+      hash = clib_crc32c_u64 (hash, hdr->lcl_ip.ip6.as_u64[0]);
+      hash = clib_crc32c_u64 (hash, hdr->lcl_ip.ip6.as_u64[1]);
+      hash = clib_crc32c_u16 (hash, hdr->rmt_port);
+      hash = clib_crc32c_u16 (hash, hdr->lcl_port);
+    }
+
+  return hash;
+}
+
+session_t *
+app_listener_select_wrk_cl_session (session_t *ls, session_dgram_hdr_t *hdr)
+{
+  u32 wrk_map_index = 0;
+  app_listener_t *al;
+
+  al = app_listener_get (ls->al_index);
+  /* Crude test to check if only worker 0 is set */
+  if (al->workers[0] != 1)
+    {
+      u32 hash = app_listener_cl_flow_hash (hdr);
+      hash %= vec_len (al->workers) * sizeof (uword);
+      wrk_map_index = clib_bitmap_next_set (al->workers, hash);
+      if (wrk_map_index == ~0)
+	wrk_map_index = clib_bitmap_first_set (al->workers);
+    }
+
+  return app_listener_get_wrk_cl_session (al, wrk_map_index);
 }
 
 int
@@ -1493,7 +1535,7 @@ application_change_listener_owner (session_t * s, app_worker_t * app_wrk)
   if (!app)
     return SESSION_E_NOAPP;
 
-  app_listener = app_listener_get (app, s->al_index);
+  app_listener = app_listener_get (s->al_index);
 
   /* Only remove from lb for now */
   app_listener->workers = clib_bitmap_set (app_listener->workers,
@@ -1704,7 +1746,6 @@ application_format_listeners (application_t * app, int verbose)
       return;
     }
 
-  /* *INDENT-OFF* */
   pool_foreach (wrk_map, app->worker_maps)  {
     app_wrk = app_worker_get (wrk_map->wrk_index);
     if (hash_elts (app_wrk->listeners_table) == 0)
@@ -1714,7 +1755,6 @@ application_format_listeners (application_t * app, int verbose)
                        handle, sm_index, verbose);
     }));
   }
-  /* *INDENT-ON* */
 }
 
 static void
@@ -1729,12 +1769,10 @@ application_format_connects (application_t * app, int verbose)
       return;
     }
 
-  /* *INDENT-OFF* */
   pool_foreach (wrk_map, app->worker_maps)  {
     app_wrk = app_worker_get (wrk_map->wrk_index);
     app_worker_format_connects (app_wrk, verbose);
   }
-  /* *INDENT-ON* */
 }
 
 u8 *
@@ -1835,12 +1873,10 @@ format_application (u8 * s, va_list * args)
 	      format_memory_size, props->rx_fifo_size,
 	      format_memory_size, props->tx_fifo_size);
 
-  /* *INDENT-OFF* */
   pool_foreach (wrk_map, app->worker_maps)  {
       app_wrk = app_worker_get (wrk_map->wrk_index);
       s = format (s, "%U", format_app_worker, app_wrk);
   }
-  /* *INDENT-ON* */
 
   return s;
 }
@@ -1858,11 +1894,9 @@ application_format_all_listeners (vlib_main_t * vm, int verbose)
 
   application_format_listeners (0, verbose);
 
-  /* *INDENT-OFF* */
   pool_foreach (app, app_main.app_pool)  {
     application_format_listeners (app, verbose);
   }
-  /* *INDENT-ON* */
 }
 
 void
@@ -1878,11 +1912,9 @@ application_format_all_clients (vlib_main_t * vm, int verbose)
 
   application_format_connects (0, verbose);
 
-  /* *INDENT-OFF* */
   pool_foreach (app, app_main.app_pool)  {
     application_format_connects (app, verbose);
   }
-  /* *INDENT-ON* */
 }
 
 static clib_error_t *
@@ -1892,11 +1924,9 @@ show_certificate_command_fn (vlib_main_t * vm, unformat_input_t * input,
   app_cert_key_pair_t *ckpair;
   session_cli_return_if_not_enabled ();
 
-  /* *INDENT-OFF* */
   pool_foreach (ckpair, app_main.cert_key_pair_store)  {
     vlib_cli_output (vm, "%U", format_cert_key_pair, ckpair);
   }
-  /* *INDENT-ON* */
   return 0;
 }
 
@@ -1907,14 +1937,12 @@ appliction_format_app_mq (vlib_main_t * vm, application_t * app)
   app_worker_t *wrk;
   int i;
 
-  /* *INDENT-OFF* */
   pool_foreach (map, app->worker_maps)  {
     wrk = app_worker_get (map->wrk_index);
     vlib_cli_output (vm, "[A%d][%d]%U", app->app_index,
 		     map->wrk_index, format_svm_msg_q,
 		     wrk->event_queue);
   }
-  /* *INDENT-ON* */
 
   for (i = 0; i < vec_len (app->rx_mqs); i++)
     vlib_cli_output (vm, "[A%d][R%d]%U", app->app_index, i, format_svm_msg_q,
@@ -1935,11 +1963,9 @@ appliction_format_all_app_mq (vlib_main_t * vm)
 		       session_main_get_vpp_event_queue (i));
     }
 
-  /* *INDENT-OFF* */
   pool_foreach (app, app_main.app_pool)  {
       appliction_format_app_mq (vm, app);
   }
-  /* *INDENT-ON* */
   return 0;
 }
 

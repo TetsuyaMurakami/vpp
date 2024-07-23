@@ -19,6 +19,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <http/http_header_names.h>
+#include <http/http_content_types.h>
+
 /** @file static_server.c
  *  Static http server, sufficient to serve .html / .css / .js content.
  */
@@ -83,34 +86,65 @@ start_send_data (hss_session_t *hs, http_status_code_t status)
 {
   http_msg_t msg;
   session_t *ts;
+  u8 *headers_buf = 0;
   int rv;
 
   ts = session_get (hs->vpp_session_index, hs->thread_index);
 
+  if (vec_len (hs->resp_headers))
+    {
+      headers_buf = http_serialize_headers (hs->resp_headers);
+      vec_free (hs->resp_headers);
+      msg.data.headers_offset = 0;
+      msg.data.headers_len = vec_len (headers_buf);
+    }
+  else
+    {
+      msg.data.headers_offset = 0;
+      msg.data.headers_len = 0;
+    }
+
   msg.type = HTTP_MSG_REPLY;
   msg.code = status;
-  msg.content_type = hs->content_type;
-  msg.data.len = hs->data_len;
+  msg.data.body_len = hs->data_len;
+  msg.data.len = msg.data.body_len + msg.data.headers_len;
 
-  if (hs->data_len > hss_main.use_ptr_thresh)
+  if (msg.data.len > hss_main.use_ptr_thresh)
     {
       msg.data.type = HTTP_MSG_DATA_PTR;
       rv = svm_fifo_enqueue (ts->tx_fifo, sizeof (msg), (u8 *) &msg);
       ASSERT (rv == sizeof (msg));
 
+      if (msg.data.headers_len)
+	{
+	  hs->headers_buf = headers_buf;
+	  uword headers = pointer_to_uword (hs->headers_buf);
+	  rv =
+	    svm_fifo_enqueue (ts->tx_fifo, sizeof (headers), (u8 *) &headers);
+	  ASSERT (rv == sizeof (headers));
+	}
+
       uword data = pointer_to_uword (hs->data);
       rv = svm_fifo_enqueue (ts->tx_fifo, sizeof (data), (u8 *) &data);
-      ASSERT (rv == sizeof (sizeof (data)));
+      ASSERT (rv == sizeof (data));
 
       goto done;
     }
 
   msg.data.type = HTTP_MSG_DATA_INLINE;
+  msg.data.body_offset = msg.data.headers_len;
 
   rv = svm_fifo_enqueue (ts->tx_fifo, sizeof (msg), (u8 *) &msg);
   ASSERT (rv == sizeof (msg));
 
-  if (!msg.data.len)
+  if (msg.data.headers_len)
+    {
+      rv = svm_fifo_enqueue (ts->tx_fifo, vec_len (headers_buf), headers_buf);
+      ASSERT (rv == msg.data.headers_len);
+      vec_free (headers_buf);
+    }
+
+  if (!msg.data.body_len)
     goto done;
 
   rv = svm_fifo_enqueue (ts->tx_fifo, hs->data_len, hs->data);
@@ -142,6 +176,15 @@ hss_session_send_data (hss_url_handler_args_t *args)
   hs->data = args->data;
   hs->data_len = args->data_len;
   hs->free_data = args->free_vec_data;
+
+  /* Set content type only if we have some response data */
+  if (hs->data_len)
+    {
+      http_add_header (&hs->resp_headers,
+		       http_header_name_token (HTTP_HEADER_CONTENT_TYPE),
+		       http_content_type_token (args->ct));
+    }
+
   start_send_data (hs, args->sc);
 }
 
@@ -212,30 +255,27 @@ content_type_from_request (u8 *request)
 
 static int
 try_url_handler (hss_main_t *hsm, hss_session_t *hs, http_req_method_t rt,
-		 u8 *request)
+		 u8 *target_path, u8 *target_query, u8 *data)
 {
   http_status_code_t sc = HTTP_STATUS_OK;
   hss_url_handler_args_t args = {};
   uword *p, *url_table;
-  http_content_type_t type;
   int rv;
 
-  if (!hsm->enable_url_handlers || !request)
+  if (!hsm->enable_url_handlers || !target_path)
     return -1;
 
   /* zero-length? try "index.html" */
-  if (vec_len (request) == 0)
+  if (vec_len (target_path) == 0)
     {
-      request = format (request, "index.html");
+      target_path = format (target_path, "index.html");
     }
-
-  type = content_type_from_request (request);
 
   /* Look for built-in GET / POST handlers */
   url_table =
     (rt == HTTP_REQ_GET) ? hsm->get_url_handlers : hsm->post_url_handlers;
 
-  p = hash_get_mem (url_table, request);
+  p = hash_get_mem (url_table, target_path);
   if (!p)
     return -1;
 
@@ -244,10 +284,12 @@ try_url_handler (hss_main_t *hsm, hss_session_t *hs, http_req_method_t rt,
   hs->cache_pool_index = ~0;
 
   if (hsm->debug_level > 0)
-    clib_warning ("%s '%s'", (rt == HTTP_REQ_GET) ? "GET" : "POST", request);
+    clib_warning ("%s '%s'", (rt == HTTP_REQ_GET) ? "GET" : "POST",
+		  target_path);
 
-  args.reqtype = rt;
-  args.request = request;
+  args.req_type = rt;
+  args.query = target_query;
+  args.req_data = data;
   args.sh.thread_index = hs->thread_index;
   args.sh.session_index = hs->session_index;
 
@@ -260,18 +302,25 @@ try_url_handler (hss_main_t *hsm, hss_session_t *hs, http_req_method_t rt,
   if (rv == HSS_URL_HANDLER_ERROR)
     {
       clib_warning ("builtin handler %llx hit on %s '%s' but failed!", p[0],
-		    (rt == HTTP_REQ_GET) ? "GET" : "POST", request);
-      sc = HTTP_STATUS_NOT_FOUND;
+		    (rt == HTTP_REQ_GET) ? "GET" : "POST", target_path);
+      sc = HTTP_STATUS_BAD_GATEWAY;
     }
 
   hs->data = args.data;
   hs->data_len = args.data_len;
   hs->free_data = args.free_vec_data;
-  hs->content_type = type;
+
+  /* Set content type only if we have some response data */
+  if (hs->data_len)
+    {
+      http_add_header (&hs->resp_headers,
+		       http_header_name_token (HTTP_HEADER_CONTENT_TYPE),
+		       http_content_type_token (args.ct));
+    }
 
   start_send_data (hs, sc);
 
-  if (!hs->data)
+  if (!hs->data_len)
     hss_session_disconnect_transport (hs);
 
   return 0;
@@ -335,18 +384,20 @@ try_index_file (hss_main_t *hsm, hss_session_t *hs, u8 *path)
     }
 
   redirect =
-    format (0,
-	    "Location: http%s://%U%s%s\r\n\r\n",
-	    proto == TRANSPORT_PROTO_TLS ? "s" : "", format_ip46_address,
-	    &endpt.ip, endpt.is_ip4, print_port ? port_str : (u8 *) "", path);
+    format (0, "http%s://%U%s%s", proto == TRANSPORT_PROTO_TLS ? "s" : "",
+	    format_ip46_address, &endpt.ip, endpt.is_ip4,
+	    print_port ? port_str : (u8 *) "", path);
 
   if (hsm->debug_level > 0)
     clib_warning ("redirect: %s", redirect);
 
   vec_free (port_str);
 
-  hs->data = redirect;
-  hs->data_len = vec_len (redirect);
+  http_add_header (&hs->resp_headers,
+		   http_header_name_token (HTTP_HEADER_LOCATION),
+		   (const char *) redirect, vec_len (redirect));
+  hs->data = redirect; /* TODO: find better way  */
+  hs->data_len = 0;
   hs->free_data = 1;
 
   return HTTP_STATUS_MOVED;
@@ -354,10 +405,10 @@ try_index_file (hss_main_t *hsm, hss_session_t *hs, u8 *path)
 
 static int
 try_file_handler (hss_main_t *hsm, hss_session_t *hs, http_req_method_t rt,
-		  u8 *request)
+		  u8 *target)
 {
   http_status_code_t sc = HTTP_STATUS_OK;
-  u8 *path;
+  u8 *path, *sanitized_path;
   u32 ce_index;
   http_content_type_t type;
 
@@ -365,18 +416,16 @@ try_file_handler (hss_main_t *hsm, hss_session_t *hs, http_req_method_t rt,
   if (!hsm->www_root)
     return -1;
 
-  type = content_type_from_request (request);
+  /* Remove dot segments to prevent path traversal */
+  sanitized_path = http_path_remove_dot_segments (target);
 
   /*
    * Construct the file to open
-   * Browsers are capable of sporadically including a leading '/'
    */
-  if (!request)
+  if (!target)
     path = format (0, "%s%c", hsm->www_root, 0);
-  else if (request[0] == '/')
-    path = format (0, "%s%s%c", hsm->www_root, request, 0);
   else
-    path = format (0, "%s/%s%c", hsm->www_root, request, 0);
+    path = format (0, "%s/%s%c", hsm->www_root, sanitized_path, 0);
 
   if (hsm->debug_level > 0)
     clib_warning ("%s '%s'", (rt == HTTP_REQ_GET) ? "GET" : "POST", path);
@@ -418,43 +467,59 @@ try_file_handler (hss_main_t *hsm, hss_session_t *hs, http_req_method_t rt,
   hs->path = path;
   hs->cache_pool_index = ce_index;
 
-done:
+  /* Set following headers only for happy path:
+   * Content-Type
+   * Cache-Control max-age
+   */
+  type = content_type_from_request (target);
+  http_add_header (&hs->resp_headers,
+		   http_header_name_token (HTTP_HEADER_CONTENT_TYPE),
+		   http_content_type_token (type));
+  /* TODO configurable max-age value */
+  http_add_header (&hs->resp_headers,
+		   http_header_name_token (HTTP_HEADER_CACHE_CONTROL),
+		   http_token_lit ("max-age=600"));
 
-  hs->content_type = type;
+done:
+  vec_free (sanitized_path);
   start_send_data (hs, sc);
-  if (!hs->data)
+  if (!hs->data_len)
     hss_session_disconnect_transport (hs);
 
   return 0;
 }
 
-static int
-handle_request (hss_session_t *hs, http_req_method_t rt, u8 *request)
+static void
+handle_request (hss_session_t *hs, http_req_method_t rt, u8 *target_path,
+		u8 *target_query, u8 *data)
 {
   hss_main_t *hsm = &hss_main;
 
-  if (!try_url_handler (hsm, hs, rt, request))
-    return 0;
+  if (!try_url_handler (hsm, hs, rt, target_path, target_query, data))
+    return;
 
-  if (!try_file_handler (hsm, hs, rt, request))
-    return 0;
+  if (!try_file_handler (hsm, hs, rt, target_path))
+    return;
 
   /* Handler did not find anything return 404 */
   start_send_data (hs, HTTP_STATUS_NOT_FOUND);
   hss_session_disconnect_transport (hs);
-
-  return 0;
 }
 
 static int
 hss_ts_rx_callback (session_t *ts)
 {
   hss_session_t *hs;
-  u8 *request = 0;
+  u8 *target_path = 0, *target_query = 0, *data = 0;
   http_msg_t msg;
   int rv;
 
   hs = hss_session_get (ts->thread_index, ts->opaque);
+  if (hs->free_data)
+    vec_free (hs->data);
+  hs->data = 0;
+  hs->resp_headers = 0;
+  vec_free (hs->headers_buf);
 
   /* Read the http message header */
   rv = svm_fifo_dequeue (ts->rx_fifo, sizeof (msg), (u8 *) &msg);
@@ -463,26 +528,66 @@ hss_ts_rx_callback (session_t *ts)
   if (msg.type != HTTP_MSG_REQUEST ||
       (msg.method_type != HTTP_REQ_GET && msg.method_type != HTTP_REQ_POST))
     {
-      hs->data = 0;
+      http_add_header (&hs->resp_headers,
+		       http_header_name_token (HTTP_HEADER_ALLOW),
+		       http_token_lit ("GET, POST"));
       start_send_data (hs, HTTP_STATUS_METHOD_NOT_ALLOWED);
-      return 0;
+      goto done;
     }
 
-  /* Read request */
-  if (msg.data.len)
+  if (msg.data.target_form != HTTP_TARGET_ORIGIN_FORM)
     {
-      vec_validate (request, msg.data.len - 1);
-      rv = svm_fifo_dequeue (ts->rx_fifo, msg.data.len, request);
-      ASSERT (rv == msg.data.len);
-      /* request must be a proper C-string in addition to a vector */
-      vec_add1 (request, 0);
+      start_send_data (hs, HTTP_STATUS_BAD_REQUEST);
+      goto done;
+    }
+
+  /* Read target path */
+  if (msg.data.target_path_len)
+    {
+      vec_validate (target_path, msg.data.target_path_len - 1);
+      rv = svm_fifo_peek (ts->rx_fifo, msg.data.target_path_offset,
+			  msg.data.target_path_len, target_path);
+      ASSERT (rv == msg.data.target_path_len);
+      if (http_validate_abs_path_syntax (target_path, 0))
+	{
+	  start_send_data (hs, HTTP_STATUS_BAD_REQUEST);
+	  goto done;
+	}
+      /* Target path must be a proper C-string in addition to a vector */
+      vec_add1 (target_path, 0);
+    }
+
+  /* Read target query */
+  if (msg.data.target_query_len)
+    {
+      vec_validate (target_query, msg.data.target_query_len - 1);
+      rv = svm_fifo_peek (ts->rx_fifo, msg.data.target_query_offset,
+			  msg.data.target_query_len, target_query);
+      ASSERT (rv == msg.data.target_query_len);
+      if (http_validate_query_syntax (target_query, 0))
+	{
+	  start_send_data (hs, HTTP_STATUS_BAD_REQUEST);
+	  goto done;
+	}
+    }
+
+  /* Read body */
+  if (msg.data.body_len)
+    {
+      vec_validate (data, msg.data.body_len - 1);
+      rv = svm_fifo_peek (ts->rx_fifo, msg.data.body_offset, msg.data.body_len,
+			  data);
+      ASSERT (rv == msg.data.body_len);
     }
 
   /* Find and send data */
-  handle_request (hs, msg.method_type, request);
+  handle_request (hs, msg.method_type, target_path, target_query, data);
 
-  vec_free (request);
-
+done:
+  vec_free (target_path);
+  vec_free (target_query);
+  vec_free (data);
+  svm_fifo_dequeue_drop (ts->rx_fifo, msg.data.len);
   return 0;
 }
 
@@ -607,6 +712,7 @@ hss_ts_cleanup (session_t *s, session_cleanup_ntf_t ntf)
   hs->data = 0;
   hs->data_offset = 0;
   hs->free_data = 0;
+  vec_free (hs->headers_buf);
   vec_free (hs->path);
 
   hss_session_free (hs);

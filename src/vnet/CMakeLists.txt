@@ -28,6 +28,7 @@ list(APPEND VNET_SOURCES
   devices/netlink.c
   dev/api.c
   dev/args.c
+  dev/bus/pci.c
   dev/cli.c
   dev/config.c
   dev/counters.c
@@ -36,7 +37,6 @@ list(APPEND VNET_SOURCES
   dev/error.c
   dev/format.c
   dev/handlers.c
-  dev/pci.c
   dev/port.c
   dev/process.c
   dev/queue.c
@@ -74,7 +74,17 @@ list(APPEND VNET_HEADERS
   config.h
   devices/devices.h
   devices/netlink.h
+  dev/api.h
+  dev/args.h
+  dev/bus/pci.h
+  dev/counters.h
   dev/dev.h
+  dev/dev_funcs.h
+  dev/errors.h
+  dev/log.h
+  dev/mgmt.h
+  dev/process.h
+  dev/types.h
   flow/flow.h
   global_funcs.h
   interface/rx_queue_funcs.h
@@ -94,6 +104,7 @@ list(APPEND VNET_HEADERS
   format_fns.h
   ip/ip_format_fns.h
   ip/ip_sas.h
+  ip/vtep.h
   ethernet/ethernet_format_fns.h
   ethernet/ethernet_types_api.h
 )
@@ -813,24 +824,6 @@ list(APPEND VNET_API_FILES
 )
 
 ##############################################################################
-# mpls segment routing
-##############################################################################
-
-list(APPEND VNET_SOURCES
-  srmpls/sr_mpls_policy.c
-  srmpls/sr_mpls_steering.c
-  srmpls/sr_mpls_api.c
-)
-
-list(APPEND VNET_HEADERS
-  srmpls/sr_mpls.h
-)
-
-list(APPEND VNET_API_FILES
-  srmpls/sr_mpls.api
-)
-
-##############################################################################
 # IPFIX / netflow v10
 ##############################################################################
 list(APPEND VNET_SOURCES
@@ -892,23 +885,6 @@ list(APPEND VNET_SOURCES
 
 list(APPEND VNET_HEADERS
   ipfix-export/flow_report_classify.h
-)
-
-##############################################################################
-# lawful intercept
-##############################################################################
-
-list(APPEND VNET_SOURCES
-  lawful-intercept/lawful_intercept.c
-  lawful-intercept/node.c
-)
-
-list(APPEND VNET_MULTIARCH_SOURCES
-  lawful-intercept/node.c
-)
-
-list(APPEND VNET_HEADERS
-  lawful-intercept/lawful_intercept.h
 )
 
 ##############################################################################
@@ -995,6 +971,7 @@ list(APPEND VNET_API_FILES
 # tap interface (with virtio backend)
 ##############################################################################
 
+if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
 list(APPEND VNET_SOURCES
   devices/tap/cli.c
   devices/tap/tap.c
@@ -1008,6 +985,7 @@ list(APPEND VNET_HEADERS
 list(APPEND VNET_API_FILES
   devices/tap/tapv2.api
 )
+endif()
 
 ##############################################################################
 # tap interface (with virtio backend)
@@ -1105,6 +1083,7 @@ list(APPEND VNET_API_FILES feature/feature.api)
 
 # FIXME: unix/hgshm.c
 
+if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
 list(APPEND VNET_SOURCES
   unix/gdb_funcs.c
   unix/tuntap.c
@@ -1113,6 +1092,7 @@ list(APPEND VNET_SOURCES
 list(APPEND VNET_HEADERS
   unix/tuntap.h
 )
+endif()
 
 ##############################################################################
 # FIB
@@ -1175,6 +1155,7 @@ list(APPEND VNET_HEADERS
   fib/fib_path_list.h
   fib/fib_sas.h
   fib/fib_source.h
+  fib/fib_urpf_list.h
 )
 
 list(APPEND VNET_API_FILES
@@ -1422,6 +1403,7 @@ list (APPEND VNET_SOURCES
 
 list(APPEND VNET_HEADERS
   arp/arp.h
+  arp/arp_packet.h
 )
 
 list(APPEND VNET_API_FILES arp/arp.api)
@@ -1473,7 +1455,6 @@ add_vat_test_library(vnet
   ip/ip_test.c
   arp/arp_test.c
   ip6-nd/ip6_nd_test.c
-  srmpls/sr_mpls_test.c
   session/session_test.c
   l2/l2_test.c
   ipsec/ipsec_test.c

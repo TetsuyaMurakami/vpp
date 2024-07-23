@@ -39,6 +39,9 @@
 #include <vlib/vlib.h>
 #include <vlib/unix/unix.h>
 #include <vlib/unix/plugin.h>
+#include <vppinfra/unix.h>
+#include <vppinfra/stack.h>
+#include <vppinfra/format_ansi.h>
 
 #include <limits.h>
 #include <signal.h>
@@ -71,12 +74,10 @@ unix_main_init (vlib_main_t * vm)
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_INIT_FUNCTION (unix_main_init) =
 {
   .runs_before = VLIB_INITS ("unix_input_init"),
 };
-/* *INDENT-ON* */
 
 static int
 unsetup_signal_handlers (int sig)
@@ -98,19 +99,41 @@ int vlib_last_signum = 0;
 uword vlib_last_faulting_address = 0;
 
 static void
+log_one_line ()
+{
+  vec_terminate_c_string (syslog_msg);
+  if (unix_main.flags & (UNIX_FLAG_INTERACTIVE | UNIX_FLAG_NOSYSLOG))
+    fprintf (stderr, "%s\n", syslog_msg);
+  else
+    syslog (LOG_ERR | LOG_DAEMON, "%s", syslog_msg);
+  vec_reset_length (syslog_msg);
+}
+
+static void
 unix_signal_handler (int signum, siginfo_t * si, ucontext_t * uc)
 {
   uword fatal = 0;
+  int color =
+    (unix_main.flags & (UNIX_FLAG_INTERACTIVE | UNIX_FLAG_NOSYSLOG)) &&
+    (unix_main.flags & UNIX_FLAG_NOCOLOR) == 0;
 
   /* These come in handy when looking at core files from optimized images */
   vlib_last_signum = signum;
   vlib_last_faulting_address = (uword) si->si_addr;
 
+  if (color)
+    syslog_msg = format (syslog_msg, ANSI_FG_BR_RED);
+
   syslog_msg = format (syslog_msg, "received signal %U, PC %U",
 		       format_signal, signum, format_ucontext_pc, uc);
 
-  if (signum == SIGSEGV)
+  if (signum == SIGSEGV || signum == SIGBUS)
     syslog_msg = format (syslog_msg, ", faulting address %p", si->si_addr);
+
+  if (color)
+    syslog_msg = format (syslog_msg, ANSI_FG_DEFAULT);
+
+  log_one_line ();
 
   switch (signum)
     {
@@ -121,11 +144,17 @@ unix_signal_handler (int signum, siginfo_t * si, ucontext_t * uc)
        */
       if (unix_main.vlib_main && unix_main.vlib_main->main_loop_exit_set)
 	{
-	  syslog (LOG_ERR | LOG_DAEMON, "received SIGTERM, exiting...");
+	  syslog_msg = format (
+	    syslog_msg, "received SIGTERM from PID %d UID %d, exiting...",
+	    si->si_pid, si->si_uid);
+	  log_one_line ();
 	  unix_main.vlib_main->main_loop_exit_now = 1;
 	}
       else
-	syslog (LOG_ERR | LOG_DAEMON, "IGNORE early SIGTERM...");
+	{
+	  syslog_msg = format (syslog_msg, "IGNORE early SIGTERM...");
+	  log_one_line ();
+	}
       break;
       /* fall through */
     case SIGQUIT:
@@ -145,26 +174,75 @@ unix_signal_handler (int signum, siginfo_t * si, ucontext_t * uc)
       break;
     }
 
-  /* Null terminate. */
-  vec_add1 (syslog_msg, 0);
 
   if (fatal)
     {
-      syslog (LOG_ERR | LOG_DAEMON, "%s", syslog_msg);
+      int skip = 1, index = 0;
 
-      /* Address of callers: outer first, inner last. */
-      uword callers[15];
-      uword n_callers = clib_backtrace (callers, ARRAY_LEN (callers), 0);
-      int i;
-      for (i = 0; i < n_callers; i++)
+      foreach_clib_stack_frame (sf)
 	{
-	  vec_reset_length (syslog_msg);
+	  if (sf->is_signal_frame)
+	    {
+	      int pipefd[2];
+	      const int n_bytes = 20;
+	      u8 *ip = (void *) sf->ip;
 
-	  syslog_msg =
-	    format (syslog_msg, "#%-2d 0x%016lx %U%c", i, callers[i],
-		    format_clib_elf_symbol_with_address, callers[i], 0);
+	      if (pipe (pipefd) == 0)
+		{
+		  /* check PC points to valid memory */
+		  if (write (pipefd[1], ip, n_bytes) == n_bytes)
+		    {
+		      syslog_msg = format (syslog_msg, "Code: ");
+		      if (color)
+			syslog_msg = format (syslog_msg, ANSI_FG_CYAN);
+		      for (int i = 0; i < n_bytes; i++)
+			syslog_msg = format (syslog_msg, " %02x", ip[i]);
+		      if (color)
+			syslog_msg = format (syslog_msg, ANSI_FG_DEFAULT);
+		    }
+		  else
+		    {
+		      syslog_msg = format (
+			syslog_msg, "PC contains invalid memory address");
+		    }
+		  log_one_line ();
+		  foreach_int (i, 0, 1)
+		    close (pipefd[i]);
+		}
+	      skip = 0;
+	    }
 
-	  syslog (LOG_ERR | LOG_DAEMON, "%s", syslog_msg);
+	  if (skip)
+	    continue;
+
+	  syslog_msg = format (syslog_msg, "#%-2d ", index++);
+	  if (color)
+	    syslog_msg = format (syslog_msg, ANSI_FG_BLUE);
+	  syslog_msg = format (syslog_msg, "0x%016lx", sf->ip);
+	  if (color)
+	    syslog_msg = format (syslog_msg, ANSI_FG_DEFAULT);
+
+	  if (sf->name[0])
+	    {
+	      if (color)
+		syslog_msg = format (syslog_msg, ANSI_FG_YELLOW);
+	      syslog_msg =
+		format (syslog_msg, " %s + 0x%x", sf->name, sf->offset);
+	      if (color)
+		syslog_msg = format (syslog_msg, ANSI_FG_DEFAULT);
+	    }
+
+	  log_one_line ();
+
+	  if (sf->file_name)
+	    {
+	      if (color)
+		syslog_msg = format (syslog_msg, ANSI_FG_GREEN);
+	      syslog_msg = format (syslog_msg, "     from %s", sf->file_name);
+	      if (color)
+		syslog_msg = format (syslog_msg, ANSI_FG_DEFAULT);
+	      log_one_line ();
+	    }
 	}
 
       /* have to remove SIGABRT to avoid recursive - os_exit calling abort() */
@@ -176,9 +254,6 @@ unix_signal_handler (int signum, siginfo_t * si, ucontext_t * uc)
       else
 	os_exit (1);
     }
-  else
-    clib_warning ("%s", syslog_msg);
-
 }
 
 static clib_error_t *
@@ -284,14 +359,12 @@ startup_config_process (vlib_main_t * vm,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (startup_config_node,static) = {
     .function = startup_config_process,
     .type = VLIB_NODE_TYPE_PROCESS,
     .name = "startup-config-process",
     .process_log2_n_stack_bytes = 18,
 };
-/* *INDENT-ON* */
 
 static clib_error_t *
 unix_config (vlib_main_t * vm, unformat_input_t * input)
@@ -616,22 +689,23 @@ vlib_unix_main (int argc, char *argv[])
   vlib_main_t *vm = vlib_get_first_main (); /* one and only time for this! */
   unformat_input_t input;
   clib_error_t *e;
-  char buffer[PATH_MAX];
   int i;
 
   vec_validate_aligned (vgm->vlib_mains, 0, CLIB_CACHE_LINE_BYTES);
 
-  if ((i = readlink ("/proc/self/exe", buffer, sizeof (buffer) - 1)) > 0)
+  vgm->exec_path = (char *) os_get_exec_path ();
+
+  if (vgm->exec_path)
     {
-      int j;
-      buffer[i] = 0;
-      vgm->exec_path = vec_new (char, i + 1);
-      clib_memcpy_fast (vgm->exec_path, buffer, i + 1);
-      for (j = i - 1; j > 0; j--)
-	if (buffer[j - 1] == '/')
+      for (i = vec_len (vgm->exec_path) - 1; i > 0; i--)
+	if (vgm->exec_path[i - 1] == '/')
 	  break;
-      vgm->name = vec_new (char, i - j + 1);
-      clib_memcpy_fast (vgm->name, buffer + j, i - j + 1);
+
+      vgm->name = 0;
+
+      vec_add (vgm->name, vgm->exec_path + i, vec_len (vgm->exec_path) - i);
+      vec_add1 (vgm->exec_path, 0);
+      vec_add1 (vgm->name, 0);
     }
   else
     vgm->exec_path = vgm->name = argv[0];

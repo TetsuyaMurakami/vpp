@@ -25,6 +25,7 @@ from vpp_ip_route import (
 )
 from vpp_mpls_tunnel_interface import VppMPLSTunnelInterface
 from vpp_papi import VppEnum
+from config import config
 
 import scapy.compat
 from scapy.packet import Raw
@@ -188,16 +189,17 @@ class TestMPLS(VppTestCase):
         return pkts
 
     def create_stream_ip4(
-        self, src_if, dst_ip, ip_ttl=64, ip_dscp=0, payload_size=None
+        self, src_if, dst_ip, ip_ttl=64, ip_dscp=0, payload_size=None, n=257
     ):
         self.reset_packet_infos()
         pkts = []
-        for i in range(0, 257):
+        for i in range(0, n):
+            dst = dst_ip[i % len(dst_ip)] if isinstance(dst_ip, list) else dst_ip
             info = self.create_packet_info(src_if, src_if)
             payload = self.info_to_payload(info)
             p = (
                 Ether(dst=src_if.local_mac, src=src_if.remote_mac)
-                / IP(src=src_if.remote_ip4, dst=dst_ip, ttl=ip_ttl, tos=ip_dscp)
+                / IP(src=src_if.remote_ip4, dst=dst, ttl=ip_ttl, tos=ip_dscp)
                 / UDP(sport=1234, dport=1234)
                 / Raw(payload)
             )
@@ -207,15 +209,16 @@ class TestMPLS(VppTestCase):
             pkts.append(p)
         return pkts
 
-    def create_stream_ip6(self, src_if, dst_ip, ip_ttl=64, ip_dscp=0):
+    def create_stream_ip6(self, src_if, dst_ip, ip_ttl=64, ip_dscp=0, n=257):
         self.reset_packet_infos()
         pkts = []
-        for i in range(0, 257):
+        for i in range(0, n):
+            dst = dst_ip[i % len(dst_ip)] if isinstance(dst_ip, list) else dst_ip
             info = self.create_packet_info(src_if, src_if)
             payload = self.info_to_payload(info)
             p = (
                 Ether(dst=src_if.local_mac, src=src_if.remote_mac)
-                / IPv6(src=src_if.remote_ip6, dst=dst_ip, hlim=ip_ttl, tc=ip_dscp)
+                / IPv6(src=src_if.remote_ip6, dst=dst, hlim=ip_ttl, tc=ip_dscp)
                 / UDP(sport=1234, dport=1234)
                 / Raw(payload)
             )
@@ -1341,6 +1344,99 @@ class TestMPLS(VppTestCase):
             ],
         )
 
+    def test_tunnel_ecmp(self):
+        """MPLS Tunnel Tests - ECMP"""
+
+        #
+        # Create a tunnel with multiple paths and labels
+        #
+        self.pg0.generate_remote_hosts(2)
+        self.pg0.configure_ipv4_neighbors()
+        mpls_tun = VppMPLSTunnelInterface(
+            self,
+            [
+                VppRoutePath(
+                    self.pg0.remote_hosts[0].ip4,
+                    self.pg0.sw_if_index,
+                    labels=[VppMplsLabel(3)],
+                ),
+                VppRoutePath(
+                    self.pg0.remote_hosts[1].ip4,
+                    self.pg0.sw_if_index,
+                    labels=[VppMplsLabel(44)],
+                ),
+            ],
+        )
+        mpls_tun.add_vpp_config()
+        mpls_tun.admin_up()
+
+        self.vapi.cli("clear trace")
+        pkts = self.create_stream_ip4(
+            self.pg0, ["10.0.0.%d" % i for i in range(NUM_PKTS)], n=NUM_PKTS
+        )
+
+        def send_and_expect_mpls_lb(pkts, path_labels, min_ratio):
+            self.pg0.add_stream(pkts)
+
+            self.pg_enable_capture(self.pg_interfaces)
+            self.pg_start()
+
+            rx = self.pg0.get_capture()
+
+            paths = {}
+            for packet in rx:
+                eth = packet[Ether]
+                self.assertEqual(eth.type, 0x8847)
+
+                mpls = packet[MPLS]
+                labels = []
+                while True:
+                    labels.append(mpls.label)
+                    if mpls.s == 1:
+                        break
+                    mpls = mpls[MPLS].payload
+                self.assertIn(labels, path_labels)
+
+                key = "{}-{}".format(eth.dst, "-".join(str(i) for i in labels))
+                paths[key] = paths.get(key, 0) + 1
+
+            #
+            # Check distribution over multiple mpls paths
+            #
+            self.assertEqual(len(paths), len(path_labels))
+            for n in paths.values():
+                self.assertGreaterEqual(n, NUM_PKTS / len(paths) * min_ratio)
+
+        #
+        # Add labelled route through the new tunnel,
+        # traffic should be balanced over all tunnel paths only.
+        #
+        route_10_0_0_0 = VppIpRoute(
+            self,
+            "10.0.0.0",
+            16,
+            [VppRoutePath("0.0.0.0", mpls_tun._sw_if_index, labels=[33])],
+        )
+        route_10_0_0_0.add_vpp_config()
+        send_and_expect_mpls_lb(pkts, [[33], [44, 33]], 0.85)
+
+        #
+        # Add labelled multipath route through the new tunnel,
+        # traffic should be balanced over both paths first and
+        # then over all tunnel paths.
+        #
+        route_10_0_0_0 = VppIpRoute(
+            self,
+            "10.0.0.0",
+            16,
+            [
+                VppRoutePath("0.0.0.1", mpls_tun._sw_if_index, labels=[33]),
+                VppRoutePath("0.0.0.2", mpls_tun._sw_if_index, labels=[34]),
+            ],
+        )
+        route_10_0_0_0.add_vpp_config()
+        send_and_expect_mpls_lb(pkts, [[33], [44, 33], [34], [44, 34]], 0.70)
+
     def test_mpls_tunnel_many(self):
         """MPLS Multiple Tunnels"""
 
@@ -1425,6 +1521,9 @@ class TestMPLS(VppTestCase):
         rx = self.send_and_expect(self.pg1, tx, self.pg1)
         self.verify_capture_ip6(self.pg0, rx, tx)
 
+    @unittest.skipIf(
+        "ping" in config.excluded_plugins, "Exclude tests requiring Ping plugin"
+    )
     def test_deag(self):
         """MPLS Deagg"""
 
@@ -1923,7 +2022,7 @@ class TestMPLS(VppTestCase):
         binding.add_vpp_config()
 
         tx = (
-            Ether(src=self.pg1.remote_mac, dst=self.pg1.local_mac)
+            Ether(src=self.pg0.remote_mac, dst=self.pg0.local_mac)
             / MPLS(label=44, ttl=64)
             / IP(src=self.pg0.remote_ip4, dst=self.pg0.remote_ip4)
             / UDP(sport=1234, dport=1234)

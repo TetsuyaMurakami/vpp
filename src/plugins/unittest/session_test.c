@@ -107,7 +107,6 @@ placeholder_server_rx_callback (session_t * s)
   return -1;
 }
 
-/* *INDENT-OFF* */
 static session_cb_vft_t placeholder_session_cbs = {
   .session_reset_callback = placeholder_session_reset_callback,
   .session_connected_callback = placeholder_session_connected_callback,
@@ -117,7 +116,6 @@ static session_cb_vft_t placeholder_session_cbs = {
   .add_segment_callback = placeholder_add_segment_callback,
   .del_segment_callback = placeholder_del_segment_callback,
 };
-/* *INDENT-ON* */
 
 static int
 session_create_lookpback (u32 table_id, u32 * sw_if_index,
@@ -135,7 +133,8 @@ session_create_lookpback (u32 table_id, u32 * sw_if_index,
 
   if (table_id != 0)
     {
-      ip_table_create (FIB_PROTOCOL_IP4, table_id, 0, 0);
+      ip_table_create (FIB_PROTOCOL_IP4, table_id, 0 /* is_api */,
+		       1 /* create_mfib */, 0);
       ip_table_bind (FIB_PROTOCOL_IP4, *sw_if_index, table_id);
     }
 
@@ -1625,6 +1624,7 @@ session_test_proxy (vlib_main_t * vm, unformat_input_t * input)
   u16 lcl_port = 1234, rmt_port = 4321;
   app_namespace_t *app_ns;
   int verbose = 0, error = 0;
+  app_listener_t *al;
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
     {
@@ -1699,8 +1699,9 @@ session_test_proxy (vlib_main_t * vm, unformat_input_t * input)
   SESSION_TEST ((tc != 0), "lookup 1.2.3.4 1234 5.6.7.8 4321 should be "
 		"successful");
   s = listen_session_get (tc->s_index);
-  SESSION_TEST ((s->app_index == server_index), "lookup should return"
-		" the server");
+  al = app_listener_get (s->al_index);
+  SESSION_TEST ((al->app_index == server_index), "lookup should return"
+						 " the server");
 
   tc = session_lookup_connection_wt4 (0, &rmt_ip, &rmt_ip, lcl_port, rmt_port,
 				      TRANSPORT_PROTO_TCP, 0, &is_filtered);
@@ -2073,6 +2074,66 @@ session_test_mq_basic (vlib_main_t * vm, unformat_input_t * input)
   return 0;
 }
 
+static f32
+session_get_memory_usage (void)
+{
+  clib_mem_heap_t *heap = clib_mem_get_per_cpu_heap ();
+  u8 *s = 0;
+  char *ss;
+  f32 used = 0.0;
+
+  s = format (s, "%U\n", format_clib_mem_heap, heap, 0);
+  ss = strstr ((char *) s, "used:");
+  if (ss)
+    sscanf (ss, "used: %f", &used);
+  else
+    clib_warning ("substring 'used:' not found from show memory");
+  vec_free (s);
+  return (used);
+}
+
+static int
+session_test_enable_disable (vlib_main_t *vm, unformat_input_t *input)
+{
+  u32 iteration = 100, i;
+  uword was_enabled;
+  f32 was_using, now_using;
+
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (input, "repeat %d", &iteration))
+	;
+      else
+	{
+	  vlib_cli_output (vm, "parse error: '%U'", format_unformat_error,
+			   input);
+	  return -1;
+	}
+    }
+
+  was_enabled = clib_mem_trace_enable_disable (0);
+  /* warm up */
+  for (i = 0; i < 10; i++)
+    {
+      vnet_session_enable_disable (vm, 0);
+      vnet_session_enable_disable (vm, 1);
+    }
+  was_using = session_get_memory_usage ();
+
+  for (i = 0; i < iteration; i++)
+    {
+      vnet_session_enable_disable (vm, 0);
+      vnet_session_enable_disable (vm, 1);
+    }
+  now_using = session_get_memory_usage ();
+
+  clib_mem_trace_enable_disable (was_enabled);
+  SESSION_TEST ((was_using == now_using), "was using %.2fM, now using %.2fM",
+		was_using, now_using);
+
+  return 0;
+}
+
 static clib_error_t *
 session_test (vlib_main_t * vm,
 	      unformat_input_t * input, vlib_cli_command_t * cmd_arg)
@@ -2099,6 +2160,8 @@ session_test (vlib_main_t * vm,
 	res = session_test_mq_speed (vm, input);
       else if (unformat (input, "mq-basic"))
 	res = session_test_mq_basic (vm, input);
+      else if (unformat (input, "enable-disable"))
+	res = session_test_enable_disable (vm, input);
       else if (unformat (input, "all"))
 	{
 	  if ((res = session_test_basic (vm, input)))
@@ -2117,6 +2180,8 @@ session_test (vlib_main_t * vm,
 	    goto done;
 	  if ((res = session_test_mq_basic (vm, input)))
 	    goto done;
+	  if ((res = session_test_enable_disable (vm, input)))
+	    goto done;
 	}
       else
 	break;
@@ -2128,14 +2193,12 @@ done:
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (tcp_test_command, static) =
 {
   .path = "test session",
   .short_help = "internal session unit tests",
   .function = session_test,
 };
-/* *INDENT-ON* */
 
 /*
  * fd.io coding-style-patch-verification: ON

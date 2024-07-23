@@ -97,6 +97,29 @@ session_send_io_evt_to_thread_custom (void *data, u32 thread_index,
 }
 
 int
+session_program_tx_io_evt (session_handle_tu_t sh, session_evt_type_t evt_type)
+{
+  return session_send_evt_to_thread ((void *) &sh.session_index, 0,
+				     (u32) sh.thread_index, evt_type);
+}
+
+int
+session_program_rx_io_evt (session_handle_tu_t sh)
+{
+  if (sh.thread_index == vlib_get_thread_index ())
+    {
+      session_t *s = session_get_from_handle (sh);
+      return session_enqueue_notify (s);
+    }
+  else
+    {
+      return session_send_evt_to_thread ((void *) &sh.session_index, 0,
+					 (u32) sh.thread_index,
+					 SESSION_IO_EVT_BUILTIN_RX);
+    }
+}
+
+int
 session_send_ctrl_evt_to_thread (session_t * s, session_evt_type_t evt_type)
 {
   /* only events supported are disconnect, shutdown and reset */
@@ -209,7 +232,7 @@ session_alloc (u32 thread_index)
   clib_memset (s, 0, sizeof (*s));
   s->session_index = s - wrk->sessions;
   s->thread_index = thread_index;
-  s->app_index = APP_INVALID_INDEX;
+  s->al_index = APP_INVALID_INDEX;
 
   return s;
 }
@@ -266,7 +289,7 @@ session_cleanup_notify (session_t * s, session_cleanup_ntf_t ntf)
   app_worker_t *app_wrk;
 
   app_wrk = app_worker_get_if_valid (s->app_wrk_index);
-  if (!app_wrk)
+  if (PREDICT_FALSE (!app_wrk))
     {
       if (ntf == SESSION_CLEANUP_TRANSPORT)
 	return;
@@ -318,7 +341,7 @@ session_cleanup_half_open (session_handle_t ho_handle)
 	}
       /* Migrated transports are no longer half-opens */
       transport_cleanup (session_get_transport_proto (ho),
-			 ho->connection_index, ho->app_index /* overloaded */);
+			 ho->connection_index, ho->al_index /* overloaded */);
     }
   else if (ho->session_state != SESSION_STATE_TRANSPORT_DELETED)
     {
@@ -410,8 +433,8 @@ session_half_open_migrated_notify (transport_connection_t *tc)
       return -1;
     }
   ho->connection_index = tc->c_index;
-  /* Overload app index for half-open with new thread */
-  ho->app_index = tc->thread_index;
+  /* Overload al_index for half-open with new thread */
+  ho->al_index = tc->thread_index;
   return 0;
 }
 
@@ -705,7 +728,7 @@ session_main_flush_enqueue_events (transport_proto_t transport_proto,
   session_worker_t *wrk = session_main_get_worker (thread_index);
   session_handle_t *handles;
   session_t *s;
-  u32 i;
+  u32 i, is_cl;
 
   handles = wrk->session_to_enqueue[transport_proto];
 
@@ -714,8 +737,12 @@ session_main_flush_enqueue_events (transport_proto_t transport_proto,
       s = session_get_from_handle (handles[i]);
       session_fifo_tuning (s, s->rx_fifo, SESSION_FT_ACTION_ENQUEUED,
 			   0 /* TODO/not needed */);
-      session_enqueue_notify_inline (s,
-				     s->thread_index != thread_index ? 1 : 0);
+      is_cl =
+	s->thread_index != thread_index || (s->flags & SESSION_F_IS_CLESS);
+      if (!is_cl)
+	session_enqueue_notify_inline (s, 0);
+      else
+	session_enqueue_notify_inline (s, 1);
     }
 
   vec_reset_length (handles);
@@ -863,11 +890,22 @@ session_enqueue_dgram_connection (session_t *s, session_dgram_hdr_t *hdr,
 }
 
 int
+session_enqueue_dgram_connection2 (session_t *s, session_dgram_hdr_t *hdr,
+				   vlib_buffer_t *b, u8 proto, u8 queue_event)
+{
+  return session_enqueue_dgram_connection_inline (s, hdr, b, proto,
+						  queue_event, 1 /* is_cl */);
+}
+
+int
 session_enqueue_dgram_connection_cl (session_t *s, session_dgram_hdr_t *hdr,
 				     vlib_buffer_t *b, u8 proto,
 				     u8 queue_event)
 {
-  return session_enqueue_dgram_connection_inline (s, hdr, b, proto,
+  session_t *awls;
+
+  awls = app_listener_select_wrk_cl_session (s, hdr);
+  return session_enqueue_dgram_connection_inline (awls, hdr, b, proto,
 						  queue_event, 1 /* is_cl */);
 }
 
@@ -1180,6 +1218,9 @@ session_transport_closed_notify (transport_connection_t * tc)
   if (!(s = session_get_if_valid (tc->s_index, tc->thread_index)))
     return;
 
+  if (s->session_state >= SESSION_STATE_TRANSPORT_CLOSED)
+    return;
+
   /* Transport thinks that app requested close but it actually didn't.
    * Can happen for tcp:
    * 1)if fin and rst are received in close succession.
@@ -1345,6 +1386,8 @@ session_open_cl (session_endpoint_cfg_t *rmt, session_handle_t *rsh)
   s->app_wrk_index = app_wrk->wrk_index;
   s->opaque = rmt->opaque;
   session_set_state (s, SESSION_STATE_OPENED);
+  if (transport_connection_is_cless (tc))
+    s->flags |= SESSION_F_IS_CLESS;
   if (app_worker_init_connected (app_wrk, s))
     {
       session_free (s);
@@ -1412,13 +1455,11 @@ session_open_app (session_endpoint_cfg_t *rmt, session_handle_t *rsh)
 typedef int (*session_open_service_fn) (session_endpoint_cfg_t *,
 					session_handle_t *);
 
-/* *INDENT-OFF* */
 static session_open_service_fn session_open_srv_fns[TRANSPORT_N_SERVICES] = {
   session_open_vc,
   session_open_cl,
   session_open_app,
 };
-/* *INDENT-ON* */
 
 /**
  * Ask transport to open connection to remote transport endpoint.
@@ -1470,6 +1511,8 @@ session_listen (session_t * ls, session_endpoint_cfg_t * sep)
   ls = listen_session_get (s_index);
   ls->connection_index = tc_index;
   ls->opaque = sep->opaque;
+  if (transport_connection_is_cless (session_get_transport (ls)))
+    ls->flags |= SESSION_F_IS_CLESS;
 
   return 0;
 }
@@ -1569,6 +1612,37 @@ session_reset (session_t * s)
   session_program_transport_ctrl_evt (s, SESSION_CTRL_EVT_RESET);
 }
 
+void
+session_detach_app (session_t *s)
+{
+  if (s->session_state < SESSION_STATE_TRANSPORT_CLOSING)
+    {
+      session_close (s);
+    }
+  else if (s->session_state < SESSION_STATE_TRANSPORT_DELETED)
+    {
+      transport_connection_t *tc;
+
+      /* Transport is closing but it's not yet deleted. Confirm close and
+       * subsequently detach transport from session and enqueue a session
+       * cleanup notification. Transport closed and cleanup notifications are
+       * going to be dropped by session layer apis */
+      transport_close (session_get_transport_proto (s), s->connection_index,
+		       s->thread_index);
+      tc = session_get_transport (s);
+      tc->s_index = SESSION_INVALID_INDEX;
+      session_set_state (s, SESSION_STATE_TRANSPORT_DELETED);
+      session_cleanup_notify (s, SESSION_CLEANUP_SESSION);
+    }
+  else
+    {
+      session_cleanup_notify (s, SESSION_CLEANUP_SESSION);
+    }
+
+  s->flags |= SESSION_F_APP_CLOSED;
+  s->app_wrk_index = APP_INVALID_INDEX;
+}
+
 /**
  * Notify transport the session can be half-disconnected.
  *
@@ -1601,8 +1675,10 @@ session_transport_close (session_t * s)
     {
       if (s->session_state == SESSION_STATE_TRANSPORT_CLOSED)
 	session_set_state (s, SESSION_STATE_CLOSED);
-      /* If transport is already deleted, just free the session */
-      else if (s->session_state >= SESSION_STATE_TRANSPORT_DELETED)
+      /* If transport is already deleted, just free the session. Half-opens
+       * expected to be already cleaning up at this point */
+      else if (s->session_state >= SESSION_STATE_TRANSPORT_DELETED &&
+	       !(s->flags & SESSION_F_HALF_OPEN))
 	session_program_cleanup (s);
       return;
     }
@@ -1629,7 +1705,8 @@ session_transport_reset (session_t * s)
     {
       if (s->session_state == SESSION_STATE_TRANSPORT_CLOSED)
 	session_set_state (s, SESSION_STATE_CLOSED);
-      else if (s->session_state >= SESSION_STATE_TRANSPORT_DELETED)
+      else if (s->session_state >= SESSION_STATE_TRANSPORT_DELETED &&
+	       !(s->flags & SESSION_F_HALF_OPEN))
 	session_program_cleanup (s);
       return;
     }
@@ -1749,14 +1826,12 @@ session_get_original_dst (transport_endpoint_t *i2o_src,
 			    original_dst_port);
 }
 
-/* *INDENT-OFF* */
 static session_fifo_rx_fn *session_tx_fns[TRANSPORT_TX_N_FNS] = {
     session_tx_fifo_peek_and_snd,
     session_tx_fifo_dequeue_and_snd,
     session_tx_fifo_dequeue_internal,
     session_tx_fifo_dequeue_and_snd
 };
-/* *INDENT-ON* */
 
 void
 session_register_transport (transport_proto_t transport_proto,
@@ -1810,7 +1885,8 @@ session_register_update_time_fn (session_update_time_fn fn, u8 is_add)
     }
   else
     {
-      vec_del1 (smm->update_time_fns, fi_pos);
+      if (found)
+	vec_del1 (smm->update_time_fns, fi_pos);
     }
 }
 
@@ -2092,6 +2168,16 @@ session_node_enable_dma (u8 is_en, int n_vlibs)
     }
 }
 
+static void
+session_main_start_q_process (vlib_main_t *vm, vlib_node_state_t state)
+{
+  vlib_node_t *n;
+
+  vlib_node_set_state (vm, session_queue_process_node.index, state);
+  n = vlib_get_node (vm, session_queue_process_node.index);
+  vlib_start_process (vm, n->runtime_index);
+}
+
 void
 session_node_enable_disable (u8 is_en)
 {
@@ -2099,7 +2185,6 @@ session_node_enable_disable (u8 is_en)
   u8 state = is_en ? VLIB_NODE_STATE_POLLING : VLIB_NODE_STATE_DISABLED;
   session_main_t *sm = &session_main;
   vlib_main_t *vm;
-  vlib_node_t *n;
   int n_vlibs, i;
 
   n_vlibs = vlib_get_n_threads ();
@@ -2113,10 +2198,7 @@ session_node_enable_disable (u8 is_en)
 	  if (is_en)
 	    {
 	      session_main_get_worker (0)->state = SESSION_WRK_INTERRUPT;
-	      vlib_node_set_state (vm, session_queue_process_node.index,
-				   state);
-	      n = vlib_get_node (vm, session_queue_process_node.index);
-	      vlib_start_process (vm, n->runtime_index);
+	      session_main_start_q_process (vm, state);
 	    }
 	  else
 	    {

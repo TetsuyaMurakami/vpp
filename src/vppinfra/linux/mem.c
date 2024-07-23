@@ -31,7 +31,6 @@
 #include <vppinfra/bitmap.h>
 #include <vppinfra/format.h>
 #include <vppinfra/clib_error.h>
-#include <vppinfra/linux/sysfs.h>
 
 #ifndef F_LINUX_SPECIFIC_BASE
 #define F_LINUX_SPECIFIC_BASE 1024
@@ -102,11 +101,13 @@ legacy_get_log2_default_hugepage_size (void)
 void
 clib_mem_main_init (void)
 {
+  unsigned long nodemask = 0, maxnode = CLIB_MAX_NUMAS;
+  unsigned long flags = MPOL_F_MEMS_ALLOWED;
   clib_mem_main_t *mm = &clib_mem_main;
   long sysconf_page_size;
   uword page_size;
-  void *va;
-  int fd;
+  void *va = 0;
+  int fd, mode;
 
   if (mm->log2_page_sz != CLIB_MEM_PAGE_SZ_UNKNOWN)
     return;
@@ -132,23 +133,8 @@ clib_mem_main_init (void)
   mm->log2_sys_default_hugepage_sz = mm->log2_default_hugepage_sz;
 
   /* numa nodes */
-  va = mmap (0, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE |
-	     MAP_ANONYMOUS, -1, 0);
-  if (va == MAP_FAILED)
-    return;
-
-  if (mlock (va, page_size))
-    goto done;
-
-  for (int i = 0; i < CLIB_MAX_NUMAS; i++)
-    {
-      int status;
-      if (syscall (__NR_move_pages, 0, 1, &va, &i, &status, 0) == 0)
-	mm->numa_node_bitmap |= 1ULL << i;
-    }
-
-done:
-  munmap (va, page_size);
+  if (syscall (__NR_get_mempolicy, &mode, &nodemask, maxnode, va, flags) == 0)
+    mm->numa_node_bitmap = nodemask;
 }
 
 __clib_export u64
@@ -531,6 +517,7 @@ clib_mem_get_page_stats (void *start, clib_mem_page_sz_t log2_page_size,
 {
   int i, *status = 0;
   void **ptr = 0;
+  unsigned char incore;
 
   log2_page_size = clib_mem_log2_page_size_validate (log2_page_size);
 
@@ -552,6 +539,19 @@ clib_mem_get_page_stats (void *start, clib_mem_page_sz_t log2_page_size,
 
   for (i = 0; i < n_pages; i++)
     {
+      /* move_pages() returns -ENONET in status for huge pages on 5.19+ kernel.
+       * Retry with get_mempolicy() to obtain NUMA node info only if the pages
+       * are allocated and in memory, which is checked by mincore(). */
+      if (status[i] == -ENOENT &&
+	  syscall (__NR_mincore, ptr[i], 1, &incore) == 0 && (incore & 1) != 0)
+	{
+	  if (syscall (__NR_get_mempolicy, &status[i], 0, 0, ptr[i],
+		       MPOL_F_NODE | MPOL_F_ADDR) != 0)
+	    {
+	      /* if get_mempolicy fails, keep the original value in status */
+	      status[i] = -ENONET;
+	    }
+	}
       if (status[i] >= 0 && status[i] < CLIB_MAX_NUMAS)
 	{
 	  stats->mapped++;

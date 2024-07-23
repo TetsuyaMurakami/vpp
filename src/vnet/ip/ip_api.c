@@ -106,7 +106,6 @@ vl_api_ip_table_dump_t_handler (vl_api_ip_table_dump_t * mp)
   if (!reg)
     return;
 
-  /* *INDENT-OFF* */
   pool_foreach (fib_table, ip4_main.fibs)
    {
     send_ip_table_details(am, reg, mp->context, fib_table);
@@ -118,7 +117,6 @@ vl_api_ip_table_dump_t_handler (vl_api_ip_table_dump_t * mp)
       continue;
     send_ip_table_details(am, reg, mp->context, fib_table);
   }
-  /* *INDENT-ON* */
 }
 
 typedef struct vl_api_ip_fib_dump_walk_ctx_t_
@@ -326,7 +324,6 @@ vl_api_ip_mtable_dump_t_handler (vl_api_ip_mtable_dump_t * mp)
   if (!reg)
     return;
 
-  /* *INDENT-OFF* */
   pool_foreach (mfib_table, ip4_main.mfibs)
    {
       send_ip_mtable_details (reg, mp->context, mfib_table);
@@ -335,7 +332,6 @@ vl_api_ip_mtable_dump_t_handler (vl_api_ip_mtable_dump_t * mp)
    {
       send_ip_mtable_details (reg, mp->context, mfib_table);
   }
-  /* *INDENT-ON* */
 }
 
 typedef struct vl_api_ip_mfib_dump_ctx_t_
@@ -640,7 +636,8 @@ vl_api_ip_table_add_del_t_handler (vl_api_ip_table_add_del_t * mp)
 
   if (mp->is_add)
     {
-      ip_table_create (fproto, table_id, 1, mp->table.name);
+      ip_table_create (fproto, table_id, 1 /* is_api */, 1 /* create_mfib */,
+		       mp->table.name);
     }
   else
     {
@@ -648,6 +645,28 @@ vl_api_ip_table_add_del_t_handler (vl_api_ip_table_add_del_t * mp)
     }
 
   REPLY_MACRO (VL_API_IP_TABLE_ADD_DEL_REPLY);
+}
+
+void
+vl_api_ip_table_add_del_v2_t_handler (vl_api_ip_table_add_del_v2_t *mp)
+{
+  vl_api_ip_table_add_del_v2_reply_t *rmp;
+  fib_protocol_t fproto =
+    (mp->table.is_ip6 ? FIB_PROTOCOL_IP6 : FIB_PROTOCOL_IP4);
+  u32 table_id = ntohl (mp->table.table_id);
+  int rv = 0;
+
+  if (mp->is_add)
+    {
+      ip_table_create (fproto, table_id, 1 /* is_api */, mp->create_mfib,
+		       mp->table.name);
+    }
+  else
+    {
+      ip_table_delete (fproto, table_id, 1);
+    }
+
+  REPLY_MACRO (VL_API_IP_TABLE_ADD_DEL_V2_REPLY);
 }
 
 void
@@ -665,7 +684,8 @@ vl_api_ip_table_allocate_t_handler (vl_api_ip_table_allocate_t *mp)
   if (~0 == table_id)
     rv = VNET_API_ERROR_EAGAIN;
   else
-    ip_table_create (fproto, table_id, 1, mp->table.name);
+    ip_table_create (fproto, table_id, 1 /* is_api */, 1 /* create_mfib */,
+		     mp->table.name);
 
   REPLY_MACRO2 (VL_API_IP_TABLE_ALLOCATE_REPLY, {
     clib_memcpy_fast (&rmp->table, &mp->table, sizeof (mp->table));
@@ -782,12 +802,10 @@ vl_api_ip_route_add_del_t_handler (vl_api_ip_route_add_del_t * mp)
 
   rv = ip_route_add_del_t_handler (mp, &stats_index);
 
-  /* *INDENT-OFF* */
   REPLY_MACRO2 (VL_API_IP_ROUTE_ADD_DEL_REPLY,
   ({
     rmp->stats_index = htonl (stats_index);
   }))
-  /* *INDENT-ON* */
 }
 
 void
@@ -839,7 +857,6 @@ vl_api_ip_route_lookup_t_handler (vl_api_ip_route_lookup_t * mp)
 	}
     }
 
-  /* *INDENT-OFF* */
   REPLY_MACRO3_ZERO(VL_API_IP_ROUTE_LOOKUP_REPLY,
                     npaths * sizeof (*fp),
   ({
@@ -859,7 +876,6 @@ vl_api_ip_route_lookup_t_handler (vl_api_ip_route_lookup_t * mp)
           }
       }
   }));
-  /* *INDENT-ON* */
   vec_free (rpaths);
 }
 
@@ -923,8 +939,8 @@ vl_api_ip_route_lookup_v2_t_handler (vl_api_ip_route_lookup_v2_t *mp)
 }
 
 void
-ip_table_create (fib_protocol_t fproto,
-		 u32 table_id, u8 is_api, const u8 * name)
+ip_table_create (fib_protocol_t fproto, u32 table_id, u8 is_api,
+		 u8 create_mfib, const u8 *name)
 {
   u32 fib_index, mfib_index;
   vnet_main_t *vnm = vnet_get_main ();
@@ -944,16 +960,23 @@ ip_table_create (fib_protocol_t fproto,
        * their own unicast tables.
        */
       fib_index = fib_table_find (fproto, table_id);
-      mfib_index = mfib_table_find (fproto, table_id);
-
       /*
        * Always try to re-lock in case the fib was deleted by an API call
        * but was not yet freed because some other locks were held
        */
       fib_table_find_or_create_and_lock_w_name (
 	fproto, table_id, (is_api ? FIB_SOURCE_API : FIB_SOURCE_CLI), name);
-      mfib_table_find_or_create_and_lock_w_name (
-	fproto, table_id, (is_api ? MFIB_SOURCE_API : MFIB_SOURCE_CLI), name);
+
+      if (create_mfib)
+	{
+	  /* same for mfib, if needs be */
+	  mfib_index = mfib_table_find (fproto, table_id);
+	  mfib_table_find_or_create_and_lock_w_name (
+	    fproto, table_id, (is_api ? MFIB_SOURCE_API : MFIB_SOURCE_CLI),
+	    name);
+	}
+      else
+	mfib_index = 0;
 
       if ((~0 == fib_index) || (~0 == mfib_index))
 	call_elf_section_ip_table_callbacks (vnm, table_id, 1 /* is_add */ ,
@@ -1049,12 +1072,10 @@ vl_api_ip_mroute_add_del_t_handler (vl_api_ip_mroute_add_del_t * mp)
 
   rv = api_mroute_add_del_t_handler (mp, &stats_index);
 
-  /* *INDENT-OFF* */
   REPLY_MACRO2 (VL_API_IP_MROUTE_ADD_DEL_REPLY,
   ({
     rmp->stats_index = htonl (stats_index);
   }));
-  /* *INDENT-ON* */
 }
 
 static void
@@ -1117,7 +1138,6 @@ vl_api_ip_address_dump_t_handler (vl_api_ip_address_dump_t * mp)
 
   if (mp->is_ipv6)
     {
-      /* *INDENT-OFF* */
       /* Do not send subnet details of the IP-interface for
        * unnumbered interfaces. otherwise listening clients
        * will be confused that the subnet is applied on more
@@ -1131,11 +1151,9 @@ vl_api_ip_address_dump_t_handler (vl_api_ip_address_dump_t * mp)
         };
         send_ip_address_details(am, reg, &pfx, sw_if_index, mp->context);
       }));
-      /* *INDENT-ON* */
     }
   else
     {
-      /* *INDENT-OFF* */
       foreach_ip_interface_address (lm4, ia, sw_if_index, 0,
       ({
         fib_prefix_t pfx = {
@@ -1146,7 +1164,6 @@ vl_api_ip_address_dump_t_handler (vl_api_ip_address_dump_t * mp)
 
         send_ip_address_details(am, reg, &pfx, sw_if_index, mp->context);
       }));
-      /* *INDENT-ON* */
     }
 
   BAD_SW_IF_INDEX_LABEL;
@@ -1203,7 +1220,6 @@ vl_api_ip_unnumbered_dump_t_handler (vl_api_ip_unnumbered_dump_t * mp)
     }
   else
     {
-      /* *INDENT-OFF* */
       pool_foreach (si, im->sw_interfaces)
        {
         if ((si->flags & VNET_SW_INTERFACE_FLAG_UNNUMBERED))
@@ -1214,7 +1230,6 @@ vl_api_ip_unnumbered_dump_t_handler (vl_api_ip_unnumbered_dump_t * mp)
                                        mp->context);
           }
       }
-      /* *INDENT-ON* */
     }
 
   BAD_SW_IF_INDEX_LABEL;
@@ -1238,12 +1253,10 @@ vl_api_ip_dump_t_handler (vl_api_ip_dump_t * mp)
   /* Gather interfaces. */
   sorted_sis = vec_new (vnet_sw_interface_t, pool_elts (im->sw_interfaces));
   vec_set_len (sorted_sis, 0);
-  /* *INDENT-OFF* */
   pool_foreach (si, im->sw_interfaces)
    {
     vec_add1 (sorted_sis, si[0]);
   }
-  /* *INDENT-ON* */
 
   vec_foreach (si, sorted_sis)
   {
@@ -1673,9 +1686,10 @@ vl_api_ip_table_replace_begin_t_handler (vl_api_ip_table_replace_begin_t * mp)
     rv = VNET_API_ERROR_NO_SUCH_FIB;
   else
     {
+      u32 mfib_index = mfib_table_find (fproto, ntohl (mp->table.table_id));
       fib_table_mark (fib_index, fproto, FIB_SOURCE_API);
-      mfib_table_mark (mfib_table_find (fproto, ntohl (mp->table.table_id)),
-		       fproto, MFIB_SOURCE_API);
+      if (mfib_index != INDEX_INVALID)
+	mfib_table_mark (mfib_index, fproto, MFIB_SOURCE_API);
     }
   REPLY_MACRO (VL_API_IP_TABLE_REPLACE_BEGIN_REPLY);
 }
@@ -1695,10 +1709,10 @@ vl_api_ip_table_replace_end_t_handler (vl_api_ip_table_replace_end_t * mp)
     rv = VNET_API_ERROR_NO_SUCH_FIB;
   else
     {
+      u32 mfib_index = mfib_table_find (fproto, ntohl (mp->table.table_id));
       fib_table_sweep (fib_index, fproto, FIB_SOURCE_API);
-      mfib_table_sweep (mfib_table_find
-			(fproto, ntohl (mp->table.table_id)), fproto,
-			MFIB_SOURCE_API);
+      if (mfib_index != INDEX_INVALID)
+	mfib_table_sweep (mfib_index, fproto, MFIB_SOURCE_API);
     }
   REPLY_MACRO (VL_API_IP_TABLE_REPLACE_END_REPLY);
 }
@@ -1721,9 +1735,9 @@ vl_api_ip_table_flush_t_handler (vl_api_ip_table_flush_t * mp)
       vnet_main_t *vnm = vnet_get_main ();
       vnet_interface_main_t *im = &vnm->interface_main;
       vnet_sw_interface_t *si;
+      u32 mfib_index;
 
       /* Shut down interfaces in this FIB / clean out intfc routes */
-      /* *INDENT-OFF* */
       pool_foreach (si, im->sw_interfaces)
        {
         if (fib_index == fib_table_get_index_for_sw_if_index (fproto,
@@ -1734,11 +1748,12 @@ vl_api_ip_table_flush_t_handler (vl_api_ip_table_flush_t * mp)
             vnet_sw_interface_set_flags (vnm, si->sw_if_index, flags);
           }
       }
-      /* *INDENT-ON* */
 
       fib_table_flush (fib_index, fproto, FIB_SOURCE_API);
-      mfib_table_flush (mfib_table_find (fproto, ntohl (mp->table.table_id)),
-			fproto, MFIB_SOURCE_API);
+
+      mfib_index = mfib_table_find (fproto, ntohl (mp->table.table_id));
+      if (mfib_index != INDEX_INVALID)
+	mfib_table_flush (mfib_index, fproto, MFIB_SOURCE_API);
     }
 
   REPLY_MACRO (VL_API_IP_TABLE_FLUSH_REPLY);
@@ -2148,6 +2163,8 @@ ip_api_hookup (vlib_main_t * vm)
     am, REPLY_MSG_ID_BASE + VL_API_IP_ROUTE_ADD_DEL_V2, 1);
   vl_api_set_msg_thread_safe (
     am, REPLY_MSG_ID_BASE + VL_API_IP_ROUTE_ADD_DEL_V2_REPLY, 1);
+  vl_api_set_msg_thread_safe (am, REPLY_MSG_ID_BASE + VL_API_IP_ADDRESS_DUMP,
+			      1);
 
   return 0;
 }

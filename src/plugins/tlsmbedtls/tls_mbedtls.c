@@ -91,7 +91,8 @@ mbedtls_ctx_free (tls_ctx_t * ctx)
 {
   mbedtls_ctx_t *mc = (mbedtls_ctx_t *) ctx;
 
-  if (mc->ssl.state == MBEDTLS_SSL_HANDSHAKE_OVER && !ctx->is_passive_close)
+  if (mc->ssl.state == MBEDTLS_SSL_HANDSHAKE_OVER &&
+      !(ctx->flags & TLS_CONN_F_PASSIVE_CLOSE))
     mbedtls_ssl_close_notify (&mc->ssl);
   if (mc->ssl.conf->endpoint == MBEDTLS_SSL_IS_SERVER)
     {
@@ -551,6 +552,21 @@ mbedtls_transport_close (tls_ctx_t * ctx)
 }
 
 static int
+mbedtls_transport_reset (tls_ctx_t *ctx)
+{
+  if (!mbedtls_handshake_is_over (ctx))
+    {
+      session_close (session_get_from_handle (ctx->tls_session_handle));
+      return 0;
+    }
+
+  session_transport_reset_notify (&ctx->connection);
+  session_transport_closed_notify (&ctx->connection);
+  tls_disconnect_transport (ctx);
+  return 0;
+}
+
+static int
 mbedtls_app_close (tls_ctx_t * ctx)
 {
   tls_disconnect_transport (ctx);
@@ -578,6 +594,7 @@ const static tls_engine_vft_t mbedtls_engine = {
   .ctx_start_listen = mbedtls_start_listen,
   .ctx_stop_listen = mbedtls_stop_listen,
   .ctx_transport_close = mbedtls_transport_close,
+  .ctx_transport_reset = mbedtls_transport_reset,
   .ctx_app_close = mbedtls_app_close,
   .ctx_reinit_cachain = mbedtls_reinit_ca_chain,
 };
@@ -671,19 +688,15 @@ tls_mbedtls_init (vlib_main_t * vm)
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_INIT_FUNCTION (tls_mbedtls_init) =
 {
   .runs_after = VLIB_INITS("tls_init"),
 };
-/* *INDENT-ON* */
 
-/* *INDENT-OFF* */
 VLIB_PLUGIN_REGISTER () = {
     .version = VPP_BUILD_VER,
     .description = "Transport Layer Security (TLS) Engine, Mbedtls Based",
 };
-/* *INDENT-ON* */
 
 /*
  * fd.io coding-style-patch-verification: ON

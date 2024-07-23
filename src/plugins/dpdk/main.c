@@ -13,13 +13,6 @@
  * limitations under the License.
  */
 
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <linux/vfio.h>
-#include <sys/ioctl.h>
-
 #include <vnet/vnet.h>
 #include <vnet/plugin/plugin.h>
 #include <dpdk/device/dpdk.h>
@@ -87,7 +80,6 @@ static clib_error_t * dpdk_main_init (vlib_main_t * vm)
   return error;
 }
 
-/* *INDENT-OFF* */
 VLIB_INIT_FUNCTION (dpdk_main_init) =
 {
     .runs_after = VLIB_INITS("dpdk_init"),
@@ -97,4 +89,3 @@ VLIB_PLUGIN_REGISTER () = {
     .version = VPP_BUILD_VER,
     .description = "Data Plane Development Kit (DPDK)",
 };
-/* *INDENT-ON* */

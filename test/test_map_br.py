@@ -5,6 +5,7 @@ import unittest
 from framework import VppTestCase
 from asfframework import VppTestRunner
 from vpp_ip_route import VppIpRoute, VppRoutePath
+from config import config
 
 from scapy.layers.l2 import Ether
 from scapy.layers.inet import IP, UDP, ICMP, TCP, IPerror, UDPerror
@@ -12,6 +13,7 @@ from scapy.layers.inet6 import IPv6, ICMPv6TimeExceeded, ICMPv6PacketTooBig
 from scapy.layers.inet6 import ICMPv6EchoRequest, ICMPv6EchoReply, IPerror6
 
 
+@unittest.skipIf("map" in config.excluded_plugins, "Exclude MAP plugin tests")
 class TestMAPBR(VppTestCase):
     """MAP-T Test Cases"""
 
@@ -280,7 +282,7 @@ class TestMAPBR(VppTestCase):
     def test_map_t_echo_request_ip4_to_ip6(self):
         """MAP-T echo request IPv4 -> IPv6"""
 
-        eth = Ether(src=self.pg1.remote_mac, dst=self.pg1.local_mac)
+        eth = Ether(src=self.pg0.remote_mac, dst=self.pg0.local_mac)
         ip = IP(src=self.pg0.remote_ip4, dst=self.ipv4_map_address)
         icmp = ICMP(type="echo-request", id=self.ipv6_udp_or_tcp_map_port)
         payload = "H" * 10
@@ -306,7 +308,7 @@ class TestMAPBR(VppTestCase):
     def test_map_t_echo_reply_ip4_to_ip6(self):
         """MAP-T echo reply IPv4 -> IPv6"""
 
-        eth = Ether(src=self.pg1.remote_mac, dst=self.pg1.local_mac)
+        eth = Ether(src=self.pg0.remote_mac, dst=self.pg0.local_mac)
         ip = IP(src=self.pg0.remote_ip4, dst=self.ipv4_map_address)
         icmp = ICMP(type="echo-reply", id=self.ipv6_udp_or_tcp_map_port)
         payload = "H" * 10

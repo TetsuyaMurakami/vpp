@@ -54,7 +54,7 @@ import re
 def recv_fd(sock):
     """Get file descriptor for memory map"""
     fds = array.array("i")  # Array of ints
-    _, ancdata, _, _ = sock.recvmsg(0, socket.CMSG_LEN(4))
+    _, ancdata, _, _ = sock.recvmsg(0, socket.CMSG_SPACE(4))
     for cmsg_level, cmsg_type, cmsg_data in ancdata:
         if cmsg_level == socket.SOL_SOCKET and cmsg_type == socket.SCM_RIGHTS:
             fds.frombytes(cmsg_data[: len(cmsg_data) - (len(cmsg_data) % fds.itemsize)])
@@ -136,6 +136,12 @@ class VPPStats:
         if self.connected:
             return
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+
+        # Our connect races the corresponding recv_fds call in VPP, if we beat
+        # VPP then we will try (unsuccessfully) to receive file descriptors and
+        # will have gone away before VPP can respond to our connect.  A short
+        # timeout here stops this error occurring.
+        sock.settimeout(1)
         sock.connect(self.socketname)
 
         mfd = recv_fd(sock)

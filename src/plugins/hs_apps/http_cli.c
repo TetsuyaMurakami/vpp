@@ -17,12 +17,23 @@
 #include <vnet/session/application_interface.h>
 #include <vnet/session/session.h>
 #include <http/http.h>
+#include <http/http_header_names.h>
+#include <http/http_content_types.h>
+
+#define HCS_DEBUG 0
+
+#if HCS_DEBUG
+#define HCS_DBG(_fmt, _args...) clib_warning (_fmt, ##_args)
+#else
+#define HCS_DBG(_fmt, _args...)
+#endif
 
 typedef struct
 {
   u32 hs_index;
   u32 thread_index;
   u64 node_index;
+  u8 plain_text;
   u8 *buf;
 } hcs_cli_args_t;
 
@@ -34,6 +45,7 @@ typedef struct
   u8 *tx_buf;
   u32 tx_offset;
   u32 vpp_session_index;
+  http_header_t *resp_headers;
 } hcs_session_t;
 
 typedef struct
@@ -143,19 +155,41 @@ start_send_data (hcs_session_t *hs, http_status_code_t status)
 {
   http_msg_t msg;
   session_t *ts;
+  u8 *headers_buf = 0;
   int rv;
+
+  if (vec_len (hs->resp_headers))
+    {
+      headers_buf = http_serialize_headers (hs->resp_headers);
+      vec_free (hs->resp_headers);
+      msg.data.headers_offset = 0;
+      msg.data.headers_len = vec_len (headers_buf);
+    }
+  else
+    {
+      msg.data.headers_offset = 0;
+      msg.data.headers_len = 0;
+    }
 
   msg.type = HTTP_MSG_REPLY;
   msg.code = status;
-  msg.content_type = HTTP_CONTENT_TEXT_HTML;
   msg.data.type = HTTP_MSG_DATA_INLINE;
-  msg.data.len = vec_len (hs->tx_buf);
+  msg.data.body_len = vec_len (hs->tx_buf);
+  msg.data.body_offset = msg.data.headers_len;
+  msg.data.len = msg.data.body_len + msg.data.headers_len;
 
   ts = session_get (hs->vpp_session_index, hs->thread_index);
   rv = svm_fifo_enqueue (ts->tx_fifo, sizeof (msg), (u8 *) &msg);
   ASSERT (rv == sizeof (msg));
 
-  if (!msg.data.len)
+  if (msg.data.headers_len)
+    {
+      rv = svm_fifo_enqueue (ts->tx_fifo, vec_len (headers_buf), headers_buf);
+      ASSERT (rv == msg.data.headers_len);
+      vec_free (headers_buf);
+    }
+
+  if (!msg.data.body_len)
     goto done;
 
   rv = svm_fifo_enqueue (ts->tx_fifo, vec_len (hs->tx_buf), hs->tx_buf);
@@ -181,6 +215,7 @@ send_data_to_http (void *rpc_args)
 {
   hcs_cli_args_t *args = (hcs_cli_args_t *) rpc_args;
   hcs_session_t *hs;
+  http_content_type_t type = HTTP_CONTENT_TEXT_HTML;
 
   hs = hcs_session_get (args->thread_index, args->hs_index);
   if (!hs)
@@ -190,6 +225,13 @@ send_data_to_http (void *rpc_args)
     }
 
   hs->tx_buf = args->buf;
+  if (args->plain_text)
+    type = HTTP_CONTENT_TEXT_PLAIN;
+
+  http_add_header (&hs->resp_headers,
+		   http_header_name_token (HTTP_HEADER_CONTENT_TYPE),
+		   http_content_type_token (type));
+
   start_send_data (hs, HTTP_STATUS_OK);
 
 cleanup:
@@ -218,17 +260,9 @@ hcs_cli_process (vlib_main_t *vm, vlib_node_runtime_t *rt, vlib_frame_t *f)
     {
       if (request[i] == '/')
 	request[i] = ' ';
-      else if (request[i] == ' ')
-	{
-	  /* vlib_cli_input is vector-based, no need for a NULL */
-	  vec_set_len (request, i);
-	  break;
-	}
       i++;
     }
-
-  /* Generate the html header */
-  html = format (0, html_header_template, request /* title */ );
+  HCS_DBG ("%v", request);
 
   /* Run the command */
   unformat_init_vector (&input, vec_dup (request));
@@ -236,9 +270,17 @@ hcs_cli_process (vlib_main_t *vm, vlib_node_runtime_t *rt, vlib_frame_t *f)
   unformat_free (&input);
   request = 0;
 
-  /* Generate the html page */
-  html = format (html, "%v", reply);
-  html = format (html, html_footer);
+  if (args->plain_text)
+    {
+      html = format (0, "%v", reply);
+    }
+  else
+    {
+      /* Generate the html page */
+      html = format (0, html_header_template, request /* title */);
+      html = format (html, "%v", reply);
+      html = format (html, html_footer);
+    }
 
   /* Send it */
   rpc_args = clib_mem_alloc (sizeof (*args));
@@ -308,9 +350,11 @@ hcs_ts_rx_callback (session_t *ts)
   hcs_cli_args_t args = {};
   hcs_session_t *hs;
   http_msg_t msg;
-  int rv;
+  int rv, is_encoded = 0;
 
   hs = hcs_session_get (ts->thread_index, ts->opaque);
+  hs->tx_buf = 0;
+  hs->resp_headers = 0;
 
   /* Read the http message header */
   rv = svm_fifo_dequeue (ts->rx_fifo, sizeof (msg), (u8 *) &msg);
@@ -318,16 +362,66 @@ hcs_ts_rx_callback (session_t *ts)
 
   if (msg.type != HTTP_MSG_REQUEST || msg.method_type != HTTP_REQ_GET)
     {
-      hs->tx_buf = 0;
+      http_add_header (&hs->resp_headers,
+		       http_header_name_token (HTTP_HEADER_ALLOW),
+		       http_token_lit ("GET"));
       start_send_data (hs, HTTP_STATUS_METHOD_NOT_ALLOWED);
-      return 0;
+      goto done;
+    }
+
+  if (msg.data.target_path_len == 0 ||
+      msg.data.target_form != HTTP_TARGET_ORIGIN_FORM)
+    {
+      start_send_data (hs, HTTP_STATUS_BAD_REQUEST);
+      goto done;
     }
 
   /* send the command to a new/recycled vlib process */
-  vec_validate (args.buf, msg.data.len - 1);
-  rv = svm_fifo_dequeue (ts->rx_fifo, msg.data.len, args.buf);
-  ASSERT (rv == msg.data.len);
-  vec_set_len (args.buf, rv);
+  vec_validate (args.buf, msg.data.target_path_len - 1);
+  rv = svm_fifo_peek (ts->rx_fifo, msg.data.target_path_offset,
+		      msg.data.target_path_len, args.buf);
+  ASSERT (rv == msg.data.target_path_len);
+  HCS_DBG ("%v", args.buf);
+  if (http_validate_abs_path_syntax (args.buf, &is_encoded))
+    {
+      start_send_data (hs, HTTP_STATUS_BAD_REQUEST);
+      vec_free (args.buf);
+      goto done;
+    }
+  if (is_encoded)
+    {
+      u8 *decoded = http_percent_decode (args.buf);
+      vec_free (args.buf);
+      args.buf = decoded;
+    }
+
+  if (msg.data.headers_len)
+    {
+      u8 *headers = 0;
+      http_header_table_t *ht;
+      vec_validate (headers, msg.data.headers_len - 1);
+      rv = svm_fifo_peek (ts->rx_fifo, msg.data.headers_offset,
+			  msg.data.headers_len, headers);
+      ASSERT (rv == msg.data.headers_len);
+      if (http_parse_headers (headers, &ht))
+	{
+	  start_send_data (hs, HTTP_STATUS_BAD_REQUEST);
+	  vec_free (args.buf);
+	  vec_free (headers);
+	  goto done;
+	}
+      const char *accept_value =
+	http_get_header (ht, http_header_name_str (HTTP_HEADER_ACCEPT));
+      if (accept_value)
+	{
+	  HCS_DBG ("client accept: %s", accept_value);
+	  /* just for testing purpose, we don't care about precedence */
+	  if (strstr (accept_value, "text/plain"))
+	    args.plain_text = 1;
+	}
+      http_free_header_table (ht);
+      vec_free (headers);
+    }
 
   args.hs_index = hs->session_index;
   args.thread_index = ts->thread_index;
@@ -338,6 +432,9 @@ hcs_ts_rx_callback (session_t *ts)
 			       sizeof (args));
   else
     alloc_cli_process (&args);
+
+done:
+  svm_fifo_dequeue_drop (ts->rx_fifo, msg.data.len);
   return 0;
 }
 

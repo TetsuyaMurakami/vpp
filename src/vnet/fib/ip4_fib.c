@@ -201,10 +201,7 @@ ip4_fib_table_destroy (u32 fib_index)
     /*
      * validate no more routes.
      */
-#if CLIB_DEBUG > 0
-    if (0 != fib_table->ft_total_route_counts)
-        fib_table_assert_empty(fib_table);
-#endif
+    fib_table_assert_empty(fib_table);
 
     vec_foreach(n_locks, fib_table->ft_src_route_counts)
     {
@@ -621,10 +618,29 @@ ip4_show_fib (vlib_main_t * vm,
  *                   32               4
  * @cliexend
  ?*/
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (ip4_show_fib_command, static) = {
     .path = "show ip fib",
     .short_help = "show ip fib [summary] [table <table-id>] [index <fib-id>] [<ip4-addr>[/<mask>]] [mtrie] [detail]",
     .function = ip4_show_fib,
 };
-/* *INDENT-ON* */
+
+static clib_error_t *
+ip_config (vlib_main_t * vm, unformat_input_t * input)
+{
+    char *default_name = 0;
+
+    while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+	if (unformat (input, "default-table-name %s", &default_name))
+	    ;
+	else
+	    return clib_error_return (0, "unknown input '%U'",
+				      format_unformat_error, input);
+    }
+
+    fib_table_default_names[FIB_PROTOCOL_IP4] = default_name;
+
+    return 0;
+}
+
+VLIB_EARLY_CONFIG_FUNCTION (ip_config, "ip");

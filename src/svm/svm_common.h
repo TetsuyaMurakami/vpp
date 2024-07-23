@@ -19,8 +19,13 @@
 #define __included_svm_common_h__
 
 #include <stdarg.h>
+#ifdef __FreeBSD__
+#include <stdint.h>
+#endif /* __FreeBSD__ */
 #include <pthread.h>
+#ifdef __linux__
 #include <sys/user.h>
+#endif /* __linux__ */
 #include <vppinfra/clib.h>
 #include <vppinfra/types.h>
 

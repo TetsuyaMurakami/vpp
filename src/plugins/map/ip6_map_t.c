@@ -529,7 +529,10 @@ ip6_map_t (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 	  ip60 = vlib_buffer_get_current (p0);
 
 	  d0 =
-	    ip6_map_get_domain (&ip60->dst_address,
+	    /* Originally using the IPv6 dest for rule lookup, now source
+	     * [dgeist] ip6_map_get_domain (&ip60->dst_address,
+	     */
+	    ip6_map_get_domain (&ip60->src_address,
 				&vnet_buffer (p0)->map_t.map_domain_index,
 				&error0);
 	  if (!d0)
@@ -687,7 +690,6 @@ ip6_map_t (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
   return frame->n_vectors;
 }
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE(ip6_map_t_fragmented_node) = {
   .function = ip6_map_t_fragmented,
   .name = "ip6-map-t-fragmented",
@@ -707,9 +709,7 @@ VLIB_REGISTER_NODE(ip6_map_t_fragmented_node) = {
     [IP6_MAPT_FRAGMENTED_NEXT_DROP] = "error-drop",
   },
 };
-/* *INDENT-ON* */
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE(ip6_map_t_icmp_node) = {
   .function = ip6_map_t_icmp,
   .name = "ip6-map-t-icmp",
@@ -729,9 +729,7 @@ VLIB_REGISTER_NODE(ip6_map_t_icmp_node) = {
     [IP6_MAPT_ICMP_NEXT_DROP] = "error-drop",
   },
 };
-/* *INDENT-ON* */
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE(ip6_map_t_tcp_udp_node) = {
   .function = ip6_map_t_tcp_udp,
   .name = "ip6-map-t-tcp-udp",
@@ -751,9 +749,7 @@ VLIB_REGISTER_NODE(ip6_map_t_tcp_udp_node) = {
     [IP6_MAPT_TCP_UDP_NEXT_DROP] = "error-drop",
   },
 };
-/* *INDENT-ON* */
 
-/* *INDENT-OFF* */
 VNET_FEATURE_INIT (ip6_map_t_feature, static) = {
     .arc_name = "ip6-unicast",
     .node_name = "ip6-map-t",
@@ -781,7 +777,6 @@ VLIB_REGISTER_NODE(ip6_map_t_node) = {
     [IP6_MAPT_NEXT_ICMP] = "ip6-icmp-error",
   },
 };
-/* *INDENT-ON* */
 
 /*
  * fd.io coding-style-patch-verification: ON

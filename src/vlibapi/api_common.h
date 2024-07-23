@@ -235,8 +235,8 @@ typedef struct
   /** Message convert function vector */
   void *(*fromjson_handler) (cJSON *, int *);
 
-  /** Message endian handler vector */
-  void (*endian_handler) (void *);
+  /** Message endian handler vector. */
+  void (*endian_handler) (void *, bool to_net);
 
   /** Message calc size function vector */
   uword (*calc_size_func) (void *);
@@ -354,6 +354,8 @@ typedef struct api_main_t
 
   /** client message index hash table */
   uword *msg_index_by_name_and_crc;
+  /** plugin JSON representation vector table */
+  u8 **json_api_repr;
 
   /** api version list */
   api_version_t *api_version_list;

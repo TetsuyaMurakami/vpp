@@ -151,7 +151,6 @@ typedef enum
     VNET_CRYPTO_OP_N_STATUS,
 } vnet_crypto_op_status_t;
 
-/* *INDENT-OFF* */
 typedef enum
 {
   VNET_CRYPTO_ALG_NONE = 0,
@@ -240,7 +239,6 @@ typedef enum
 #undef _
 	VNET_CRYPTO_N_OP_IDS,
 } vnet_crypto_op_id_t;
-/* *INDENT-ON* */
 
 typedef enum
 {
@@ -496,6 +494,7 @@ int vnet_crypto_is_set_handler (vnet_crypto_alg_t alg);
 u32 vnet_crypto_key_add (vlib_main_t * vm, vnet_crypto_alg_t alg,
 			 u8 * data, u16 length);
 void vnet_crypto_key_del (vlib_main_t * vm, vnet_crypto_key_index_t index);
+void vnet_crypto_key_update (vlib_main_t *vm, vnet_crypto_key_index_t index);
 
 /**
  * Use 2 created keys to generate new key for linked algs (cipher + integ)

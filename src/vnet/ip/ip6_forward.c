@@ -51,6 +51,7 @@
 #include <vnet/dpo/receive_dpo.h>
 #include <vnet/dpo/classify_dpo.h>
 #include <vnet/classify/vnet_classify.h>
+#include <vnet/adj/adj_dp.h>
 #include <vnet/pg/pg.h>
 
 #ifndef CLIB_MARCH_VARIANT
@@ -71,7 +72,6 @@ ip6_add_interface_prefix_routes (ip6_main_t * im,
   ip_lookup_main_t *lm = &im->lookup_main;
   ip_interface_prefix_t *if_prefix;
 
-  /* *INDENT-OFF* */
   ip_interface_prefix_key_t key = {
     .prefix = {
       .fp_len = address_length,
@@ -85,7 +85,6 @@ ip6_add_interface_prefix_routes (ip6_main_t * im,
     },
     .sw_if_index = sw_if_index,
   };
-  /* *INDENT-ON* */
 
   /* If prefix already set on interface, just increment ref count & return */
   if_prefix = ip_get_interface_prefix (lm, &key);
@@ -178,7 +177,6 @@ ip6_del_interface_prefix_routes (ip6_main_t * im,
   ip_lookup_main_t *lm = &im->lookup_main;
   ip_interface_prefix_t *if_prefix;
 
-  /* *INDENT-OFF* */
   ip_interface_prefix_key_t key = {
     .prefix = {
       .fp_len = address_length,
@@ -192,13 +190,12 @@ ip6_del_interface_prefix_routes (ip6_main_t * im,
     },
     .sw_if_index = sw_if_index,
   };
-  /* *INDENT-ON* */
 
   if_prefix = ip_get_interface_prefix (lm, &key);
   if (!if_prefix)
     {
       clib_warning ("Prefix not found while deleting %U",
-		    format_ip4_address_and_length, address, address_length);
+		    format_ip6_address_and_length, address, address_length);
       return;
     }
 
@@ -283,7 +280,6 @@ ip6_interface_first_address (ip6_main_t * im, u32 sw_if_index)
   ip_interface_address_t *ia = 0;
   ip6_address_t *result = 0;
 
-  /* *INDENT-OFF* */
   foreach_ip_interface_address (lm, ia, sw_if_index,
                                 1 /* honor unnumbered */,
   ({
@@ -291,7 +287,6 @@ ip6_interface_first_address (ip6_main_t * im, u32 sw_if_index)
     result = a;
     break;
   }));
-  /* *INDENT-ON* */
   return result;
 }
 
@@ -359,7 +354,6 @@ ip6_add_del_interface_address (vlib_main_t * vm,
 		     vec_elt (im->fib_index_by_sw_if_index, sw_if_index));
   vec_add1 (addr_fib, ip6_af);
 
-  /* *INDENT-OFF* */
   if (!is_del)
     {
       /* When adding an address check that it does not conflict
@@ -417,7 +411,6 @@ ip6_add_del_interface_address (vlib_main_t * vm,
             }
       }
     }
-  /* *INDENT-ON* */
 
   if_address_index = ip_interface_address_find (lm, addr_fib, address_length);
 
@@ -537,7 +530,6 @@ ip6_sw_interface_admin_up_down (vnet_main_t * vnm, u32 sw_if_index, u32 flags)
 
   fib_index = vec_elt (im->fib_index_by_sw_if_index, sw_if_index);
 
-  /* *INDENT-OFF* */
   foreach_ip_interface_address (&im->lookup_main, ia, sw_if_index,
                                 0 /* honor unnumbered */,
   ({
@@ -550,7 +542,6 @@ ip6_sw_interface_admin_up_down (vnet_main_t * vnm, u32 sw_if_index, u32 flags)
       ip6_del_interface_routes (sw_if_index, im, fib_index,
 				a, ia->address_length);
   }));
-  /* *INDENT-ON* */
 
   return 0;
 }
@@ -558,7 +549,6 @@ ip6_sw_interface_admin_up_down (vnet_main_t * vnm, u32 sw_if_index, u32 flags)
 VNET_SW_INTERFACE_ADMIN_UP_DOWN_FUNCTION (ip6_sw_interface_admin_up_down);
 
 /* Built-in ip6 unicast rx feature path definition */
-/* *INDENT-OFF* */
 VNET_FEATURE_ARC_INIT (ip6_unicast, static) =
 {
   .arc_name  = "ip6-unicast",
@@ -683,7 +673,6 @@ VNET_FEATURE_INIT (ip6_interface_output, static) = {
   .node_name = "interface-output",
   .runs_before = 0, /* not before any other features */
 };
-/* *INDENT-ON* */
 
 static clib_error_t *
 ip6_sw_interface_add_del (vnet_main_t * vnm, u32 sw_if_index, u32 is_add)
@@ -709,13 +698,11 @@ ip6_sw_interface_add_del (vnet_main_t * vnm, u32 sw_if_index, u32 is_add)
       vlib_main_t *vm = vlib_get_main ();
 
       vnet_sw_interface_update_unnumbered (sw_if_index, ~0, 0);
-      /* *INDENT-OFF* */
       foreach_ip_interface_address (lm6, ia, sw_if_index, 0,
       ({
         address = ip_interface_address_get_address (lm6, ia);
         ip6_add_del_interface_address(vm, sw_if_index, address, ia->address_length, 1);
       }));
-      /* *INDENT-ON* */
       ip6_mfib_interface_enable_disable (sw_if_index, 0);
 
       if (0 != im6->fib_index_by_sw_if_index[sw_if_index])
@@ -748,7 +735,6 @@ VLIB_NODE_FN (ip6_lookup_node) (vlib_main_t * vm,
 
 static u8 *format_ip6_lookup_trace (u8 * s, va_list * args);
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (ip6_lookup_node) =
 {
   .name = "ip6-lookup",
@@ -757,7 +743,6 @@ VLIB_REGISTER_NODE (ip6_lookup_node) =
   .n_next_nodes = IP6_LOOKUP_N_NEXT,
   .next_nodes = IP6_LOOKUP_NEXT_NODES,
 };
-/* *INDENT-ON* */
 
 VLIB_NODE_FN (ip6_load_balance_node) (vlib_main_t * vm,
 				      vlib_node_runtime_t * node,
@@ -935,7 +920,6 @@ VLIB_NODE_FN (ip6_load_balance_node) (vlib_main_t * vm,
   return frame->n_vectors;
 }
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (ip6_load_balance_node) =
 {
   .name = "ip6-load-balance",
@@ -943,7 +927,6 @@ VLIB_REGISTER_NODE (ip6_load_balance_node) =
   .sibling_of = "ip6-lookup",
   .format_trace = format_ip6_lookup_trace,
 };
-/* *INDENT-ON* */
 
 typedef struct
 {
@@ -966,8 +949,7 @@ format_ip6_forward_next_trace (u8 * s, va_list * args)
   ip6_forward_next_trace_t *t = va_arg (*args, ip6_forward_next_trace_t *);
   u32 indent = format_get_indent (s);
 
-  s = format (s, "%Ufib:%d adj:%d flow:%d",
-	      format_white_space, indent,
+  s = format (s, "%Ufib:%d adj:%d flow:0x%08x", format_white_space, indent,
 	      t->fib_index, t->adj_index, t->flow_hash);
   s = format (s, "\n%U%U",
 	      format_white_space, indent,
@@ -1234,12 +1216,10 @@ ip6_next_proto_is_tcp_udp (vlib_buffer_t * p0, ip6_header_t * ip0,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VNET_FEATURE_ARC_INIT (ip6_local) = {
   .arc_name = "ip6-local",
   .start_nodes = VNET_FEATURES ("ip6-local", "ip6-receive"),
 };
-/* *INDENT-ON* */
 
 static_always_inline u8
 ip6_tcp_udp_icmp_bad_length (vlib_main_t * vm, vlib_buffer_t * p0)
@@ -1918,18 +1898,6 @@ ip6_rewrite_inline_with_gso (vlib_main_t * vm,
 	  vnet_buffer (p0)->ip.save_rewrite_length = rw_len0;
 	  vnet_buffer (p1)->ip.save_rewrite_length = rw_len1;
 
-	  if (do_counters)
-	    {
-	      vlib_increment_combined_counter
-		(&adjacency_counters,
-		 thread_index, adj_index0, 1,
-		 vlib_buffer_length_in_chain (vm, p0) + rw_len0);
-	      vlib_increment_combined_counter
-		(&adjacency_counters,
-		 thread_index, adj_index1, 1,
-		 vlib_buffer_length_in_chain (vm, p1) + rw_len1);
-	    }
-
 	  /* Check MTU of outgoing interface. */
 	  u16 ip0_len =
 	    clib_net_to_host_u16 (ip0->payload_length) +
@@ -1954,16 +1922,15 @@ ip6_rewrite_inline_with_gso (vlib_main_t * vm,
 	   * wants to see the IP header */
 	  if (PREDICT_TRUE (error0 == IP6_ERROR_NONE))
 	    {
-	      p0->current_data -= rw_len0;
-	      p0->current_length += rw_len0;
+	      vlib_buffer_advance (p0, -(word) rw_len0);
 	      tx_sw_if_index0 = adj0[0].rewrite_header.sw_if_index;
 	      vnet_buffer (p0)->sw_if_index[VLIB_TX] = tx_sw_if_index0;
 	      next0 = adj0[0].rewrite_header.next_index;
 	      if (PREDICT_FALSE
 		  (adj0[0].rewrite_header.flags & VNET_REWRITE_HAS_FEATURES))
-		vnet_feature_arc_start_w_cfg_index
-		  (lm->output_feature_arc_index, tx_sw_if_index0, &next0, p0,
-		   adj0->ia_cfg_index);
+		vnet_feature_arc_start_w_cfg_index (
+		  lm->output_feature_arc_index, tx_sw_if_index0, &next0, p0,
+		  adj0->ia_cfg_index);
 	    }
 	  else
 	    {
@@ -1971,18 +1938,16 @@ ip6_rewrite_inline_with_gso (vlib_main_t * vm,
 	    }
 	  if (PREDICT_TRUE (error1 == IP6_ERROR_NONE))
 	    {
-	      p1->current_data -= rw_len1;
-	      p1->current_length += rw_len1;
-
+	      vlib_buffer_advance (p1, -(word) rw_len1);
 	      tx_sw_if_index1 = adj1[0].rewrite_header.sw_if_index;
 	      vnet_buffer (p1)->sw_if_index[VLIB_TX] = tx_sw_if_index1;
 	      next1 = adj1[0].rewrite_header.next_index;
 
 	      if (PREDICT_FALSE
 		  (adj1[0].rewrite_header.flags & VNET_REWRITE_HAS_FEATURES))
-		vnet_feature_arc_start_w_cfg_index
-		  (lm->output_feature_arc_index, tx_sw_if_index1, &next1, p1,
-		   adj1->ia_cfg_index);
+		vnet_feature_arc_start_w_cfg_index (
+		  lm->output_feature_arc_index, tx_sw_if_index1, &next1, p1,
+		  adj1->ia_cfg_index);
 	    }
 	  else
 	    {
@@ -1990,47 +1955,46 @@ ip6_rewrite_inline_with_gso (vlib_main_t * vm,
 	    }
 
 	  if (is_midchain)
-	    {
-	      /* before we paint on the next header, update the L4
-	       * checksums if required, since there's no offload on a tunnel */
-	      vnet_calc_checksums_inline (vm, p0, 0 /* is_ip4 */ ,
-					  1 /* is_ip6 */ );
-	      vnet_calc_checksums_inline (vm, p1, 0 /* is_ip4 */ ,
-					  1 /* is_ip6 */ );
-
-	      /* Guess we are only writing on ipv6 header. */
-	      vnet_rewrite_two_headers (adj0[0], adj1[0],
-					ip0, ip1, sizeof (ip6_header_t));
-	    }
+	    /* Guess we are only writing on ipv6 header. */
+	    vnet_rewrite_two_headers (adj0[0], adj1[0], ip0, ip1,
+				      sizeof (ip6_header_t));
 	  else
 	    /* Guess we are only writing on simple Ethernet header. */
 	    vnet_rewrite_two_headers (adj0[0], adj1[0],
 				      ip0, ip1, sizeof (ethernet_header_t));
 
+	  if (do_counters)
+	    {
+	      if (error0 == IP6_ERROR_NONE)
+		vlib_increment_combined_counter (
+		  &adjacency_counters, thread_index, adj_index0, 1,
+		  vlib_buffer_length_in_chain (vm, p0) + rw_len0);
+	      if (error1 == IP6_ERROR_NONE)
+		vlib_increment_combined_counter (
+		  &adjacency_counters, thread_index, adj_index1, 1,
+		  vlib_buffer_length_in_chain (vm, p1) + rw_len1);
+	    }
+
 	  if (is_midchain)
 	    {
-	      if (adj0->sub_type.midchain.fixup_func)
-		adj0->sub_type.midchain.fixup_func
-		  (vm, adj0, p0, adj0->sub_type.midchain.fixup_data);
-	      if (adj1->sub_type.midchain.fixup_func)
-		adj1->sub_type.midchain.fixup_func
-		  (vm, adj1, p1, adj1->sub_type.midchain.fixup_data);
+	      if (error0 == IP6_ERROR_NONE)
+		adj_midchain_fixup (vm, adj0, p0, VNET_LINK_IP6);
+	      if (error1 == IP6_ERROR_NONE)
+		adj_midchain_fixup (vm, adj1, p1, VNET_LINK_IP6);
 	    }
 	  if (is_mcast)
 	    {
 	      /*
 	       * copy bytes from the IP address into the MAC rewrite
 	       */
-	      vnet_ip_mcast_fixup_header (IP6_MCAST_ADDR_MASK,
-					  adj0->
-					  rewrite_header.dst_mcast_offset,
-					  &ip0->dst_address.as_u32[3],
-					  (u8 *) ip0);
-	      vnet_ip_mcast_fixup_header (IP6_MCAST_ADDR_MASK,
-					  adj1->
-					  rewrite_header.dst_mcast_offset,
-					  &ip1->dst_address.as_u32[3],
-					  (u8 *) ip1);
+	      if (error0 == IP6_ERROR_NONE)
+		vnet_ip_mcast_fixup_header (
+		  IP6_MCAST_ADDR_MASK, adj0->rewrite_header.dst_mcast_offset,
+		  &ip0->dst_address.as_u32[3], (u8 *) ip0);
+	      if (error1 == IP6_ERROR_NONE)
+		vnet_ip_mcast_fixup_header (
+		  IP6_MCAST_ADDR_MASK, adj1->rewrite_header.dst_mcast_offset,
+		  &ip1->dst_address.as_u32[3], (u8 *) ip1);
 	    }
 
 	  vlib_validate_buffer_enqueue_x2 (vm, node, next_index,
@@ -2089,30 +2053,9 @@ ip6_rewrite_inline_with_gso (vlib_main_t * vm,
 		}
 	    }
 
-	  if (is_midchain)
-	    {
-	      vnet_calc_checksums_inline (vm, p0, 0 /* is_ip4 */ ,
-					  1 /* is_ip6 */ );
-
-	      /* Guess we are only writing on ip6 header. */
-	      vnet_rewrite_one_header (adj0[0], ip0, sizeof (ip6_header_t));
-	    }
-	  else
-	    /* Guess we are only writing on simple Ethernet header. */
-	    vnet_rewrite_one_header (adj0[0], ip0,
-				     sizeof (ethernet_header_t));
-
 	  /* Update packet buffer attributes/set output interface. */
 	  rw_len0 = adj0[0].rewrite_header.data_bytes;
 	  vnet_buffer (p0)->ip.save_rewrite_length = rw_len0;
-
-	  if (do_counters)
-	    {
-	      vlib_increment_combined_counter
-		(&adjacency_counters,
-		 thread_index, adj_index0, 1,
-		 vlib_buffer_length_in_chain (vm, p0) + rw_len0);
-	    }
 
 	  /* Check MTU of outgoing interface. */
 	  u16 ip0_len =
@@ -2129,9 +2072,7 @@ ip6_rewrite_inline_with_gso (vlib_main_t * vm,
 	   * wants to see the IP header */
 	  if (PREDICT_TRUE (error0 == IP6_ERROR_NONE))
 	    {
-	      p0->current_data -= rw_len0;
-	      p0->current_length += rw_len0;
-
+	      vlib_buffer_advance (p0, -(word) rw_len0);
 	      tx_sw_if_index0 = adj0[0].rewrite_header.sw_if_index;
 
 	      vnet_buffer (p0)->sw_if_index[VLIB_TX] = tx_sw_if_index0;
@@ -2139,28 +2080,35 @@ ip6_rewrite_inline_with_gso (vlib_main_t * vm,
 
 	      if (PREDICT_FALSE
 		  (adj0[0].rewrite_header.flags & VNET_REWRITE_HAS_FEATURES))
-		vnet_feature_arc_start_w_cfg_index
-		  (lm->output_feature_arc_index, tx_sw_if_index0, &next0, p0,
-		   adj0->ia_cfg_index);
+		vnet_feature_arc_start_w_cfg_index (
+		  lm->output_feature_arc_index, tx_sw_if_index0, &next0, p0,
+		  adj0->ia_cfg_index);
+
+	      if (is_midchain)
+		/* Guess we are only writing on ip6 header. */
+		vnet_rewrite_one_header (adj0[0], ip0, sizeof (ip6_header_t));
+	      else
+		/* Guess we are only writing on simple Ethernet header. */
+		vnet_rewrite_one_header (adj0[0], ip0,
+					 sizeof (ethernet_header_t));
+
+	      if (do_counters)
+		{
+		  vlib_increment_combined_counter (
+		    &adjacency_counters, thread_index, adj_index0, 1,
+		    vlib_buffer_length_in_chain (vm, p0) + rw_len0);
+		}
+
+	      if (is_midchain && adj0->sub_type.midchain.fixup_func)
+		adj_midchain_fixup (vm, adj0, p0, VNET_LINK_IP6);
+	      if (is_mcast)
+		vnet_ip_mcast_fixup_header (
+		  IP6_MCAST_ADDR_MASK, adj0->rewrite_header.dst_mcast_offset,
+		  &ip0->dst_address.as_u32[3], (u8 *) ip0);
 	    }
 	  else
 	    {
 	      p0->error = error_node->errors[error0];
-	    }
-
-	  if (is_midchain)
-	    {
-	      if (adj0->sub_type.midchain.fixup_func)
-		adj0->sub_type.midchain.fixup_func
-		  (vm, adj0, p0, adj0->sub_type.midchain.fixup_data);
-	    }
-	  if (is_mcast)
-	    {
-	      vnet_ip_mcast_fixup_header (IP6_MCAST_ADDR_MASK,
-					  adj0->
-					  rewrite_header.dst_mcast_offset,
-					  &ip0->dst_address.as_u32[3],
-					  (u8 *) ip0);
 	    }
 
 	  from += 1;
@@ -2243,11 +2191,10 @@ VLIB_NODE_FN (ip6_mcast_midchain_node) (vlib_main_t * vm,
     return ip6_rewrite_inline (vm, node, frame, 0, 1, 1);
 }
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (ip6_midchain_node) = {
   .name = "ip6-midchain",
   .vector_size = sizeof (u32),
-  .format_trace = format_ip6_forward_next_trace,
+  .format_trace = format_ip6_rewrite_trace,
   .sibling_of = "ip6-rewrite",
 };
 
@@ -2256,8 +2203,6 @@ VLIB_REGISTER_NODE (ip6_rewrite_node) =
   .name = "ip6-rewrite",
   .vector_size = sizeof (u32),
   .format_trace = format_ip6_rewrite_trace,
-  .n_errors = IP6_N_ERROR,
-  .error_counters = ip6_error_counters,
   .n_next_nodes = IP6_REWRITE_N_NEXT,
   .next_nodes =
   {
@@ -2292,7 +2237,6 @@ VLIB_REGISTER_NODE (ip6_mcast_midchain_node) =
   .sibling_of = "ip6-rewrite",
 };
 
-/* *INDENT-ON* */
 
 /*
  * Hop-by-Hop handling
@@ -2306,7 +2250,6 @@ _(PROCESSED, "pkts with ip6 hop-by-hop options") \
 _(FORMAT, "incorrectly formatted hop-by-hop options") \
 _(UNKNOWN_OPTION, "unknown ip6 hop-by-hop options")
 
-/* *INDENT-OFF* */
 typedef enum
 {
 #define _(sym,str) IP6_HOP_BY_HOP_ERROR_##sym,
@@ -2314,7 +2257,6 @@ typedef enum
 #undef _
   IP6_HOP_BY_HOP_N_ERROR,
 } ip6_hop_by_hop_error_t;
-/* *INDENT-ON* */
 
 /*
  * Primary h-b-h handler trace support
@@ -2741,7 +2683,6 @@ VLIB_NODE_FN (ip6_hop_by_hop_node) (vlib_main_t * vm,
   return frame->n_vectors;
 }
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (ip6_hop_by_hop_node) =
 {
   .name = "ip6-hop-by-hop",
@@ -2753,7 +2694,6 @@ VLIB_REGISTER_NODE (ip6_hop_by_hop_node) =
   .error_strings = ip6_hop_by_hop_error_strings,
   .n_next_nodes = 0,
 };
-/* *INDENT-ON* */
 
 static clib_error_t *
 ip6_hop_by_hop_init (vlib_main_t * vm)
@@ -3005,14 +2945,12 @@ set_ip6_flow_hash_command_fn (vlib_main_t * vm,
  * @cliexend
  * @endparblock
 ?*/
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (set_ip6_flow_hash_command, static) = {
   .path = "set ip6 flow-hash",
   .short_help = "set ip6 flow-hash table <table-id> [src] [dst] [sport] "
 		"[dport] [proto] [reverse] [flowlabel]",
   .function = set_ip6_flow_hash_command_fn,
 };
-/* *INDENT-ON* */
 
 static clib_error_t *
 show_ip6_local_command_fn (vlib_main_t * vm,
@@ -3053,14 +2991,12 @@ show_ip6_local_command_fn (vlib_main_t * vm,
  * 115
  * @cliexend
 ?*/
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (show_ip6_local, static) =
 {
   .path = "show ip6 local",
   .function = show_ip6_local_command_fn,
   .short_help = "show ip6 local",
 };
-/* *INDENT-ON* */
 
 #ifndef CLIB_MARCH_VARIANT
 int
@@ -3172,7 +3108,6 @@ set_ip6_classify_command_fn (vlib_main_t * vm,
  * Example of how to assign a classification table to an interface:
  * @cliexcmd{set ip6 classify intfc GigabitEthernet2/0/0 table-index 1}
 ?*/
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (set_ip6_classify_command, static) =
 {
   .path = "set ip6 classify",
@@ -3180,7 +3115,6 @@ VLIB_CLI_COMMAND (set_ip6_classify_command, static) =
   "set ip6 classify intfc <interface> table-index <classify-idx>",
   .function = set_ip6_classify_command_fn,
 };
-/* *INDENT-ON* */
 
 /*
  * fd.io coding-style-patch-verification: ON

@@ -143,11 +143,9 @@ format_vnet_hw_interface_rss_queues (u8 * s, va_list * args)
 
   if (bitmap)
     {
-    /* *INDENT-OFF* */
     clib_bitmap_foreach (i, bitmap)  {
       s = format (s, "%u ", i);
     }
-    /* *INDENT-ON* */
     }
 
   return s;
@@ -290,7 +288,7 @@ format_vnet_sw_if_index_name (u8 * s, va_list * args)
 
   if (NULL == si)
     {
-      return format (s, "DELETED");
+      return format (s, "DELETED (%u)", sw_if_index);
     }
   return format (s, "%U", format_vnet_sw_interface_name, vnm, si);
 }
@@ -305,7 +303,7 @@ format_vnet_hw_if_index_name (u8 * s, va_list * args)
   hi = vnet_get_hw_interface (vnm, hw_if_index);
 
   if (hi == 0)
-    return format (s, "DELETED");
+    return format (s, "DELETED (%u)", hw_if_index);
 
   return format (s, "%v", hi->name);
 }

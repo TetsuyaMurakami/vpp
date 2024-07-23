@@ -58,10 +58,10 @@ void
 app_worker_free (app_worker_t * app_wrk)
 {
   application_t *app = application_get (app_wrk->app_index);
+  session_handle_t handle, *handles = 0, *sh;
   vnet_unlisten_args_t _a, *a = &_a;
-  u64 handle, *handles = 0, *sm_indices = 0;
   segment_manager_t *sm;
-  session_handle_t *sh;
+  u64 *sm_indices = 0;
   session_t *ls;
   u32 sm_index;
   int i;
@@ -102,7 +102,7 @@ app_worker_free (app_worker_t * app_wrk)
 	  segment_manager_init_free (sm);
 	}
     }
-  vec_reset_length (handles);
+  vec_free (handles);
   vec_free (sm_indices);
   hash_free (app_wrk->listeners_table);
 
@@ -186,12 +186,67 @@ app_worker_alloc_session_fifos (segment_manager_t * sm, session_t * s)
 }
 
 int
+app_worker_alloc_wrk_cl_session (app_worker_t *app_wrk, session_t *ls)
+{
+  svm_fifo_t *rx_fifo = 0, *tx_fifo = 0;
+  segment_manager_t *sm;
+  session_handle_t lsh;
+  app_listener_t *al;
+  session_t *s;
+
+  al = app_listener_get (ls->al_index);
+  sm = app_worker_get_listen_segment_manager (app_wrk, ls);
+  lsh = session_handle (ls);
+
+  s = session_alloc (0 /* listener on main worker */);
+  session_set_state (s, SESSION_STATE_LISTENING);
+  s->flags |= SESSION_F_IS_CLESS;
+  s->app_wrk_index = app_wrk->wrk_index;
+  ls = session_get_from_handle (lsh);
+  s->session_type = ls->session_type;
+  s->connection_index = ls->connection_index;
+
+  segment_manager_alloc_session_fifos (sm, s->thread_index, &rx_fifo,
+				       &tx_fifo);
+
+  rx_fifo->shr->master_session_index = s->session_index;
+  rx_fifo->master_thread_index = s->thread_index;
+
+  tx_fifo->shr->master_session_index = s->session_index;
+  tx_fifo->master_thread_index = s->thread_index;
+
+  s->rx_fifo = rx_fifo;
+  s->tx_fifo = tx_fifo;
+
+  vec_validate (al->cl_listeners, app_wrk->wrk_map_index);
+  al->cl_listeners[app_wrk->wrk_map_index] = s->session_index;
+
+  return 0;
+}
+
+void
+app_worker_free_wrk_cl_session (app_worker_t *app_wrk, session_t *ls)
+{
+  app_listener_t *al;
+  session_t *s;
+
+  al = app_listener_get (ls->al_index);
+
+  s = app_listener_get_wrk_cl_session (al, app_wrk->wrk_map_index);
+  segment_manager_dealloc_fifos (s->rx_fifo, s->tx_fifo);
+  session_free (s);
+
+  al->cl_listeners[app_wrk->wrk_map_index] = SESSION_INVALID_INDEX;
+}
+
+int
 app_worker_init_listener (app_worker_t * app_wrk, session_t * ls)
 {
   segment_manager_t *sm;
 
   /* Allocate segment manager. All sessions derived out of a listen session
-   * have fifos allocated by the same segment manager. */
+   * have fifos allocated by the same segment manager.
+   * TODO(fcoras): limit memory consumption by cless listeners */
   if (!(sm = app_worker_alloc_segment_manager (app_wrk)))
     return SESSION_E_ALLOC;
 
@@ -202,12 +257,9 @@ app_worker_init_listener (app_worker_t * app_wrk, session_t * ls)
   hash_set (app_wrk->listeners_table, listen_session_get_handle (ls),
 	    segment_manager_index (sm));
 
-  if (transport_connection_is_cless (session_get_transport (ls)))
-    {
-      if (ls->rx_fifo)
-	return SESSION_E_NOSUPPORT;
-      return app_worker_alloc_session_fifos (sm, ls);
-    }
+  if (ls->flags & SESSION_F_IS_CLESS)
+    return app_worker_alloc_wrk_cl_session (app_wrk, ls);
+
   return 0;
 }
 
@@ -276,12 +328,8 @@ app_worker_stop_listen_session (app_worker_t * app_wrk, session_t * ls)
   if (PREDICT_FALSE (!sm_indexp))
     return;
 
-  /* Dealloc fifos, if any (dgram listeners) */
-  if (ls->rx_fifo)
-    {
-      segment_manager_dealloc_fifos (ls->rx_fifo, ls->tx_fifo);
-      ls->tx_fifo = ls->rx_fifo = 0;
-    }
+  if (ls->flags & SESSION_F_IS_CLESS)
+    app_worker_free_wrk_cl_session (app_wrk, ls);
 
   /* Try to cleanup segment manager */
   sm = segment_manager_get (*sm_indexp);
@@ -597,14 +645,12 @@ app_worker_first_listener (app_worker_t * app_wrk, u8 fib_proto,
   sst = session_type_from_proto_and_ip (transport_proto,
 					fib_proto == FIB_PROTOCOL_IP4);
 
-  /* *INDENT-OFF* */
    hash_foreach (handle, sm_index, app_wrk->listeners_table, ({
      listener = listen_session_get_from_handle (handle);
      if (listener->session_type == sst
 	 && !(listener->flags & SESSION_F_PROXY))
        return listener;
    }));
-  /* *INDENT-ON* */
 
   return 0;
 }
@@ -621,13 +667,11 @@ app_worker_proxy_listener (app_worker_t * app_wrk, u8 fib_proto,
   sst = session_type_from_proto_and_ip (transport_proto,
 					fib_proto == FIB_PROTOCOL_IP4);
 
-  /* *INDENT-OFF* */
    hash_foreach (handle, sm_index, app_wrk->listeners_table, ({
      listener = listen_session_get_from_handle (handle);
      if (listener->session_type == sst && (listener->flags & SESSION_F_PROXY))
        return listener;
    }));
-  /* *INDENT-ON* */
 
   return 0;
 }
@@ -792,9 +836,12 @@ app_worker_mq_wrk_is_congested (app_worker_t *app_wrk, u32 thread_index)
 void
 app_worker_set_mq_wrk_congested (app_worker_t *app_wrk, u32 thread_index)
 {
-  clib_atomic_fetch_add_relax (&app_wrk->mq_congested, 1);
   ASSERT (thread_index == vlib_get_thread_index ());
-  app_wrk->wrk_mq_congested[thread_index] = 1;
+  if (!app_wrk->wrk_mq_congested[thread_index])
+    {
+      clib_atomic_fetch_add_relax (&app_wrk->mq_congested, 1);
+      app_wrk->wrk_mq_congested[thread_index] = 1;
+    }
 }
 
 void
@@ -809,7 +856,7 @@ u8 *
 format_app_worker_listener (u8 * s, va_list * args)
 {
   app_worker_t *app_wrk = va_arg (*args, app_worker_t *);
-  u64 handle = va_arg (*args, u64);
+  session_handle_t handle = va_arg (*args, u64);
   u32 sm_index = va_arg (*args, u32);
   int verbose = va_arg (*args, int);
   session_t *listener;

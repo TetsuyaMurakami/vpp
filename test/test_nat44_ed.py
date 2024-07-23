@@ -21,8 +21,10 @@ from vpp_acl import AclRule, VppAcl, VppAclInterface
 from vpp_ip_route import VppIpRoute, VppRoutePath
 from vpp_papi import VppEnum
 from util import StatsDiff
+from config import config
 
 
+@unittest.skipIf("nat" in config.excluded_plugins, "Exclude NAT plugin tests")
 class TestNAT44ED(VppTestCase):
     """NAT44ED Test Case"""
 
@@ -90,7 +92,7 @@ class TestNAT44ED(VppTestCase):
 
     @classmethod
     def create_and_add_ip4_table(cls, i, table_id=0):
-        cls.vapi.ip_table_add_del(is_add=1, table={"table_id": table_id})
+        cls.vapi.ip_table_add_del_v2(is_add=1, table={"table_id": table_id})
         i.set_table_ip4(table_id)
 
     @classmethod
@@ -162,8 +164,6 @@ class TestNAT44ED(VppTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        if is_distro_ubuntu2204 == True and not hasattr(cls, "vpp"):
-            return
 
         cls.create_pg_interfaces(range(12))
         cls.interfaces = list(cls.pg_interfaces[:4])
@@ -174,7 +174,7 @@ class TestNAT44ED(VppTestCase):
             cls.configure_ip4_interface(i, hosts=3)
 
         # test specific (test-multiple-vrf)
-        cls.vapi.ip_table_add_del(is_add=1, table={"table_id": 1})
+        cls.vapi.ip_table_add_del_v2(is_add=1, table={"table_id": 1})
 
         # test specific (test-one-armed-nat44-static)
         cls.pg4.generate_remote_hosts(2)
@@ -2607,6 +2607,7 @@ class TestNAT44ED(VppTestCase):
 
 
 @tag_fixme_ubuntu2204
+@unittest.skipIf("nat" in config.excluded_plugins, "Exclude NAT plugin tests")
 class TestNAT44EDMW(TestNAT44ED):
     """NAT44ED MW Test Case"""
 
@@ -4399,8 +4400,8 @@ class TestNAT44EDMW(TestNAT44ED):
             self.pg7.unconfig()
             self.pg8.unconfig()
 
-            self.vapi.ip_table_add_del(is_add=0, table={"table_id": vrf_id_in})
-            self.vapi.ip_table_add_del(is_add=0, table={"table_id": vrf_id_out})
+            self.vapi.ip_table_add_del_v2(is_add=0, table={"table_id": vrf_id_in})
+            self.vapi.ip_table_add_del_v2(is_add=0, table={"table_id": vrf_id_out})
 
     def test_dynamic_output_feature_vrf(self):
         """NAT44ED dynamic translation test: output-feature, VRF"""
@@ -4469,7 +4470,7 @@ class TestNAT44EDMW(TestNAT44ED):
             self.pg7.unconfig()
             self.pg8.unconfig()
 
-            self.vapi.ip_table_add_del(is_add=0, table={"table_id": new_vrf_id})
+            self.vapi.ip_table_add_del_v2(is_add=0, table={"table_id": new_vrf_id})
 
     def test_next_src_nat(self):
         """NAT44ED On way back forward packet to nat44-in2out node."""

@@ -192,7 +192,7 @@ I:	sr
 M:	Pablo Camarillo <pcamaril@cisco.com>
 M:	Ahmed Abdelsalam <ahabdels@cisco.com>
 F:	src/vnet/srv6/
-F:	src/vnet/srmpls/
+F:	src/plugin/srmpls/
 F:	src/examples/srv6-sample-localsid/
 
 VNET IPSec
@@ -419,6 +419,12 @@ Plugin - Amazon Elastic Network Adapter (ENA) device driver
 I:	ena
 M:	Damjan Marion <damarion@cisco.com>
 F:	src/plugins/dev_ena/
+
+Plugin - Marvell Octeon device driver
+I:	octeon
+M:	Monendra Singh Kushwaha <kmonendra@marvell.com>
+M:	Damjan Marion <damarion@cisco.com>
+F:	src/plugins/dev_octeon/
 
 Plugin - Dispatch Trace PCAP
 I:	dispatch-trace
@@ -680,7 +686,7 @@ F:	src/plugins/snort/
 
 libmemif
 I:	libmemif
-M:	Damjan Marion <damarion@cisco.com>
+M:	Mohsin Kazmi <sykazmi@cisco.com>
 F:	extras/libmemif
 
 gomemif
@@ -886,3 +892,8 @@ M:	vpp-dev Mailing List <vpp-dev@fd.io>
 C:	Missing Maintainer
 F:	*
 F:	*/
+
+Netmap
+I:	netmap
+M:	Tom Jones <thj@freebsd.org>
+F:	src/plugins/netmap/

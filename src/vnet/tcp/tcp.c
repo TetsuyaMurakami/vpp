@@ -410,8 +410,8 @@ tcp_connection_close (tcp_connection_t * tc)
     case TCP_STATE_CLOSE_WAIT:
       if (!transport_max_tx_dequeue (&tc->connection))
 	{
-	  tcp_send_fin (tc);
 	  tcp_connection_timers_reset (tc);
+	  tcp_send_fin (tc);
 	  tcp_connection_set_state (tc, TCP_STATE_LAST_ACK);
 	  tcp_timer_update (&wrk->timer_wheel, tc, TCP_TIMER_WAITCLOSE,
 			    tcp_cfg.lastack_time);
@@ -831,7 +831,7 @@ tcp_session_open (transport_endpoint_cfg_t * rmt)
   ip_copy (&tc->c_rmt_ip, &rmt->ip, rmt->is_ip4);
   ip_copy (&tc->c_lcl_ip, &lcl_addr, rmt->is_ip4);
   tc->c_rmt_port = rmt->port;
-  tc->c_lcl_port = clib_host_to_net_u16 (lcl_port);
+  tc->c_lcl_port = lcl_port;
   tc->c_is_ip4 = rmt->is_ip4;
   tc->c_proto = TRANSPORT_PROTO_TCP;
   tc->c_fib_index = rmt->fib_index;
@@ -1223,7 +1223,6 @@ tcp_timer_waitclose_handler (tcp_connection_t * tc)
     }
 }
 
-/* *INDENT-OFF* */
 static timer_expiration_handler *timer_expiration_handlers[TCP_N_TIMERS] =
 {
     tcp_timer_retransmit_handler,
@@ -1231,7 +1230,6 @@ static timer_expiration_handler *timer_expiration_handlers[TCP_N_TIMERS] =
     tcp_timer_waitclose_handler,
     tcp_timer_retransmit_syn_handler,
 };
-/* *INDENT-ON* */
 
 static void
 tcp_dispatch_pending_timers (tcp_worker_ctx_t * wrk)
@@ -1339,7 +1337,6 @@ tcp_session_app_rx_evt (transport_connection_t *conn)
   return 0;
 }
 
-/* *INDENT-OFF* */
 const static transport_proto_vft_t tcp_proto = {
   .enable = vnet_tcp_enable_disable,
   .start_listen = tcp_session_bind,
@@ -1370,7 +1367,6 @@ const static transport_proto_vft_t tcp_proto = {
     .service_type = TRANSPORT_SERVICE_VC,
   },
 };
-/* *INDENT-ON* */
 
 void
 tcp_connection_tx_pacer_update (tcp_connection_t * tc)
@@ -1516,6 +1512,10 @@ tcp_main_enable (vlib_main_t * vm)
   clib_error_t *error = 0;
   int thread;
 
+  /* Already initialized */
+  if (tm->wrk_ctx)
+    return 0;
+
   if ((error = vlib_call_init_function (vm, ip_main_init)))
     return error;
   if ((error = vlib_call_init_function (vm, ip4_lookup_init)))
@@ -1646,6 +1646,9 @@ tcp_configuration_init (void)
 
   /* This value is seconds */
   tcp_cfg.cleanup_time = 0.1;	/* 100ms */
+
+  /* Time constants defined as tcp tick (1us) multiples */
+  tcp_cfg.syn_rcvd_time = TCP_ESTABLISH_TIME;
 }
 
 static clib_error_t *

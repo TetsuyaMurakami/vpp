@@ -14,6 +14,9 @@
  */
 
 #include <sys/socket.h>
+#include <sys/syscall.h>
+
+#include <openssl/rand.h>
 
 #include <vnet/session/application.h>
 #include <vnet/session/transport.h>
@@ -103,7 +106,6 @@ quic_app_cert_key_pair_delete_callback (app_cert_key_pair_t * ckpair)
 
   for (i = 0; i < num_threads; i++)
     {
-      /* *INDENT-OFF* */
       pool_foreach (crctx, qm->wrk_ctx[i].crypto_ctx_pool)  {
 	if (crctx->ckpair_index == ckpair->cert_key_index)
 	  {
@@ -111,7 +113,6 @@ quic_app_cert_key_pair_delete_callback (app_cert_key_pair_t * ckpair)
 	    clib_bihash_add_del_24_8 (&qm->wrk_ctx[i].crypto_context_hash, &kv, 0 /* is_add */ );
 	  }
       }
-      /* *INDENT-ON* */
     }
   return 0;
 }
@@ -151,11 +152,9 @@ quic_list_crypto_context_command_fn (vlib_main_t * vm,
   int i, num_threads = 1 /* main thread */  + vtm->n_threads;
   for (i = 0; i < num_threads; i++)
     {
-      /* *INDENT-OFF* */
       pool_foreach (crctx, qm->wrk_ctx[i].crypto_ctx_pool)  {
 	vlib_cli_output (vm, "[%d][Q]%U", i, format_crypto_context, crctx);
       }
-      /* *INDENT-ON* */
     }
   return 0;
 }
@@ -1059,6 +1058,8 @@ quic_on_stream_open (quicly_stream_open_t * self, quicly_stream_t * stream)
   svm_fifo_add_want_deq_ntf (stream_session->rx_fifo,
 			     SVM_FIFO_WANT_DEQ_NOTIF_IF_FULL |
 			     SVM_FIFO_WANT_DEQ_NOTIF_IF_EMPTY);
+  svm_fifo_init_ooo_lookup (stream_session->rx_fifo, 0 /* ooo enq */);
+  svm_fifo_init_ooo_lookup (stream_session->tx_fifo, 1 /* ooo deq */);
 
   stream_session->session_state = SESSION_STATE_ACCEPTING;
   if ((rv = app_worker_accept_notify (app_wrk, stream_session)))
@@ -1303,6 +1304,8 @@ quic_connect_stream (session_t * quic_session, session_endpoint_cfg_t * sep)
       return app_worker_connect_notify (app_wrk, NULL, rv, sep->opaque);
     }
 
+  svm_fifo_init_ooo_lookup (stream_session->rx_fifo, 0 /* ooo enq */);
+  svm_fifo_init_ooo_lookup (stream_session->tx_fifo, 1 /* ooo deq */);
   svm_fifo_add_want_deq_ntf (stream_session->rx_fifo,
 			     SVM_FIFO_WANT_DEQ_NOTIF_IF_FULL |
 			     SVM_FIFO_WANT_DEQ_NOTIF_IF_EMPTY);
@@ -1679,6 +1682,9 @@ quic_on_quic_session_connected (quic_ctx_t * ctx)
       app_worker_connect_notify (app_wrk, NULL, rv, ctx->client_opaque);
       return;
     }
+
+  svm_fifo_init_ooo_lookup (quic_session->rx_fifo, 0 /* ooo enq */);
+  svm_fifo_init_ooo_lookup (quic_session->tx_fifo, 1 /* ooo deq */);
 
   quic_session->session_state = SESSION_STATE_CONNECTING;
   if ((rv = app_worker_connect_notify (app_wrk, quic_session,
@@ -2138,6 +2144,9 @@ quic_accept_connection (quic_rx_packet_ctx_t * pctx)
       return;
     }
 
+  svm_fifo_init_ooo_lookup (quic_session->rx_fifo, 0 /* ooo enq */);
+  svm_fifo_init_ooo_lookup (quic_session->tx_fifo, 1 /* ooo deq */);
+
   app_wrk = app_worker_get (quic_session->app_wrk_index);
   quic_session->session_state = SESSION_STATE_ACCEPTING;
   if ((rv = app_worker_accept_notify (app_wrk, quic_session)))
@@ -2425,7 +2434,6 @@ quic_get_transport_endpoint (u32 ctx_index, u32 thread_index,
   quic_common_get_transport_endpoint (ctx, tep, is_lcl);
 }
 
-/* *INDENT-OFF* */
 static session_cb_vft_t quic_app_cb_vft = {
   .session_accept_callback = quic_udp_session_accepted_callback,
   .session_disconnect_callback = quic_udp_session_disconnect_callback,
@@ -2461,7 +2469,6 @@ static const transport_proto_vft_t quic_proto = {
     .service_type = TRANSPORT_SERVICE_APP,
   },
 };
-/* *INDENT-ON* */
 
 static quicly_stream_open_t on_stream_open = { quic_on_stream_open };
 static quicly_closed_by_remote_t on_closed_by_remote = {
@@ -2507,6 +2514,11 @@ quic_init (vlib_main_t * vm)
   u64 options[APP_OPTIONS_N_OPTIONS];
   quic_main_t *qm = &quic_main;
   u32 num_threads, i;
+  u8 seed[32];
+
+  if (syscall (SYS_getrandom, &seed, sizeof (seed), 0) != sizeof (seed))
+    return clib_error_return_unix (0, "getrandom() failed");
+  RAND_seed (seed, sizeof (seed));
 
   num_threads = 1 /* main thread */  + vtm->n_threads;
 
@@ -2696,7 +2708,6 @@ quic_show_aggregated_stats (vlib_main_t * vm)
   clib_memset (&agg_stats, 0, sizeof (agg_stats));
   for (i = 0; i < num_workers + 1; i++)
     {
-      /* *INDENT-OFF* */
       pool_foreach (ctx, qm->ctx_pool[i])
        {
 	if (quic_ctx_is_conn (ctx) && ctx->conn)
@@ -2716,7 +2727,6 @@ quic_show_aggregated_stats (vlib_main_t * vm)
 	else if (quic_ctx_is_stream (ctx))
 	  nstream++;
       }
-      /* *INDENT-ON* */
     }
   vlib_cli_output (vm, "-------- Connections --------");
   vlib_cli_output (vm, "Current:         %u", nconn);
@@ -2891,7 +2901,6 @@ quic_show_connections_command_fn (vlib_main_t * vm,
 
   for (int i = 0; i < num_workers + 1; i++)
     {
-      /* *INDENT-OFF* */
       pool_foreach (ctx, qm->ctx_pool[i])
        {
         if (quic_ctx_is_stream (ctx) && show_stream)
@@ -2901,7 +2910,6 @@ quic_show_connections_command_fn (vlib_main_t * vm,
 	else if (quic_ctx_is_conn (ctx) && show_conn)
           vlib_cli_output (vm, "%U", quic_format_connection_ctx, ctx);
       }
-      /* *INDENT-ON* */
     }
 
 done:
@@ -2909,7 +2917,6 @@ done:
   return error;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (quic_plugin_crypto_command, static) = {
   .path = "quic set crypto api",
   .short_help = "quic set crypto api [picotls|vpp]",
@@ -2950,7 +2957,6 @@ VLIB_PLUGIN_REGISTER () =
   .description = "Quic transport protocol",
   .default_disabled = 1,
 };
-/* *INDENT-ON* */
 
 static clib_error_t *
 quic_config_fn (vlib_main_t * vm, unformat_input_t * input)
@@ -3006,7 +3012,6 @@ quic_node_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (quic_input_node) =
 {
   .function = quic_node_fn,
@@ -3016,7 +3021,6 @@ VLIB_REGISTER_NODE (quic_input_node) =
   .n_errors = ARRAY_LEN (quic_error_strings),
   .error_strings = quic_error_strings,
 };
-/* *INDENT-ON* */
 
 /*
  * fd.io coding-style-patch-verification: ON

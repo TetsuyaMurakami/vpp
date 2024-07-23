@@ -16,10 +16,14 @@
 
 #include <signal.h>
 #include <math.h>
+#ifdef __FreeBSD__
+#include <pthread_np.h>
+#endif /* __FreeBSD__ */
 #include <vppinfra/format.h>
 #include <vppinfra/time_range.h>
 #include <vppinfra/interrupt.h>
-#include <vppinfra/linux/sysfs.h>
+#include <vppinfra/bitmap.h>
+#include <vppinfra/unix.h>
 #include <vlib/vlib.h>
 
 #include <vlib/threads.h>
@@ -186,10 +190,8 @@ vlib_thread_init (vlib_main_t * vm)
   ASSERT (stats_num_worker_threads_dir_index != ~0);
 
   /* get bitmaps of active cpu cores and sockets */
-  tm->cpu_core_bitmap =
-    clib_sysfs_list_to_bitmap ("/sys/devices/system/cpu/online");
-  tm->cpu_socket_bitmap =
-    clib_sysfs_list_to_bitmap ("/sys/devices/system/node/online");
+  tm->cpu_core_bitmap = os_get_online_cpu_core_bitmap ();
+  tm->cpu_socket_bitmap = os_get_online_cpu_node_bitmap ();
 
   avail_cpu = clib_bitmap_dup (tm->cpu_core_bitmap);
 
@@ -202,6 +204,10 @@ vlib_thread_init (vlib_main_t * vm)
 
       avail_cpu = clib_bitmap_set (avail_cpu, c, 0);
     }
+
+  /* if main thread affinity is unspecified, set to current running cpu */
+  if (tm->main_lcore == ~0)
+    tm->main_lcore = sched_getcpu ();
 
   /* grab cpu for main thread */
   if (tm->main_lcore != ~0)
@@ -222,7 +228,12 @@ vlib_thread_init (vlib_main_t * vm)
       cpu_set_t cpuset;
       CPU_ZERO (&cpuset);
       CPU_SET (tm->main_lcore, &cpuset);
-      pthread_setaffinity_np (pthread_self (), sizeof (cpu_set_t), &cpuset);
+      if (pthread_setaffinity_np (pthread_self (), sizeof (cpu_set_t),
+				  &cpuset))
+	{
+	  return clib_error_return (0, "could not pin main thread to cpu %u",
+				    tm->main_lcore);
+	}
     }
 
   /* Set up thread 0 */
@@ -232,7 +243,11 @@ vlib_thread_init (vlib_main_t * vm)
   w->thread_mheap = clib_mem_get_heap ();
   w->thread_stack = vlib_thread_stacks[0];
   w->cpu_id = tm->main_lcore;
+#ifdef __FreeBSD__
+  w->lwp = pthread_getthreadid_np ();
+#else
   w->lwp = syscall (SYS_gettid);
+#endif /* __FreeBSD__ */
   w->thread_id = pthread_self ();
   tm->n_vlib_mains = 1;
 
@@ -275,7 +290,6 @@ vlib_thread_init (vlib_main_t * vm)
       if (tr->coremask)
 	{
 	  uword c;
-          /* *INDENT-OFF* */
           clib_bitmap_foreach (c, tr->coremask)  {
             if (clib_bitmap_get(avail_cpu, c) == 0)
               return clib_error_return (0, "cpu %u is not available to be used"
@@ -283,7 +297,6 @@ vlib_thread_init (vlib_main_t * vm)
 
             avail_cpu = clib_bitmap_set(avail_cpu, c, 0);
           }
-          /* *INDENT-ON* */
 	}
       else
 	{
@@ -304,7 +317,8 @@ vlib_thread_init (vlib_main_t * vm)
 	      if (c == ~0)
 		return clib_error_return (0,
 					  "no available cpus to be used for"
-					  " the '%s' thread", tr->name);
+					  " the '%s' thread #%u",
+					  tr->name, tr->count);
 
 	      avail_cpu = clib_bitmap_set (avail_cpu, 0, avail_c0);
 	      avail_cpu = clib_bitmap_set (avail_cpu, c, 0);
@@ -360,6 +374,8 @@ void
 vlib_worker_thread_init (vlib_worker_thread_t * w)
 {
   vlib_thread_main_t *tm = vlib_get_thread_main ();
+  sigset_t signals;
+  int rv;
 
   /*
    * Note: disabling signals in worker threads as follows
@@ -369,7 +385,17 @@ vlib_worker_thread_init (vlib_worker_thread_t * w)
    *    sigfillset (&s);
    *    pthread_sigmask (SIG_SETMASK, &s, 0);
    *  }
+   * We can still disable signals for SIGINT,SIGHUP and SIGTERM as they don't
+   * trigger post-dump handlers anyway.
    */
+  sigemptyset (&signals);
+  sigaddset (&signals, SIGINT);
+  sigaddset (&signals, SIGHUP);
+  sigaddset (&signals, SIGTERM);
+  rv = pthread_sigmask (SIG_BLOCK, &signals, NULL);
+
+  if (rv)
+    clib_warning ("Failed to set the worker signal mask");
 
   clib_mem_set_heap (w->thread_mheap);
 
@@ -398,7 +424,11 @@ vlib_worker_thread_bootstrap_fn (void *arg)
 {
   vlib_worker_thread_t *w = arg;
 
+#ifdef __FreeBSD__
+  w->lwp = pthread_getthreadid_np ();
+#else
   w->lwp = syscall (SYS_gettid);
+#endif /* __FreeBSD__ */
   w->thread_id = pthread_self ();
 
   __os_thread_index = w - vlib_worker_threads;
@@ -423,32 +453,21 @@ vlib_worker_thread_bootstrap_fn (void *arg)
 void
 vlib_get_thread_core_numa (vlib_worker_thread_t * w, unsigned cpu_id)
 {
-  const char *sys_cpu_path = "/sys/devices/system/cpu/cpu";
-  const char *sys_node_path = "/sys/devices/system/node/node";
   clib_bitmap_t *nbmp = 0, *cbmp = 0;
-  u32 node;
-  u8 *p = 0;
-  int core_id = -1, numa_id = -1;
+  int node, core_id = -1, numa_id = -1;
 
-  p = format (p, "%s%u/topology/core_id%c", sys_cpu_path, cpu_id, 0);
-  clib_sysfs_read ((char *) p, "%d", &core_id);
-  vec_reset_length (p);
+  core_id = os_get_cpu_phys_core_id (cpu_id);
+  nbmp = os_get_online_cpu_node_bitmap ();
 
-  /* *INDENT-OFF* */
-  clib_sysfs_read ("/sys/devices/system/node/online", "%U",
-        unformat_bitmap_list, &nbmp);
   clib_bitmap_foreach (node, nbmp)  {
-    p = format (p, "%s%u/cpulist%c", sys_node_path, node, 0);
-    clib_sysfs_read ((char *) p, "%U", unformat_bitmap_list, &cbmp);
-    if (clib_bitmap_get (cbmp, cpu_id))
-      numa_id = node;
-    vec_reset_length (cbmp);
-    vec_reset_length (p);
+      cbmp = os_get_cpu_on_node_bitmap (node);
+      if (clib_bitmap_get (cbmp, cpu_id))
+	numa_id = node;
+      vec_reset_length (cbmp);
   }
-  /* *INDENT-ON* */
+
   vec_free (nbmp);
   vec_free (cbmp);
-  vec_free (p);
 
   w->core_id = core_id;
   w->numa_id = numa_id;
@@ -801,25 +820,26 @@ start_workers (vlib_main_t * vm)
 	{
 	  for (j = 0; j < tr->count; j++)
 	    {
+
 	      w = vlib_worker_threads + worker_thread_index++;
 	      err = vlib_launch_thread_int (vlib_worker_thread_bootstrap_fn,
 					    w, 0);
 	      if (err)
-		clib_error_report (err);
+		clib_unix_error ("%U, thread %s init on cpu %d failed",
+				 format_clib_error, err, tr->name, 0);
 	    }
 	}
       else
 	{
 	  uword c;
-          /* *INDENT-OFF* */
           clib_bitmap_foreach (c, tr->coremask)  {
             w = vlib_worker_threads + worker_thread_index++;
 	    err = vlib_launch_thread_int (vlib_worker_thread_bootstrap_fn,
 					  w, c);
 	    if (err)
-	      clib_error_report (err);
-          }
-          /* *INDENT-ON* */
+	      clib_unix_error ("%U, thread %s init on cpu %d failed",
+			       format_clib_error, err, tr->name, c);
+	    }
 	}
     }
   vlib_worker_thread_barrier_sync (vm);
@@ -1118,6 +1138,7 @@ cpu_config (vlib_main_t * vm, unformat_input_t * input)
   u8 *name;
   uword *bitmap;
   u32 count;
+  int use_corelist = 0;
 
   tm->thread_registrations_by_name = hash_create_string (0, sizeof (uword));
 
@@ -1169,6 +1190,7 @@ cpu_config (vlib_main_t * vm, unformat_input_t * input)
 
 	  tr->coremask = bitmap;
 	  tr->count = clib_bitmap_count_set_bits (tr->coremask);
+	  use_corelist = 1;
 	}
       else
 	if (unformat
@@ -1198,6 +1220,9 @@ cpu_config (vlib_main_t * vm, unformat_input_t * input)
 	break;
     }
 
+  if (use_corelist && tm->main_lcore == ~0)
+    return clib_error_return (0, "main-core must be specified when using "
+				 "corelist-* or coremask-* attribute");
   if (tm->sched_priority != ~0)
     {
       if (tm->sched_policy == SCHED_FIFO || tm->sched_policy == SCHED_RR)
@@ -1512,6 +1537,7 @@ vlib_workers_sync (void)
       u32 thread_index = vlib_get_thread_index ();
       vlib_rpc_call_main_thread (vlib_worker_sync_rpc, (u8 *) &thread_index,
 				 sizeof (thread_index));
+      vlib_worker_flush_pending_rpc_requests (vlib_get_main ());
     }
 
   /* Wait until main thread asks for barrier */
@@ -1580,6 +1606,19 @@ vlib_worker_wait_one_loop (void)
 }
 
 void
+vlib_worker_flush_pending_rpc_requests (vlib_main_t *vm)
+{
+  vlib_main_t *vm_global = vlib_get_first_main ();
+
+  ASSERT (vm != vm_global);
+
+  clib_spinlock_lock_if_init (&vm_global->pending_rpc_lock);
+  vec_append (vm_global->pending_rpc_requests, vm->pending_rpc_requests);
+  vec_reset_length (vm->pending_rpc_requests);
+  clib_spinlock_unlock_if_init (&vm_global->pending_rpc_lock);
+}
+
+void
 vlib_worker_thread_fn (void *arg)
 {
   vlib_global_main_t *vgm = vlib_get_global_main ();
@@ -1604,13 +1643,11 @@ vlib_worker_thread_fn (void *arg)
   vlib_worker_loop (vm);
 }
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_THREAD (worker_thread_reg, static) = {
   .name = "workers",
   .short_name = "wk",
   .function = vlib_worker_thread_fn,
 };
-/* *INDENT-ON* */
 
 extern clib_march_fn_registration
   *vlib_frame_queue_dequeue_with_aux_fn_march_fn_registrations;
@@ -1732,14 +1769,12 @@ show_clock_command_fn (vlib_main_t * vm,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (f_command, static) =
 {
   .path = "show clock",
   .short_help = "show clock",
   .function = show_clock_command_fn,
 };
-/* *INDENT-ON* */
 
 vlib_thread_main_t *
 vlib_get_thread_main_not_inline (void)

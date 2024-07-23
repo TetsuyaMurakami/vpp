@@ -78,16 +78,14 @@ handle_get_interface_stats (hss_url_handler_args_t *args)
   vnet_interface_main_t *im = &vnm->interface_main;
 
   /* Get stats for a single interface via http POST */
-  if (args->reqtype == HTTP_REQ_POST)
+  if (args->req_type == HTTP_REQ_POST)
     {
-      trim_path_from_request (args->request, "interface_stats.json");
-
       /* Find the sw_if_index */
-      p = hash_get (im->hw_interface_by_name, args->request);
+      p = hash_get (im->hw_interface_by_name, args->req_data);
       if (!p)
 	{
 	  s = format (s, "{\"interface_stats\": {[\n");
-	  s = format (s, "   \"name\": \"%s\",", args->request);
+	  s = format (s, "   \"name\": \"%s\",", args->req_data);
 	  s = format (s, "   \"error\": \"%s\"", "UnknownInterface");
 	  s = format (s, "]}\n");
 	  goto out;
@@ -97,12 +95,10 @@ handle_get_interface_stats (hss_url_handler_args_t *args)
     }
   else				/* default, HTTP_BUILTIN_METHOD_GET */
     {
-      /* *INDENT-OFF* */
       pool_foreach (hi, im->hw_interfaces)
        {
         vec_add1 (sw_if_indices, hi->sw_if_index);
       }
-      /* *INDENT-ON* */
     }
 
   s = format (s, "{%sinterface_stats%s: [\n", q, q);
@@ -150,14 +146,12 @@ handle_get_interface_list (hss_url_handler_args_t *args)
   int need_comma = 0;
 
   /* Construct vector of active hw_if_indexes ... */
-  /* *INDENT-OFF* */
   pool_foreach (hi, im->hw_interfaces)
    {
     /* No point in mentioning "local0"... */
     if (hi - im->hw_interfaces)
       vec_add1 (hw_if_indices, hi - im->hw_interfaces);
   }
-  /* *INDENT-ON* */
 
   /* Build answer */
   s = format (s, "{\"interface_list\": [\n");

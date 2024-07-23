@@ -9,9 +9,13 @@ from asfframework import (
     tag_run_solo,
 )
 from vpp_ip_route import VppIpTable, VppIpRoute, VppRoutePath
+from config import config
 
 
 @tag_fixme_vpp_workers
+@unittest.skipIf(
+    "hs_apps" in config.excluded_plugins, "Exclude tests requiring hs_apps plugin"
+)
 class TestSession(VppAsfTestCase):
     """Session Test Case"""
 
@@ -55,6 +59,14 @@ class TestSession(VppAsfTestCase):
             i.unconfig_ip4()
             i.set_table_ip4(0)
             i.admin_down()
+
+        # Unconfigure namespaces - remove our locks to the vrf tables
+        self.vapi.app_namespace_add_del_v4(
+            is_add=0, namespace_id="0", sw_if_index=self.loop0.sw_if_index
+        )
+        self.vapi.app_namespace_add_del_v4(
+            is_add=0, namespace_id="1", sw_if_index=self.loop1.sw_if_index
+        )
 
         super(TestSession, self).tearDown()
         self.vapi.session_enable_disable(is_enable=1)

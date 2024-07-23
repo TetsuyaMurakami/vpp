@@ -317,6 +317,12 @@ class VppAsfTestCase(CPUInterface, unittest.TestCase):
                 cls = unittest.skip("Skipping @tag_fixme_asan tests")(cls)
 
     @classmethod
+    def skip_fixme_ubuntu2204(cls):
+        """if @tag_fixme_ubuntu2204 & is Ubuntu22.04 - mark for skip"""
+        if cls.has_tag(TestCaseTag.FIXME_UBUNTU2204) and is_distro_ubuntu2204 == True:
+            cls = unittest.skip("Skipping @tag_fixme_ubuntu2204 tests")(cls)
+
+    @classmethod
     def instance(cls):
         """Return the instance of this testcase"""
         return cls.test_instance
@@ -581,6 +587,10 @@ class VppAsfTestCase(CPUInterface, unittest.TestCase):
     @classmethod
     def get_api_sock_path(cls):
         return "%s/api.sock" % cls.tempdir
+
+    @classmethod
+    def get_memif_sock_path(cls):
+        return "%s/memif.sock" % cls.tempdir
 
     @classmethod
     def get_api_segment_prefix(cls):
@@ -1151,16 +1161,13 @@ class VppTestResult(unittest.TestResult):
         self.runner = runner
         self.printed = []
 
-    def decodePcapFiles(self, test, when_configured=False):
-        if when_configured == False or config.decode_pcaps == True:
-            if hasattr(test, "pg_interfaces") and len(test.pg_interfaces) > 0:
-                testcase_dir = os.path.dirname(test.pg_interfaces[0].out_path)
-                test.pg_interfaces[0].decode_pcap_files(
-                    testcase_dir, f"suite{test.__class__.__name__}"
-                )
-                test.pg_interfaces[0].decode_pcap_files(
-                    testcase_dir, test._testMethodName
-                )
+    def decodePcapFiles(self, test):
+        if hasattr(test, "pg_interfaces") and len(test.pg_interfaces) > 0:
+            testcase_dir = os.path.dirname(test.pg_interfaces[0].out_path)
+            test.pg_interfaces[0].decode_pcap_files(
+                testcase_dir, f"suite{test.__class__.__name__}"
+            )
+            test.pg_interfaces[0].decode_pcap_files(testcase_dir, test._testMethodName)
 
     def addSuccess(self, test):
         """
@@ -1170,7 +1177,8 @@ class VppTestResult(unittest.TestResult):
 
         """
         self.log_result("addSuccess", test)
-        self.decodePcapFiles(test, when_configured=True)
+        if "all" == config.decode_pcaps:
+            self.decodePcapFiles(test)
         unittest.TestResult.addSuccess(self, test)
         self.result_string = colorize("OK", GREEN)
         self.result_code = TestResultCode.PASS
@@ -1178,7 +1186,8 @@ class VppTestResult(unittest.TestResult):
 
     def addExpectedFailure(self, test, err):
         self.log_result("addExpectedFailure", test, err)
-        self.decodePcapFiles(test)
+        if "none" != config.decode_pcaps:
+            self.decodePcapFiles(test)
         super().addExpectedFailure(test, err)
         self.result_string = colorize("FAIL", GREEN)
         self.result_code = TestResultCode.EXPECTED_FAIL
@@ -1186,7 +1195,8 @@ class VppTestResult(unittest.TestResult):
 
     def addUnexpectedSuccess(self, test):
         self.log_result("addUnexpectedSuccess", test)
-        self.decodePcapFiles(test, when_configured=True)
+        if "none" != config.decode_pcaps:
+            self.decodePcapFiles(test)
         super().addUnexpectedSuccess(test)
         self.result_string = colorize("OK", RED)
         self.result_code = TestResultCode.UNEXPECTED_PASS
@@ -1272,7 +1282,9 @@ class VppTestResult(unittest.TestResult):
             error_type_str = colorize("ERROR", RED)
         else:
             raise Exception(f"Unexpected result code {result_code}")
-        self.decodePcapFiles(test)
+
+        if "none" != config.decode_pcaps:
+            self.decodePcapFiles(test)
 
         unittest_fn(self, test, err)
         if self.current_test_case_info:
@@ -1356,6 +1368,13 @@ class VppTestResult(unittest.TestResult):
             if test.has_tag(TestCaseTag.FIXME_ASAN):
                 test_title = colorize(f"FIXME with ASAN: {test_title}", RED)
                 test.skip_fixme_asan()
+
+            if (
+                test.has_tag(TestCaseTag.FIXME_UBUNTU2204)
+                and is_distro_ubuntu2204 == True
+            ):
+                test_title = colorize(f"FIXME with Ubuntu 22.04: {test_title}", RED)
+                test.skip_fixme_ubuntu2204()
 
             if hasattr(test, "vpp_worker_count"):
                 if test.vpp_worker_count == 0:

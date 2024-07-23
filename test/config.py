@@ -201,6 +201,7 @@ parser.add_argument(
 parser.add_argument(
     "--sanity", action="store_true", help="perform sanity vpp run before running tests"
 )
+parser.add_argument("--api-preload", action="store_true", help="preload API files")
 
 parser.add_argument(
     "--force-foreground",
@@ -408,10 +409,11 @@ parser.add_argument(
     "/var/run/user/${uid}/vpp.",
 )
 
-default_decode_pcaps = False
+default_decode_pcaps = "failed"
 parser.add_argument(
     "--decode-pcaps",
-    action="store_true",
+    action="store",
+    choices=["none", "failed", "all"],
     default=default_decode_pcaps,
     help=f"if set, decode all pcap files from a test run (default: {default_decode_pcaps})",
 )

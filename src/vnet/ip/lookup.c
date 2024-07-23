@@ -419,10 +419,12 @@ vnet_ip_table_cmd (vlib_main_t * vm,
   unformat_input_t _line_input, *line_input = &_line_input;
   clib_error_t *error = NULL;
   u32 table_id, is_add;
+  u8 create_mfib;
   u8 *name = NULL;
 
   is_add = 1;
   table_id = ~0;
+  create_mfib = 1;
 
   /* Get a line of input. */
   if (!unformat_user (main_input, unformat_line_input, line_input))
@@ -438,6 +440,8 @@ vnet_ip_table_cmd (vlib_main_t * vm,
 	is_add = 1;
       else if (unformat (line_input, "name %s", &name))
 	;
+      else if (unformat (line_input, "no-mfib"))
+	create_mfib = 0;
       else
 	{
 	  error = unformat_parse_error (line_input);
@@ -459,7 +463,8 @@ vnet_ip_table_cmd (vlib_main_t * vm,
 		  table_id = ip_table_get_unused_id (fproto);
 		  vlib_cli_output (vm, "%u\n", table_id);
 		}
-	      ip_table_create (fproto, table_id, 0, name);
+	      ip_table_create (fproto, table_id, 0 /* is_api */, create_mfib,
+			       name);
 	    }
 	  else
 	    {
@@ -557,33 +562,25 @@ vnet_show_ip6_table_cmd (vlib_main_t *vm, unformat_input_t *main_input,
   return (vnet_show_ip_table_cmd (vm, main_input, cmd, FIB_PROTOCOL_IP6));
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (vlib_cli_ip_command, static) = {
   .path = "ip",
   .short_help = "Internet protocol (IP) commands",
 };
-/* *INDENT-ON* */
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (vlib_cli_ip6_command, static) = {
   .path = "ip6",
   .short_help = "Internet protocol version 6 (IPv6) commands",
 };
-/* *INDENT-ON* */
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (vlib_cli_show_ip_command, static) = {
   .path = "show ip",
   .short_help = "Internet protocol (IP) show commands",
 };
-/* *INDENT-ON* */
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (vlib_cli_show_ip6_command, static) = {
   .path = "show ip6",
   .short_help = "Internet protocol version 6 (IPv6) show commands",
 };
-/* *INDENT-ON* */
 
 /*?
  * This command is used to add or delete IPv4 or IPv6 routes. All
@@ -611,8 +608,9 @@ VLIB_CLI_COMMAND (vlib_cli_show_ip6_command, static) = {
  * @cliexcmd{ip route add 7.0.0.1/32 via 6.0.0.2 GigabitEthernet2/0/0 weight 3}
  * To add a route to a particular FIB table (VRF), use:
  * @cliexcmd{ip route add 172.16.24.0/24 table 7 via GigabitEthernet2/0/0}
+ * To add a route to drop the traffic:
+ * @cliexcmd{ip route add 172.16.24.0/24 table 100 via 127.0.0.1 drop}
  ?*/
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (ip_route_command, static) = {
   .path = "ip route",
   .short_help = "ip route [add|del] [count <n>] <dst-ip-addr>/<width> [table "
@@ -620,35 +618,30 @@ VLIB_CLI_COMMAND (ip_route_command, static) = {
 		"[next-hop-table <value>] [weight <value>] [preference "
 		"<value>] [udp-encap <value>] [ip4-lookup-in-table <value>] "
 		"[ip6-lookup-in-table <value>] [mpls-lookup-in-table <value>] "
-		"[resolve-via-host] [resolve-via-connected] [rx-ip4 "
-		"<interface>] [out-labels <value value value>]",
+		"[resolve-via-host] [resolve-via-connected] [rx-ip4|rx-ip6 "
+		"<interface>] [out-labels <value value value>] [drop]",
   .function = vnet_ip_route_cmd,
   .is_mp_safe = 1,
 };
 
-/* *INDENT-ON* */
 /*?
  * This command is used to add or delete IPv4  Tables. All
  * Tables must be explicitly added before that can be used. Creating a
  * table will add both unicast and multicast FIBs
  *
  ?*/
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (ip4_table_command, static) = {
   .path = "ip table",
   .short_help = "ip table [add|del] <table-id>",
   .function = vnet_ip4_table_cmd,
 };
-/* *INDENT-ON* */
 
-/* *INDENT-ON* */
 /*?
  * This command is used to add or delete IPv4  Tables. All
  * Tables must be explicitly added before that can be used. Creating a
  * table will add both unicast and multicast FIBs
  *
  ?*/
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (ip6_table_command, static) = {
   .path = "ip6 table",
   .short_help = "ip6 table [add|del] <table-id>",
@@ -753,14 +746,12 @@ ip6_table_bind_cmd (vlib_main_t * vm,
  * Example of how to add an interface to an IPv4 FIB table (where 2 is the table-id):
  * @cliexcmd{set interface ip table GigabitEthernet2/0/0 2}
  ?*/
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (set_interface_ip_table_command, static) =
 {
   .path = "set interface ip table",
   .function = ip4_table_bind_cmd,
   .short_help = "set interface ip table <interface> <table-id>",
 };
-/* *INDENT-ON* */
 
 /*?
  * Place the indicated interface into the supplied IPv6 FIB table (also known
@@ -781,14 +772,12 @@ VLIB_CLI_COMMAND (set_interface_ip_table_command, static) =
  * Example of how to add an interface to an IPv6 FIB table (where 2 is the table-id):
  * @cliexcmd{set interface ip6 table GigabitEthernet2/0/0 2}
  ?*/
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (set_interface_ip6_table_command, static) =
 {
   .path = "set interface ip6 table",
   .function = ip6_table_bind_cmd,
   .short_help = "set interface ip6 table <interface> <table-id>"
 };
-/* *INDENT-ON* */
 
 clib_error_t *
 vnet_ip_mroute_cmd (vlib_main_t * vm,
@@ -1025,7 +1014,6 @@ done:
  * @cliexcmd{ip mroute add 232.1.1.1 Signal}
 
  ?*/
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (ip_mroute_command, static) =
 {
   .path = "ip mroute",
@@ -1033,7 +1021,6 @@ VLIB_CLI_COMMAND (ip_mroute_command, static) =
   .function = vnet_ip_mroute_cmd,
   .is_mp_safe = 1,
 };
-/* *INDENT-ON* */
 
 /*
  * fd.io coding-style-patch-verification: ON

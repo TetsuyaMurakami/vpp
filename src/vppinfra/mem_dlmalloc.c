@@ -19,21 +19,7 @@
 #include <vppinfra/lock.h>
 #include <vppinfra/hash.h>
 #include <vppinfra/elf_clib.h>
-
-typedef struct
-{
-  /* Address of callers: outer first, inner last. */
-  uword callers[12];
-
-  /* Count of allocations with this traceback. */
-  u32 n_allocations;
-
-  /* Count of bytes allocated with this traceback. */
-  u32 n_bytes;
-
-  /* Offset of this item */
-  uword offset;
-} mheap_trace_t;
+#include <vppinfra/stack.h>
 
 typedef struct
 {
@@ -65,14 +51,12 @@ mheap_get_trace_internal (const clib_mem_heap_t *heap, uword offset,
 {
   mheap_trace_main_t *tm = &mheap_trace_main;
   mheap_trace_t *t;
-  uword i, n_callers, trace_index, *p;
-  mheap_trace_t trace;
+  uword i, trace_index, *p;
+  mheap_trace_t trace = {};
+  int index;
 
   if (heap != tm->current_traced_mheap || mheap_trace_thread_disable)
     return;
-
-  /* Spurious Coverity warnings be gone. */
-  clib_memset (&trace, 0, sizeof (trace));
 
   clib_spinlock_lock (&tm->lock);
 
@@ -83,9 +67,19 @@ mheap_get_trace_internal (const clib_mem_heap_t *heap, uword offset,
   /* Turn off tracing for this thread to avoid embarrassment... */
   mheap_trace_thread_disable = 1;
 
-  /* Skip our frame and mspace_get_aligned's frame */
-  n_callers = clib_backtrace (trace.callers, ARRAY_LEN (trace.callers), 2);
-  if (n_callers == 0)
+  index = -2; /* skip first 2 stack frames */
+  foreach_clib_stack_frame (sf)
+    {
+      if (index >= 0)
+	{
+	  if (index == ARRAY_LEN (trace.callers))
+	    break;
+	  trace.callers[index] = sf->ip;
+	}
+      index++;
+    }
+
+  if (index < 1)
     goto out;
 
   if (!tm->trace_by_callers)
@@ -117,14 +111,12 @@ mheap_get_trace_internal (const clib_mem_heap_t *heap, uword offset,
 	    {
 	      hash_pair_t *p;
 	      mheap_trace_t *q;
-            /* *INDENT-OFF* */
 	    hash_foreach_pair (p, tm->trace_by_callers,
             ({
               q = uword_to_pointer (p->key, mheap_trace_t *);
               ASSERT (q >= old_start && q < old_end);
 	      p->key = pointer_to_uword (tm->traces + (q - old_start));
 	    }));
-            /* *INDENT-ON* */
 	    }
 	  trace_index = t - tm->traces;
 	}
@@ -565,6 +557,23 @@ clib_mem_trace_enable_disable (uword enable)
   uword rv = !mheap_trace_thread_disable;
   mheap_trace_thread_disable = !enable;
   return rv;
+}
+
+__clib_export mheap_trace_t *
+clib_mem_trace_dup (clib_mem_heap_t *heap)
+{
+  mheap_trace_main_t *tm = &mheap_trace_main;
+  mheap_trace_t *traces_copy = 0;
+
+  clib_spinlock_lock (&tm->lock);
+  if (vec_len (tm->traces) > 0 && heap == tm->current_traced_mheap)
+    {
+      traces_copy = vec_dup (tm->traces);
+      qsort (traces_copy, vec_len (traces_copy), sizeof (traces_copy[0]),
+	     mheap_trace_sort);
+    }
+  clib_spinlock_unlock (&tm->lock);
+  return traces_copy;
 }
 
 __clib_export clib_mem_heap_t *

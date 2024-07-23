@@ -9,8 +9,12 @@ from scapy.packet import Raw
 
 from framework import VppTestCase
 from asfframework import VppTestRunner
+from config import config
 
 
+@unittest.skipIf(
+    "dispatch-trace" in config.excluded_plugins, "Exclude dispatch trace plugin tests"
+)
 class TestPcap(VppTestCase):
     """Pcap Unit Test Cases"""
 
@@ -135,7 +139,7 @@ class TestPcap(VppTestCase):
         self.vapi.cli("classify filter pcap del mask l3 ip4 src")
 
         pkt = (
-            Ether(src=self.pg0.local_mac, dst=self.pg0.remote_mac)
+            Ether(src=self.pg0.remote_mac, dst=self.pg0.local_mac)
             # wrong destination address
             / IP(src=self.pg0.local_ip4, dst=self.pg0.local_ip4, ttl=2)
             / UDP(sport=1234, dport=2345)

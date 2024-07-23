@@ -27,17 +27,10 @@ clib_aes_cbc_encrypt (const aes_cbc_key_data_t *kd, const u8 *src, uword len,
   for (int i = 0; i < len; i += 16)
     {
       int j;
-#if __x86_64__
       r = u8x16_xor3 (r, *(u8x16u *) (src + i), k[0]);
       for (j = 1; j < rounds; j++)
-	r = aes_enc_round (r, k[j]);
-      r = aes_enc_last_round (r, k[rounds]);
-#else
-      r ^= *(u8x16u *) (src + i);
-      for (j = 1; j < rounds - 1; j++)
-	r = vaesmcq_u8 (vaeseq_u8 (r, k[j]));
-      r = vaeseq_u8 (r, k[j]) ^ k[rounds];
-#endif
+	r = aes_enc_round_x1 (r, k[j]);
+      r = aes_enc_last_round_x1 (r, k[rounds]);
       *(u8x16u *) (dst + i) = r;
     }
 }
@@ -85,16 +78,16 @@ aes_cbc_dec (const u8x16 *k, u8x16u *src, u8x16u *dst, u8x16u *iv, int count,
 
       for (int i = 1; i < rounds; i++)
 	{
-	  r[0] = aes_dec_round (r[0], k[i]);
-	  r[1] = aes_dec_round (r[1], k[i]);
-	  r[2] = aes_dec_round (r[2], k[i]);
-	  r[3] = aes_dec_round (r[3], k[i]);
+	  r[0] = aes_dec_round_x1 (r[0], k[i]);
+	  r[1] = aes_dec_round_x1 (r[1], k[i]);
+	  r[2] = aes_dec_round_x1 (r[2], k[i]);
+	  r[3] = aes_dec_round_x1 (r[3], k[i]);
 	}
 
-      r[0] = aes_dec_last_round (r[0], k[rounds]);
-      r[1] = aes_dec_last_round (r[1], k[rounds]);
-      r[2] = aes_dec_last_round (r[2], k[rounds]);
-      r[3] = aes_dec_last_round (r[3], k[rounds]);
+      r[0] = aes_dec_last_round_x1 (r[0], k[rounds]);
+      r[1] = aes_dec_last_round_x1 (r[1], k[rounds]);
+      r[2] = aes_dec_last_round_x1 (r[2], k[rounds]);
+      r[3] = aes_dec_last_round_x1 (r[3], k[rounds]);
 #else
       for (int i = 0; i < rounds - 1; i++)
 	{
@@ -125,8 +118,8 @@ aes_cbc_dec (const u8x16 *k, u8x16u *src, u8x16u *dst, u8x16u *iv, int count,
 #if __x86_64__
       r[0] ^= k[0];
       for (int i = 1; i < rounds; i++)
-	r[0] = aes_dec_round (r[0], k[i]);
-      r[0] = aes_dec_last_round (r[0], k[rounds]);
+	r[0] = aes_dec_round_x1 (r[0], k[i]);
+      r[0] = aes_dec_last_round_x1 (r[0], k[rounds]);
 #else
       c[0] = r[0] = src[0];
       for (int i = 0; i < rounds - 1; i++)
@@ -469,9 +462,9 @@ aes2_cbc_dec (const u8x16 *k, u8x32u *src, u8x32u *dst, u8x16u *iv, int count,
     {
       u8x16 rl = *(u8x16u *) src ^ k[0];
       for (i = 1; i < rounds; i++)
-	rl = aes_dec_round (rl, k[i]);
-      rl = aes_dec_last_round (rl, k[i]);
-      *(u8x16 *) dst = rl ^ u8x32_extract_hi (f);
+	rl = aes_dec_round_x1 (rl, k[i]);
+      rl = aes_dec_last_round_x1 (rl, k[i]);
+      *(u8x16u *) dst = rl ^ u8x32_extract_hi (f);
     }
 }
 #endif

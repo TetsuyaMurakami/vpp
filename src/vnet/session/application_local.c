@@ -70,6 +70,7 @@ typedef struct ct_main_
   u32 **fwrk_pending_connects;		/**< First wrk pending half-opens */
   u32 fwrk_thread;			/**< First worker thread */
   u8 fwrk_have_flush;			/**< Flag for connect flush rpc */
+  u8 is_init;
 } ct_main_t;
 
 static ct_main_t ct_main;
@@ -995,7 +996,7 @@ ct_session_connect (transport_endpoint_cfg_t * tep)
     goto global_scope;
 
   ll = listen_session_get_from_handle (lh);
-  al = app_listener_get_w_session (ll);
+  al = app_listener_get (ll->al_index);
 
   /*
    * Break loop if rule in local table points to connecting app. This
@@ -1024,8 +1025,12 @@ global_scope:
   ll = session_lookup_listener_wildcard (table_index, sep);
 
   /* Avoid connecting app to own listener */
-  if (ll && ll->app_index != app->app_index)
-    return ct_connect (app_wrk, ll, sep_ext);
+  if (ll)
+    {
+      al = app_listener_get (ll->al_index);
+      if (al->app_index != app->app_index)
+	return ct_connect (app_wrk, ll, sep_ext);
+    }
 
   /* Failed to connect but no error */
   return SESSION_E_LOCAL_CONNECT;
@@ -1034,6 +1039,8 @@ global_scope:
 static inline int
 ct_close_is_reset (ct_connection_t *ct, session_t *s)
 {
+  if (ct->flags & CT_CONN_F_RESET)
+    return 1;
   if (ct->flags & CT_CONN_F_CLIENT)
     return (svm_fifo_max_dequeue (ct->client_rx_fifo) > 0);
   else
@@ -1126,10 +1133,10 @@ ct_handle_cleanups (void *args)
       clib_fifo_sub2 (wrk->pending_cleanups, req);
       ct = ct_connection_get (req->ct_index, thread_index);
       s = session_get (ct->c_s_index, ct->c_thread_index);
-      if (!svm_fifo_has_event (s->tx_fifo))
-	ct_session_postponed_cleanup (ct);
-      else
+      if (svm_fifo_has_event (s->tx_fifo) || (s->flags & SESSION_F_RX_EVT))
 	clib_fifo_add1 (wrk->pending_cleanups, *req);
+      else
+	ct_session_postponed_cleanup (ct);
       n_to_handle -= 1;
     }
 
@@ -1192,6 +1199,15 @@ ct_session_close (u32 ct_index, u32 thread_index)
   /* Do not send closed notify to make sure pending tx events are
    * still delivered and program cleanup */
   ct_program_cleanup (ct);
+}
+
+static void
+ct_session_reset (u32 ct_index, u32 thread_index)
+{
+  ct_connection_t *ct;
+  ct = ct_connection_get (ct_index, thread_index);
+  ct->flags |= CT_CONN_F_RESET;
+  ct_session_close (ct_index, thread_index);
 }
 
 static transport_connection_t *
@@ -1335,18 +1351,25 @@ ct_enable_disable (vlib_main_t * vm, u8 is_en)
   ct_main_t *cm = &ct_main;
   ct_worker_t *wrk;
 
+  if (is_en == 0)
+    return 0;
+
+  if (cm->is_init)
+    return 0;
+
   cm->n_workers = vlib_num_workers ();
   cm->fwrk_thread = transport_cl_thread ();
   vec_validate (cm->wrk, vtm->n_vlib_mains);
+  vec_validate (cm->fwrk_pending_connects, cm->n_workers);
   vec_foreach (wrk, cm->wrk)
     clib_spinlock_init (&wrk->pending_connects_lock);
   clib_spinlock_init (&cm->ho_reuseable_lock);
   clib_rwlock_init (&cm->app_segs_lock);
-  vec_validate (cm->fwrk_pending_connects, cm->n_workers);
+  cm->is_init = 1;
+
   return 0;
 }
 
-/* *INDENT-OFF* */
 static const transport_proto_vft_t cut_thru_proto = {
   .enable = ct_enable_disable,
   .start_listen = ct_start_listen,
@@ -1358,6 +1381,7 @@ static const transport_proto_vft_t cut_thru_proto = {
   .cleanup_ho = ct_cleanup_ho,
   .connect = ct_session_connect,
   .close = ct_session_close,
+  .reset = ct_session_reset,
   .custom_tx = ct_custom_tx,
   .app_rx_evt = ct_app_rx_evt,
   .format_listener = format_ct_listener,
@@ -1370,7 +1394,6 @@ static const transport_proto_vft_t cut_thru_proto = {
     .service_type = TRANSPORT_SERVICE_VC,
   },
 };
-/* *INDENT-ON* */
 
 static inline int
 ct_session_can_tx (session_t *s)
@@ -1395,6 +1418,7 @@ ct_session_tx (session_t * s)
   peer_s = session_get (peer_ct->c_s_index, peer_ct->c_thread_index);
   if (peer_s->session_state >= SESSION_STATE_TRANSPORT_CLOSING)
     return 0;
+  peer_s->flags |= SESSION_F_RX_EVT;
   return session_enqueue_notify (peer_s);
 }
 

@@ -5,8 +5,8 @@ import copy
 from scapy.layers.ipsec import SecurityAssociation, ESP
 from scapy.layers.l2 import Ether, GRE, Dot1Q
 from scapy.packet import Raw, bind_layers
-from scapy.layers.inet import IP, UDP
-from scapy.layers.inet6 import IPv6
+from scapy.layers.inet import IP, UDP, ICMP
+from scapy.layers.inet6 import IPv6, ICMPv6EchoRequest
 from scapy.contrib.mpls import MPLS
 from asfframework import VppTestRunner, tag_fixme_vpp_workers
 from template_ipsec import (
@@ -41,6 +41,7 @@ from vpp_papi import VppEnum
 from vpp_papi_provider import CliFailedCommandError
 from vpp_acl import AclRule, VppAcl, VppAclInterface
 from vpp_policer import PolicerAction, VppPolicer, Dir
+from config import config
 
 
 def config_tun_params(p, encryption_type, tun_if, src=None, dst=None):
@@ -367,6 +368,29 @@ class TemplateIpsec4TunIfEspUdp(TemplateIpsec4TunProtect, TemplateIpsec):
         super(TemplateIpsec4TunIfEspUdp, self).tearDown()
 
 
+class TemplateIpsec4TunTfc:
+    """IPsec IPv4 tunnel with TFC"""
+
+    def gen_encrypt_pkts(self, p, sa, sw_intf, src, dst, count=1, payload_size=54):
+        pkt = (
+            IP(src=src, dst=dst, len=28 + payload_size)
+            / ICMP()
+            / Raw(b"X" * payload_size)
+            / Padding(b"Y" * 100)
+        )
+        return [
+            Ether(src=sw_intf.remote_mac, dst=sw_intf.local_mac) / sa.encrypt(pkt)
+            for i in range(count)
+        ]
+
+    def verify_decrypted(self, p, rxs):
+        for rx in rxs:
+            self.assert_equal(rx[IP].src, p.remote_tun_if_host)
+            self.assert_equal(rx[IP].dst, self.pg1.remote_ip4)
+            self.assert_equal(rx[IP].len, len(rx[IP]))
+            self.assert_packet_checksums_valid(rx)
+
+
 class TestIpsec4TunIfEsp1(TemplateIpsec4TunIfEsp, IpsecTun4Tests):
     """Ipsec ESP - TUN tests"""
 
@@ -669,6 +693,28 @@ class TemplateIpsec6TunIfEspUdp(TemplateIpsec6TunProtect, TemplateIpsec):
 
     def tearDown(self):
         super(TemplateIpsec6TunIfEspUdp, self).tearDown()
+
+
+class TemplateIpsec6TunTfc:
+    """IPsec IPv6 tunnel with TFC"""
+
+    def gen_encrypt_pkts6(self, p, sa, sw_intf, src, dst, count=1, payload_size=54):
+        return [
+            Ether(src=sw_intf.remote_mac, dst=sw_intf.local_mac)
+            / sa.encrypt(
+                IPv6(src=src, dst=dst, hlim=p.inner_hop_limit, fl=p.inner_flow_label)
+                / ICMPv6EchoRequest(id=0, seq=1, data="X" * payload_size)
+                / Padding(b"Y" * 100)
+            )
+            for i in range(count)
+        ]
+
+    def verify_decrypted6(self, p, rxs):
+        for rx in rxs:
+            self.assert_equal(rx[IPv6].src, p.remote_tun_if_host)
+            self.assert_equal(rx[IPv6].dst, self.pg1.remote_ip6)
+            self.assert_equal(rx[IPv6].plen, len(rx[IPv6].payload))
+            self.assert_packet_checksums_valid(rx)
 
 
 class TestIpsec6TunIfEspUdp(TemplateIpsec6TunIfEspUdp, IpsecTun6Tests):
@@ -1186,12 +1232,34 @@ class TestIpsec4TunIfEspNoAlgo(TemplateIpsec4TunProtect, TemplateIpsec, IpsecTun
         self.config_sa_tra(p)
         self.config_protect(p)
 
-        tx = self.gen_pkts(self.pg1, src=self.pg1.remote_ip4, dst=p.remote_tun_if_host)
+        tx = self.gen_pkts(
+            self.pg1, src=self.pg1.remote_ip4, dst=p.remote_tun_if_host, count=127
+        )
         self.send_and_assert_no_replies(self.pg1, tx)
 
         self.unconfig_protect(p)
         self.unconfig_sa(p)
         self.unconfig_network(p)
+
+    def test_tun_44_async(self):
+        """IPSec SA with NULL algos using async crypto"""
+        p = self.ipv4_params
+
+        self.vapi.ipsec_set_async_mode(async_enable=True)
+        self.config_network(p)
+        self.config_sa_tra(p)
+        self.config_protect(p)
+
+        tx = self.gen_pkts(
+            self.pg1, src=self.pg1.remote_ip4, dst=p.remote_tun_if_host, count=127
+        )
+        self.send_and_assert_no_replies(self.pg1, tx)
+
+        self.unconfig_protect(p)
+        self.unconfig_sa(p)
+        self.unconfig_network(p)
+
+        self.vapi.ipsec_set_async_mode(async_enable=False)
 
 
 @tag_fixme_vpp_workers
@@ -1242,6 +1310,9 @@ class TestIpsec6MultiTunIfEsp(TemplateIpsec6TunProtect, TemplateIpsec, IpsecTun6
             self.assertEqual(p.tun_if.get_tx_stats(), 127)
 
 
+@unittest.skipIf(
+    "gre" in config.excluded_plugins, "Exclude tests depending on GRE plugin"
+)
 class TestIpsecGreTebIfEsp(TemplateIpsec, IpsecTun4Tests):
     """Ipsec GRE TEB ESP - TUN tests"""
 
@@ -1366,6 +1437,9 @@ class TestIpsecGreTebIfEsp(TemplateIpsec, IpsecTun4Tests):
         super(TestIpsecGreTebIfEsp, self).tearDown()
 
 
+@unittest.skipIf(
+    "gre" in config.excluded_plugins, "Exclude tests depending on GRE plugin"
+)
 class TestIpsecGreTebVlanIfEsp(TemplateIpsec, IpsecTun4Tests):
     """Ipsec GRE TEB ESP - TUN tests"""
 
@@ -1501,6 +1575,9 @@ class TestIpsecGreTebVlanIfEsp(TemplateIpsec, IpsecTun4Tests):
         self.pg1_11.remove_vpp_config()
 
 
+@unittest.skipIf(
+    "gre" in config.excluded_plugins, "Exclude tests depending on GRE plugin"
+)
 class TestIpsecGreTebIfEspTra(TemplateIpsec, IpsecTun4Tests):
     """Ipsec GRE TEB ESP - Tra tests"""
 
@@ -1619,6 +1696,9 @@ class TestIpsecGreTebIfEspTra(TemplateIpsec, IpsecTun4Tests):
         super(TestIpsecGreTebIfEspTra, self).tearDown()
 
 
+@unittest.skipIf(
+    "gre" in config.excluded_plugins, "Exclude tests depending on GRE plugin"
+)
 class TestIpsecGreTebUdpIfEspTra(TemplateIpsec, IpsecTun4Tests):
     """Ipsec GRE TEB UDP ESP - Tra tests"""
 
@@ -1752,6 +1832,9 @@ class TestIpsecGreTebUdpIfEspTra(TemplateIpsec, IpsecTun4Tests):
         super(TestIpsecGreTebUdpIfEspTra, self).tearDown()
 
 
+@unittest.skipIf(
+    "gre" in config.excluded_plugins, "Exclude tests depending on GRE plugin"
+)
 class TestIpsecGreIfEsp(TemplateIpsec, IpsecTun4Tests):
     """Ipsec GRE ESP - TUN tests"""
 
@@ -1864,6 +1947,9 @@ class TestIpsecGreIfEsp(TemplateIpsec, IpsecTun4Tests):
         super(TestIpsecGreIfEsp, self).tearDown()
 
 
+@unittest.skipIf(
+    "gre" in config.excluded_plugins, "Exclude tests depending on GRE plugin"
+)
 class TestIpsecGreIfEspTra(TemplateIpsec, IpsecTun4Tests):
     """Ipsec GRE ESP - TRA tests"""
 
@@ -1993,6 +2079,9 @@ class TestIpsecGreIfEspTra(TemplateIpsec, IpsecTun4Tests):
         self.assertEqual(err, 1)
 
 
+@unittest.skipIf(
+    "gre" in config.excluded_plugins, "Exclude tests depending on GRE plugin"
+)
 class TestIpsecGre6IfEspTra(TemplateIpsec, IpsecTun6Tests):
     """Ipsec GRE ESP - TRA tests"""
 
@@ -2107,6 +2196,9 @@ class TestIpsecGre6IfEspTra(TemplateIpsec, IpsecTun6Tests):
         super(TestIpsecGre6IfEspTra, self).tearDown()
 
 
+@unittest.skipIf(
+    "gre" in config.excluded_plugins, "Exclude tests depending on GRE plugin"
+)
 class TestIpsecMGreIfEspTra4(TemplateIpsec, IpsecTun4):
     """Ipsec mGRE ESP v4 TRA tests"""
 
@@ -2262,6 +2354,9 @@ class TestIpsecMGreIfEspTra4(TemplateIpsec, IpsecTun4):
             self.verify_tun_44(p, count=N_PKTS)
 
 
+@unittest.skipIf(
+    "gre" in config.excluded_plugins, "Exclude tests depending on GRE plugin"
+)
 class TestIpsecMGreIfEspTra6(TemplateIpsec, IpsecTun6):
     """Ipsec mGRE ESP v6 TRA tests"""
 
@@ -2470,8 +2565,13 @@ class TestIpsec4TunProtect(TemplateIpsec, TemplateIpsec4TunProtect, IpsecTun4):
 
 
 @tag_fixme_vpp_workers
+class TestIpsec4TunProtectTfc(TemplateIpsec4TunTfc, TestIpsec4TunProtect):
+    """IPsec IPv4 Tunnel protect with TFC - transport mode"""
+
+
+@tag_fixme_vpp_workers
 class TestIpsec4TunProtectUdp(TemplateIpsec, TemplateIpsec4TunProtect, IpsecTun4):
-    """IPsec IPv4 Tunnel protect - transport mode"""
+    """IPsec IPv4 UDP Tunnel protect - transport mode"""
 
     def setUp(self):
         super(TestIpsec4TunProtectUdp, self).setUp()
@@ -2514,6 +2614,14 @@ class TestIpsec4TunProtectUdp(TemplateIpsec, TemplateIpsec4TunProtect, IpsecTun4
 
 
 @tag_fixme_vpp_workers
+class TestIpsec4TunProtectUdpTfc(TemplateIpsec4TunTfc, TestIpsec4TunProtectUdp):
+    """IPsec IPv4 UDP Tunnel protect with TFC - transport mode"""
+
+
+@tag_fixme_vpp_workers
+@unittest.skipIf(
+    "acl" in config.excluded_plugins, "Exclude tests depending on ACL plugin"
+)
 class TestIpsec4TunProtectTun(TemplateIpsec, TemplateIpsec4TunProtect, IpsecTun4):
     """IPsec IPv4 Tunnel protect - tunnel mode"""
 
@@ -2785,6 +2893,11 @@ class TestIpsec6TunProtect(TemplateIpsec, TemplateIpsec6TunProtect, IpsecTun6):
         self.unconfig_protect(p)
         self.unconfig_sa(p)
         self.unconfig_network(p)
+
+
+@tag_fixme_vpp_workers
+class TestIpsec6TunProtectTfc(TemplateIpsec6TunTfc, TestIpsec6TunProtect):
+    """IPsec IPv6 Tunnel protect with TFC - transport mode"""
 
 
 @tag_fixme_vpp_workers
@@ -3203,6 +3316,11 @@ class TestIpsecItf4(TemplateIpsec, TemplateIpsecItf4, IpsecTun4):
         self.unconfig_network(p)
 
 
+@tag_fixme_vpp_workers
+class TestIpsecItf4Tfc(TemplateIpsec4TunTfc, TestIpsecItf4):
+    """IPsec Interface IPv4 with TFC"""
+
+
 class TestIpsecItf4MPLS(TemplateIpsec, TemplateIpsecItf4, IpsecTun4):
     """IPsec Interface MPLSoIPv4"""
 
@@ -3515,6 +3633,14 @@ class TestIpsecItf6(TemplateIpsec, TemplateIpsecItf6, IpsecTun6):
         self.unconfig_network(p)
 
 
+@tag_fixme_vpp_workers
+class TestIpsecItf6Tfc(TemplateIpsec6TunTfc, TestIpsecItf6):
+    """IPsec Interface IPv6 with TFC"""
+
+
+@unittest.skipIf(
+    "acl" in config.excluded_plugins, "Exclude tests depending on ACL plugin"
+)
 class TestIpsecMIfEsp4(TemplateIpsec, IpsecTun4):
     """Ipsec P2MP ESP v4 tests"""
 

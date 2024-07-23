@@ -93,10 +93,12 @@ format_error_trace (u8 * s, va_list * va)
   u32 i;
 
   error_node = vlib_get_node (vm, vlib_error_get_node (&vm->node_main, e[0]));
-  i = counter_index (vm, vlib_error_get_code (&vm->node_main, e[0])) +
-    error_node->error_heap_index;
+  i = counter_index (vm, vlib_error_get_code (&vm->node_main, e[0]));
   if (i != CLIB_U32_MAX)
-    s = format (s, "%v: %s", error_node->name, em->counters_heap[i].desc);
+    {
+      i += error_node->error_heap_index;
+      s = format (s, "%v: %s", error_node->name, em->counters_heap[i].desc);
+    }
 
   return s;
 }
@@ -258,7 +260,6 @@ VLIB_NODE_FN (error_punt_node) (vlib_main_t * vm,
   return process_drop_punt (vm, node, frame, ERROR_DISPOSITION_PUNT);
 }
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (error_drop_node) = {
   .name = "drop",
   .flags = VLIB_NODE_FLAG_IS_DROP,
@@ -266,9 +267,7 @@ VLIB_REGISTER_NODE (error_drop_node) = {
   .format_trace = format_error_trace,
   .validate_frame = validate_error_frame,
 };
-/* *INDENT-ON* */
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (error_punt_node) = {
   .name = "punt",
   .flags = (VLIB_NODE_FLAG_FRAME_NO_FREE_AFTER_DISPATCH
@@ -277,7 +276,6 @@ VLIB_REGISTER_NODE (error_punt_node) = {
   .format_trace = format_error_trace,
   .validate_frame = validate_error_frame,
 };
-/* *INDENT-ON* */
 
 /*
  * fd.io coding-style-patch-verification: ON

@@ -613,7 +613,13 @@ ioctl (int fd, unsigned long int cmd, ...)
 	case FIONREAD:
 	  rv = vls_attr (vlsh, VPPCOM_ATTR_GET_NREAD, 0, 0);
 	  break;
-
+	case TIOCOUTQ:
+	  {
+	    u32 *buf = va_arg (ap, void *);
+	    u32 *buflen = va_arg (ap, u32 *);
+	    rv = vls_attr (vlsh, VPPCOM_ATTR_GET_NWRITEQ, buf, buflen);
+	  }
+	  break;
 	case FIONBIO:
 	  {
 	    u32 flags = *(va_arg (ap, int *)) ? O_NONBLOCK : 0;
@@ -662,7 +668,6 @@ ldp_select_init_maps (fd_set * __restrict original,
   clib_memcpy_fast (*resultb, original, n_bytes);
   memset (original, 0, n_bytes);
 
-  /* *INDENT-OFF* */
   clib_bitmap_foreach (fd, *resultb)  {
     if (fd > nfds)
       break;
@@ -672,7 +677,6 @@ ldp_select_init_maps (fd_set * __restrict original,
     else
       *vclb = clib_bitmap_set (*vclb, vlsh_to_session_index (vlsh), 1);
   }
-  /* *INDENT-ON* */
 
   si_bits_set = clib_bitmap_last_set (*vclb) + 1;
   *si_bits = (si_bits_set > *si_bits) ? si_bits_set : *si_bits;
@@ -692,7 +696,6 @@ ldp_select_vcl_map_to_libc (clib_bitmap_t * vclb, fd_set * __restrict libcb)
   if (!libcb)
     return 0;
 
-  /* *INDENT-OFF* */
   clib_bitmap_foreach (si, vclb)  {
     vlsh = vls_session_index_to_vlsh (si);
     ASSERT (vlsh != VLS_INVALID_HANDLE);
@@ -704,7 +707,6 @@ ldp_select_vcl_map_to_libc (clib_bitmap_t * vclb, fd_set * __restrict libcb)
       }
     FD_SET (fd, libcb);
   }
-  /* *INDENT-ON* */
 
   return 0;
 }
@@ -717,10 +719,8 @@ ldp_select_libc_map_merge (clib_bitmap_t * result, fd_set * __restrict libcb)
   if (!libcb)
     return;
 
-  /* *INDENT-OFF* */
   clib_bitmap_foreach (fd, result)
     FD_SET ((int)fd, libcb);
-  /* *INDENT-ON* */
 }
 
 int

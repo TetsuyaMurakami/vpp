@@ -65,9 +65,10 @@ openssl_ctx_free (tls_ctx_t * ctx)
   openssl_ctx_t *oc = (openssl_ctx_t *) ctx;
 
   /* Cleanup ssl ctx unless migrated */
-  if (!ctx->is_migrated)
+  if (!(ctx->flags & TLS_CONN_F_MIGRATED))
     {
-      if (SSL_is_init_finished (oc->ssl) && !ctx->is_passive_close)
+      if (SSL_is_init_finished (oc->ssl) &&
+	  !(ctx->flags & TLS_CONN_F_PASSIVE_CLOSE))
 	SSL_shutdown (oc->ssl);
 
       SSL_free (oc->ssl);
@@ -262,22 +263,18 @@ openssl_check_async_status (tls_ctx_t * ctx, openssl_resume_handler * handler,
 static void
 openssl_handle_handshake_failure (tls_ctx_t * ctx)
 {
-  session_t *app_session;
+  /* Failed to renegotiate handshake */
+  if (ctx->flags & TLS_CONN_F_HS_DONE)
+    {
+      tls_notify_app_io_error (ctx);
+      tls_disconnect_transport (ctx);
+      return;
+    }
 
   if (SSL_is_server (((openssl_ctx_t *) ctx)->ssl))
     {
-      /*
-       * Cleanup pre-allocated app session and close transport
-       */
-      app_session =
-	session_get_if_valid (ctx->c_s_index, ctx->c_thread_index);
-      if (app_session)
-	{
-	  session_free (app_session);
-	  ctx->c_s_index = SESSION_INVALID_INDEX;
-	  tls_disconnect_transport (ctx);
-	}
-      ctx->no_app_session = 1;
+      ctx->flags |= TLS_CONN_F_NO_APP_SESSION;
+      tls_disconnect_transport (ctx);
     }
   else
     {
@@ -297,9 +294,9 @@ openssl_ctx_handshake_rx (tls_ctx_t * ctx, session_t * tls_session)
 
   while (SSL_in_init (oc->ssl))
     {
-      if (ctx->resume)
+      if (ctx->flags & TLS_CONN_F_RESUME)
 	{
-	  ctx->resume = 0;
+	  ctx->flags &= ~TLS_CONN_F_RESUME;
 	}
       else if (!svm_fifo_max_dequeue_cons (tls_session->rx_fifo))
 	break;
@@ -333,6 +330,10 @@ openssl_ctx_handshake_rx (tls_ctx_t * ctx, session_t * tls_session)
   if (SSL_in_init (oc->ssl))
     return -1;
 
+  /* Renegotiated handshake, app must not be notified */
+  if (PREDICT_FALSE (ctx->flags & TLS_CONN_F_HS_DONE))
+    return 0;
+
   /*
    * Handshake complete
    */
@@ -364,7 +365,7 @@ openssl_ctx_handshake_rx (tls_ctx_t * ctx, session_t * tls_session)
   else
     {
       /* Need to check transport status */
-      if (ctx->is_passive_close)
+      if (ctx->flags & TLS_CONN_F_PASSIVE_CLOSE)
 	{
 	  openssl_handle_handshake_failure (ctx);
 	  return -1;
@@ -378,7 +379,7 @@ openssl_ctx_handshake_rx (tls_ctx_t * ctx, session_t * tls_session)
 	  return -1;
 	}
     }
-
+  ctx->flags |= TLS_CONN_F_HS_DONE;
   TLS_DBG (1, "Handshake for %u complete. TLS cipher is %s",
 	   oc->openssl_ctx_index, SSL_get_cipher (oc->ssl));
   return rv;
@@ -441,7 +442,8 @@ openssl_ctx_write_tls (tls_ctx_t *ctx, session_t *app_session,
 
 check_tls_fifo:
 
-  if (PREDICT_FALSE (ctx->app_closed && BIO_ctrl_pending (oc->rbio) <= 0))
+  if (PREDICT_FALSE ((ctx->flags & TLS_CONN_F_APP_CLOSED) &&
+		     BIO_ctrl_pending (oc->rbio) <= 0))
     openssl_confirm_app_close (ctx);
 
   /* Deschedule and wait for deq notification if fifo is almost full */
@@ -453,8 +455,11 @@ check_tls_fifo:
       sp->flags |= TRANSPORT_SND_F_DESCHED;
     }
   else
-    /* Request tx reschedule of the app session */
-    app_session->flags |= SESSION_F_CUSTOM_TX;
+    {
+      /* Request tx reschedule of the app session */
+      if (wrote)
+	app_session->flags |= SESSION_F_CUSTOM_TX;
+    }
 
   return wrote;
 }
@@ -513,7 +518,7 @@ done:
   if (read)
     tls_add_vpp_q_tx_evt (us);
 
-  if (PREDICT_FALSE (ctx->app_closed &&
+  if (PREDICT_FALSE ((ctx->flags & TLS_CONN_F_APP_CLOSED) &&
 		     !svm_fifo_max_enqueue_prod (us->rx_fifo)))
     openssl_confirm_app_close (ctx);
 
@@ -1059,6 +1064,22 @@ openssl_transport_close (tls_ctx_t * ctx)
 }
 
 static int
+openssl_transport_reset (tls_ctx_t *ctx)
+{
+  if (!openssl_handshake_is_over (ctx))
+    {
+      openssl_handle_handshake_failure (ctx);
+      return 0;
+    }
+
+  session_transport_reset_notify (&ctx->connection);
+  session_transport_closed_notify (&ctx->connection);
+  tls_disconnect_transport (ctx);
+
+  return 0;
+}
+
+static int
 openssl_app_close (tls_ctx_t * ctx)
 {
   openssl_ctx_t *oc = (openssl_ctx_t *) ctx;
@@ -1069,8 +1090,6 @@ openssl_app_close (tls_ctx_t * ctx)
   if (BIO_ctrl_pending (oc->rbio) <= 0
       && !svm_fifo_max_dequeue_cons (app_session->tx_fifo))
     openssl_confirm_app_close (ctx);
-  else
-    ctx->app_closed = 1;
   return 0;
 }
 
@@ -1151,6 +1170,7 @@ const static tls_engine_vft_t openssl_engine = {
   .ctx_start_listen = openssl_start_listen,
   .ctx_stop_listen = openssl_stop_listen,
   .ctx_transport_close = openssl_transport_close,
+  .ctx_transport_reset = openssl_transport_reset,
   .ctx_app_close = openssl_app_close,
   .ctx_reinit_cachain = openssl_reinit_ca_chain,
 };
@@ -1159,18 +1179,13 @@ int
 tls_openssl_set_ciphers (char *ciphers)
 {
   openssl_main_t *om = &openssl_main;
-  int i;
 
   if (!ciphers)
     {
       return -1;
     }
 
-  vec_validate (om->ciphers, strlen (ciphers));
-  for (i = 0; i < vec_len (om->ciphers) - 1; i++)
-    {
-      om->ciphers[i] = toupper (ciphers[i]);
-    }
+  vec_validate_init_c_string (om->ciphers, ciphers, strlen (ciphers));
 
   return 0;
 
@@ -1214,12 +1229,10 @@ tls_openssl_init (vlib_main_t * vm)
 
   return error;
 }
-/* *INDENT-OFF* */
 VLIB_INIT_FUNCTION (tls_openssl_init) =
 {
   .runs_after = VLIB_INITS("tls_init"),
 };
-/* *INDENT-ON* */
 
 #ifdef HAVE_OPENSSL_ASYNC
 static clib_error_t *
@@ -1290,22 +1303,18 @@ tls_openssl_set_command_fn (vlib_main_t * vm, unformat_input_t * input,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (tls_openssl_set_command, static) =
 {
   .path = "tls openssl set",
   .short_help = "tls openssl set [engine <engine name>] [alg [algorithm] [async]",
   .function = tls_openssl_set_command_fn,
 };
-/* *INDENT-ON* */
 #endif
 
-/* *INDENT-OFF* */
 VLIB_PLUGIN_REGISTER () = {
     .version = VPP_BUILD_VER,
     .description = "Transport Layer Security (TLS) Engine, OpenSSL Based",
 };
-/* *INDENT-ON* */
 
 /*
  * fd.io coding-style-patch-verification: ON

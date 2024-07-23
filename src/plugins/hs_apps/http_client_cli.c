@@ -13,11 +13,17 @@
  * limitations under the License.
  */
 
-#include <vnet/session/application.h>
 #include <vnet/session/application_interface.h>
 #include <vnet/session/session.h>
 #include <http/http.h>
-#include <hs_apps/http_cli.h>
+
+#define HCC_DEBUG 0
+
+#if HCC_DEBUG
+#define HCC_DBG(_fmt, _args...) clib_warning (_fmt, ##_args)
+#else
+#define HCC_DBG(_fmt, _args...)
+#endif
 
 typedef struct
 {
@@ -60,6 +66,8 @@ typedef struct
 typedef enum
 {
   HCC_REPLY_RECEIVED = 100,
+  HCC_TRANSPORT_CLOSED,
+  HCC_CONNECT_FAILED,
 } hcc_cli_signal_t;
 
 static hcc_main_t hcc_main;
@@ -122,10 +130,14 @@ hcc_ts_connected_callback (u32 app_index, u32 hc_index, session_t *as,
   http_msg_t msg;
   int rv;
 
+  HCC_DBG ("hc_index: %d", hc_index);
+
   if (err)
     {
       clib_warning ("connected error: hc_index(%d): %U", hc_index,
 		    format_session_error, err);
+      vlib_process_signal_event_mt (hcm->vlib_main, hcm->cli_node_index,
+				    HCC_CONNECT_FAILED, 0);
       return -1;
     }
 
@@ -207,7 +219,7 @@ hcc_ts_rx_callback (session_t *ts)
       return 0;
     }
 
-  if (!hs->to_recv)
+  if (hs->to_recv == 0)
     {
       rv = svm_fifo_dequeue (ts->rx_fifo, sizeof (msg), (u8 *) &msg);
       ASSERT (rv == sizeof (msg));
@@ -229,7 +241,7 @@ hcc_ts_rx_callback (session_t *ts)
   rv = svm_fifo_dequeue (ts->rx_fifo, n_deq, hcm->http_response + curr);
   if (rv < 0)
     {
-      clib_warning ("app dequeue failed");
+      clib_warning ("app dequeue(n=%d) failed; rv = %d", n_deq, rv);
       return -1;
     }
 
@@ -239,6 +251,7 @@ hcc_ts_rx_callback (session_t *ts)
   vec_set_len (hcm->http_response, curr + n_deq);
   ASSERT (hs->to_recv >= rv);
   hs->to_recv -= rv;
+  HCC_DBG ("app rcvd %d, remains %d", rv, hs->to_recv);
 
   if (hs->to_recv == 0)
     {
@@ -262,6 +275,17 @@ hcc_ts_cleanup_callback (session_t *s, session_cleanup_ntf_t ntf)
   hcc_session_free (s->thread_index, hs);
 }
 
+static void
+hcc_ts_transport_closed (session_t *s)
+{
+  hcc_main_t *hcm = &hcc_main;
+
+  HCC_DBG ("transport closed");
+
+  vlib_process_signal_event_mt (hcm->vlib_main, hcm->cli_node_index,
+				HCC_TRANSPORT_CLOSED, 0);
+}
+
 static session_cb_vft_t hcc_session_cb_vft = {
   .session_accept_callback = hcc_ts_accept_callback,
   .session_disconnect_callback = hcc_ts_disconnect_callback,
@@ -270,6 +294,7 @@ static session_cb_vft_t hcc_session_cb_vft = {
   .builtin_app_tx_callback = hcc_ts_tx_callback,
   .session_reset_callback = hcc_ts_reset_callback,
   .session_cleanup_callback = hcc_ts_cleanup_callback,
+  .session_transport_closed_callback = hcc_ts_transport_closed,
 };
 
 static clib_error_t *
@@ -359,7 +384,7 @@ hcc_connect ()
 }
 
 static clib_error_t *
-hcc_run (vlib_main_t *vm)
+hcc_run (vlib_main_t *vm, int print_output)
 {
   vlib_thread_main_t *vtm = vlib_get_thread_main ();
   hcc_main_t *hcm = &hcc_main;
@@ -396,11 +421,18 @@ hcc_run (vlib_main_t *vm)
       goto cleanup;
 
     case HCC_REPLY_RECEIVED:
-      vlib_cli_output (vm, "%v", hcm->http_response);
+      if (print_output)
+	vlib_cli_output (vm, "%v", hcm->http_response);
       vec_free (hcm->http_response);
       break;
+    case HCC_TRANSPORT_CLOSED:
+      err = clib_error_return (0, "error, transport closed");
+      break;
+    case HCC_CONNECT_FAILED:
+      err = clib_error_return (0, "failed to connect");
+      break;
     default:
-      clib_error_return (0, "unexpected event %d", event_type);
+      err = clib_error_return (0, "unexpected event %d", event_type);
       break;
     }
 
@@ -437,7 +469,7 @@ hcc_command_fn (vlib_main_t *vm, unformat_input_t *input,
   u64 seg_size;
   u8 *appns_id = 0;
   clib_error_t *err = 0;
-  int rv;
+  int rv, print_output = 1;
 
   hcm->prealloc_fifos = 0;
   hcm->private_segment_size = 0;
@@ -461,6 +493,8 @@ hcc_command_fn (vlib_main_t *vm, unformat_input_t *input,
 	hcm->fifo_size <<= 10;
       else if (unformat (line_input, "uri %s", &hcm->uri))
 	;
+      else if (unformat (line_input, "no-output"))
+	print_output = 0;
       else if (unformat (line_input, "appns %_%v%_", &appns_id))
 	;
       else if (unformat (line_input, "secret %lu", &hcm->appns_secret))
@@ -495,7 +529,7 @@ hcc_command_fn (vlib_main_t *vm, unformat_input_t *input,
   vnet_session_enable_disable (vm, 1 /* turn on TCP, etc. */);
   vlib_worker_thread_barrier_release (vm);
 
-  err = hcc_run (vm);
+  err = hcc_run (vm, print_output);
 
   if (hcc_detach ())
     {
@@ -515,7 +549,7 @@ done:
 VLIB_CLI_COMMAND (hcc_command, static) = {
   .path = "http cli client",
   .short_help = "[appns <app-ns> secret <appns-secret>] uri http://<ip-addr> "
-		"query <query-string>",
+		"query <query-string> [no-output]",
   .function = hcc_command_fn,
   .is_mp_safe = 1,
 };

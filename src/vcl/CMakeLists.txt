@@ -35,6 +35,9 @@ if (LDP_HAS_GNU_SOURCE)
   add_compile_definitions(HAVE_GNU_SOURCE)
 endif(LDP_HAS_GNU_SOURCE)
 
+if("${CMAKE_SYSTEM_NAME}" STREQUAL "FreeBSD")
+  message("WARNING: vcl_ldpreload isn't supported on FreeBSD - disabled")
+else()
 add_vpp_library(vcl_ldpreload
   SOURCES
   ldp_socket_wrapper.c
@@ -43,6 +46,7 @@ add_vpp_library(vcl_ldpreload
   LINK_LIBRARIES
   vppinfra svm vlibmemoryclient rt pthread vppcom dl
 )
+endif()
 
 add_vpp_headers(vcl
   ldp.h

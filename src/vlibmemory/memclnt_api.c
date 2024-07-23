@@ -145,10 +145,44 @@ vl_api_control_ping_t_handler (vl_api_control_ping_t *mp)
 		({ rmp->vpe_pid = ntohl (getpid ()); }));
 }
 
+static void
+vl_api_get_api_json_t_handler (vl_api_get_api_json_t *mp)
+{
+  vl_api_get_api_json_reply_t *rmp;
+  api_main_t *am = vlibapi_get_main ();
+  int rv = 0, n = 0;
+  u8 *s = 0;
+
+  vl_api_registration_t *rp =
+    vl_api_client_index_to_registration (mp->client_index);
+  if (rp == 0)
+    return;
+
+  s = format (s, "[\n");
+  u8 **ptr;
+  vec_foreach (ptr, am->json_api_repr)
+    {
+      s = format (s, "%s,", ptr[0]);
+    }
+  s[vec_len (s) - 1] = ']'; // Replace last comma with a bracket
+  vec_terminate_c_string (s);
+  n = vec_len (s);
+
+done:
+  REPLY_MACRO3 (VL_API_GET_API_JSON_REPLY, n, ({
+		  if (rv == 0)
+		    {
+		      vl_api_c_string_to_api_string ((char *) s, &rmp->json);
+		    }
+		}));
+  vec_free (s);
+}
+
 #define foreach_vlib_api_msg                                                  \
   _ (GET_FIRST_MSG_ID, get_first_msg_id)                                      \
   _ (API_VERSIONS, api_versions)                                              \
-  _ (CONTROL_PING, control_ping)
+  _ (CONTROL_PING, control_ping)                                              \
+  _ (GET_API_JSON, get_api_json)
 
 /*
  * vl_api_init
@@ -163,6 +197,7 @@ vlib_api_init (void)
   cJSON_Hooks cjson_hooks = {
     .malloc_fn = clib_mem_alloc,
     .free_fn = clib_mem_free,
+    .realloc_fn = clib_mem_realloc,
   };
   cJSON_InitHooks (&cjson_hooks);
 
@@ -576,19 +611,6 @@ static void
 vl_api_rpc_call_reply_t_handler (vl_api_rpc_call_reply_t *mp)
 {
   clib_warning ("unimplemented");
-}
-
-void
-vl_api_send_pending_rpc_requests (vlib_main_t *vm)
-{
-  vlib_main_t *vm_global = vlib_get_first_main ();
-
-  ASSERT (vm != vm_global);
-
-  clib_spinlock_lock_if_init (&vm_global->pending_rpc_lock);
-  vec_append (vm_global->pending_rpc_requests, vm->pending_rpc_requests);
-  vec_reset_length (vm->pending_rpc_requests);
-  clib_spinlock_unlock_if_init (&vm_global->pending_rpc_lock);
 }
 
 always_inline void

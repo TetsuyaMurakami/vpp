@@ -22,6 +22,12 @@ else()
   set(BUFFER_ALLOC_FAULT_INJECTOR 0 CACHE STRING "fault injector off")
 endif()
 
+if(VPP_PLATFORM_BUFFER_ALIGN)
+  set(VLIB_BUFFER_ALIGN ${VPP_PLATFORM_BUFFER_ALIGN})
+else()
+  set(VLIB_BUFFER_ALIGN ${VPP_CACHE_LINE_SIZE})
+endif()
+
 set(PRE_DATA_SIZE 128 CACHE STRING "Buffer headroom size.")
 
 if (CMAKE_BUILD_TYPE_UC STREQUAL "DEBUG")
@@ -48,6 +54,23 @@ install(
 ##############################################################################
 # vlib shared library
 ##############################################################################
+
+if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
+set(PLATFORM_SOURCES
+  linux/pci.c
+  linux/vfio.c
+  linux/vmbus.c
+)
+
+set(PLATFORM_HEADERS
+  linux/vfio.h
+)
+elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "FreeBSD")
+set(PLATFORM_SOURCES
+  freebsd/pci.c
+)
+endif()
+
 add_vpp_library(vlib
   SOURCES
   buffer.c
@@ -59,9 +82,6 @@ add_vpp_library(vlib
   format.c
   handoff_trace.c
   init.c
-  linux/pci.c
-  linux/vfio.c
-  linux/vmbus.c
   log.c
   main.c
   node.c
@@ -91,6 +111,7 @@ add_vpp_library(vlib
   vmbus/vmbus.c
   dma/dma.c
   dma/cli.c
+  ${PLATFORM_SOURCES}
 
   MULTIARCH_SOURCES
   buffer_funcs.c
@@ -112,7 +133,6 @@ add_vpp_library(vlib
   format_funcs.h
   global_funcs.h
   init.h
-  linux/vfio.h
   log.h
   main.h
   node_funcs.h
@@ -134,11 +154,12 @@ add_vpp_library(vlib
   unix/unix.h
   vlib.h
   vmbus/vmbus.h
+  ${PLATFORM_HEADERS}
 
   API_FILES
   pci/pci_types.api
 
-  LINK_LIBRARIES vppinfra svm ${CMAKE_DL_LIBS}
+  LINK_LIBRARIES vppinfra svm ${CMAKE_DL_LIBS} ${EPOLL_LIB}
 
   DEPENDS api_headers
 )

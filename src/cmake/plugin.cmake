@@ -15,9 +15,13 @@ macro(add_vpp_plugin name)
   cmake_parse_arguments(PLUGIN
     ""
     "LINK_FLAGS;COMPONENT;DEV_COMPONENT"
-    "SOURCES;API_FILES;MULTIARCH_SOURCES;MULTIARCH_FORCE_ON;LINK_LIBRARIES;INSTALL_HEADERS;API_TEST_SOURCES;VAT_AUTO_TEST"
+    "SOURCES;API_FILES;MULTIARCH_SOURCES;MULTIARCH_FORCE_ON;LINK_LIBRARIES;INSTALL_HEADERS;API_TEST_SOURCES;VAT_AUTO_TEST;SUPPORTED_OS_LIST"
     ${ARGN}
   )
+  if (PLUGIN_SUPPORTED_OS_LIST AND NOT ${CMAKE_SYSTEM_NAME} IN_LIST PLUGIN_SUPPORTED_OS_LIST)
+    message(WARNING "unsupported OS - ${name} plugin disabled")
+    return()
+  endif()
   set(plugin_name ${name}_plugin)
   set(api_includes)
   if(NOT PLUGIN_COMPONENT)
@@ -40,7 +44,7 @@ macro(add_vpp_plugin name)
       ${CMAKE_CURRENT_BINARY_DIR}/${f}.h
       ${CMAKE_CURRENT_BINARY_DIR}/${f}_enum.h
       ${CMAKE_CURRENT_BINARY_DIR}/${f}_types.h
-      DESTINATION include/vpp_plugins/${name}/${dir}
+      DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/vpp_plugins/${name}/${dir}
       COMPONENT ${PLUGIN_DEV_COMPONENT}
     )
   endforeach()
@@ -82,7 +86,7 @@ macro(add_vpp_plugin name)
       get_filename_component(dir ${file} DIRECTORY)
       install(
 	FILES ${file}
-	DESTINATION include/vpp_plugins/${name}/${dir}
+	DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/vpp_plugins/${name}/${dir}
 	COMPONENT vpp-dev
       )
     endforeach()

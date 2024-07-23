@@ -36,10 +36,12 @@ from syslog_rfc5424_parser import SyslogMessage, ParseError
 from syslog_rfc5424_parser.constants import SyslogSeverity
 from util import ppc, ppp
 from vpp_papi import VppEnum
+from config import config
 
 
 @tag_fixme_vpp_workers
 @tag_fixme_ubuntu2204
+@unittest.skipIf("nat" in config.excluded_plugins, "Exclude NAT plugin tests")
 class TestNAT64(VppTestCase):
     """NAT64 Test Cases"""
 
@@ -55,8 +57,6 @@ class TestNAT64(VppTestCase):
     def setUpClass(cls):
         super(TestNAT64, cls).setUpClass()
 
-        if is_distro_ubuntu2204 == True and not hasattr(cls, "vpp"):
-            return
         cls.tcp_port_in = 6303
         cls.tcp_port_out = 6303
         cls.udp_port_in = 6304
@@ -76,7 +76,7 @@ class TestNAT64(VppTestCase):
         cls.ip6_interfaces.append(cls.pg_interfaces[2])
         cls.ip4_interfaces = list(cls.pg_interfaces[1:2])
 
-        cls.vapi.ip_table_add_del(
+        cls.vapi.ip_table_add_del_v2(
             is_add=1, table={"table_id": cls.vrf1_id, "is_ip6": 1}
         )
 

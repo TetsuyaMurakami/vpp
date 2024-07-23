@@ -39,7 +39,7 @@
 ######################################################################
 
 # Scripts require non-POSIX parts of bash
-SHELL := /bin/bash
+SHELL := $(shell which bash)
 
 # Where this makefile lives
 MU_BUILD_ROOT_DIR = $(shell pwd)
@@ -365,7 +365,7 @@ NATIVE_TOOLS_$(IS_LINUX) += $(NATIVE_TOOLS_LINUX)
 CROSS_TOOLS_$(IS_LINUX) += glibc gcc
 
 # must be first for bootstrapping
-NATIVE_TOOLS = findutils make
+NATIVE_TOOLS = findutils $(MAKE)
 
 # basic tools needed for build system
 NATIVE_TOOLS += git automake autoconf libtool texinfo tar
@@ -614,7 +614,7 @@ check_platform =								\
        -a ! -x "`which 2> /dev/null $${target_gcc}`" ] ; then			\
     $(call build_msg_fn,							\
 	   No cross-compiler found for platform $(PLATFORM) target $(TARGET);	\
-	     try make PLATFORM=$(PLATFORM) install-tools) ;			\
+	     try $(MAKE) PLATFORM=$(PLATFORM) install-tools) ;			\
     exit 1 ;									\
   fi
 
@@ -650,11 +650,18 @@ configure_check_timestamp =						\
 # /proc/cpuinfo does not exist on platforms without a /proc and on some
 # platforms, notably inside containers, it has no content. In those cases
 # we assume there's 1 processor; we use 2*ncpu for the -j option.
+#
+# On FreeBSD we can call nproc to get the number of processors.
+#
 # NB: GNU Make 4.2 will let us use '$(file </proc/cpuinfo)' to both test
 # for file presence and content; for now this will have to do.
 ifndef MAKE_PARALLEL_JOBS
+ifeq ($(shell uname), FreeBSD)
+MAKE_PARALLEL_JOBS = $(shell nproc)
+else
 MAKE_PARALLEL_JOBS = $(if $(shell [ -f /proc/cpuinfo ] && head /proc/cpuinfo), \
 	$(shell grep -c ^processor /proc/cpuinfo), 2)
+endif	# FreeBSD
 endif
 MAKE_PARALLEL_FLAGS ?= $(if $($(PACKAGE)_make_parallel_fails),,-j $(MAKE_PARALLEL_JOBS))
 
@@ -800,7 +807,7 @@ pull-all:
 	$(call build_msg_fn,Git pull build tools) ;				\
 	$(call tool_make_target_fn,pull-all) ;					\
 	$(call build_msg_fn,Git pull packages for platform $(PLATFORM)) ;	\
-	make PLATFORM=$(PLATFORM) $(patsubst %,%-pull-all,$(ROOT_PACKAGES))
+	$(MAKE) PLATFORM=$(PLATFORM) $(patsubst %,%-pull-all,$(ROOT_PACKAGES))
 
 .PHONY: %-diff
 %-diff:
@@ -962,13 +969,13 @@ $(PLATFORM_IMAGE_DIR)/ro.img ro-image: $(patsubst %,%-find-source,$(ROOT_PACKAGE
 	chmod 0755 $${tmp_dir} ;					\
 	cd $${tmp_dir} ;						\
 	trap "rm -rf $${tmp_dir}" err ;					\
-	fakeroot /bin/bash -c "{					\
+	fakeroot $(SHELL) -c "{					\
 	  set -eu$(BUILD_DEBUG) ;					\
 	  $(MAKE) -C $(MU_BUILD_ROOT_DIR) IMAGE_INSTALL_DIR=$${tmp_dir}	\
 	    $(patsubst %,%-image_install,				\
 	      basic_system						\
 	      $(ROOT_PACKAGES)) ;					\
-	  : make dev directory ;					\
+	  : $(MAKE) dev directory ;					\
 	  $(linuxrc_makedev) ;						\
 	  echo @@@@ Relocating ELF executables to run in / @@@@ ;	\
 	  scripts/set-rpath /$(arch_lib_dir):/lib ;			\
@@ -990,7 +997,7 @@ $(PLATFORM_IMAGE_DIR)/ro.img ro-image: $(patsubst %,%-find-source,$(ROOT_PACKAGE
 		| xargs sign $($(PLATFORM)_public_key)			\
 			     $($(PLATFORM)_private_key_passphrase) ;	\
 	  fi ;								\
-	  : make read-only file system ;				\
+	  : $(MAKE) read-only file system ;				\
 	  mksquashfs							\
 	    $${tmp_dir} $${ro_image}					\
 	    -no-exports -no-progress -no-recovery ;			\
@@ -1054,7 +1061,7 @@ rw-image: rw-image-check-type ro-image
 	chmod 0755 $${tmp_dir} ;				\
 	cd $${tmp_dir} ;					\
 	trap "rm -rf $${tmp_dir}" err ;				\
-	fakeroot /bin/bash -c "{				\
+	fakeroot $(SHELL) -c "{				\
 	  set -eu$(BUILD_DEBUG) ;				\
 	  $(linuxrc_makedev) ;					\
 	  $(call rw_image_embed_ro_image_fn,$${ro_image}) ;	\

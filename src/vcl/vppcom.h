@@ -16,6 +16,9 @@
 #ifndef included_vppcom_h
 #define included_vppcom_h
 
+#ifdef __FreeBSD__
+#include <sys/types.h>
+#endif /* __FreeBSD__ */
 #include <netdb.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -116,7 +119,11 @@ typedef enum
   VPPCOM_EFAULT = -EFAULT,
   VPPCOM_ENOMEM = -ENOMEM,
   VPPCOM_EINVAL = -EINVAL,
+#ifdef __linux__
   VPPCOM_EBADFD = -EBADFD,
+#else
+  VPPCOM_EBADFD = -EBADF,
+#endif /* __linux__ */
   VPPCOM_EAFNOSUPPORT = -EAFNOSUPPORT,
   VPPCOM_ECONNABORTED = -ECONNABORTED,
   VPPCOM_ECONNRESET = -ECONNRESET,
@@ -177,6 +184,7 @@ typedef enum
   VPPCOM_ATTR_SET_IP_PKTINFO,
   VPPCOM_ATTR_GET_IP_PKTINFO,
   VPPCOM_ATTR_GET_ORIGINAL_DST,
+  VPPCOM_ATTR_GET_NWRITEQ,
 } vppcom_attr_op_t;
 
 typedef struct _vcl_poll

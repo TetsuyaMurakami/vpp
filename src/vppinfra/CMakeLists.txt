@@ -14,6 +14,34 @@
 enable_language(ASM)
 
 ##############################################################################
+# find libdl
+##############################################################################
+vpp_find_path(LIBDL_INCLUDE_DIR dlfcn.h)
+vpp_find_library(LIBDL_LIB NAMES dl)
+
+if (LIBDL_INCLUDE_DIR AND LIBDL_LIB)
+  message(STATUS "libdl found at ${LIBDL_LIB}")
+  list(APPEND VPPINFRA_LIBS ${LIBDL_LIB})
+else()
+  message(FATAL_ERROR "libdl not found")
+endif()
+
+##############################################################################
+# find libunwind
+##############################################################################
+vpp_find_path(LIBUNWIND_INCLUDE_DIR unwind.h)
+vpp_find_library(LIBUNWIND_LIB NAMES unwind libunwind)
+
+if (LIBUNWIND_INCLUDE_DIR AND LIBUNWIND_LIB)
+  message(STATUS "libunwind found at ${LIBUNWIND_LIB}")
+  list(APPEND VPPINFRA_LIBS ${LIBUNWIND_LIB})
+  add_definitions(-DHAVE_LIBUNWIND=1)
+else()
+  message(WARNING "libunwind not found - stack traces disabled")
+  add_definitions(-DHAVE_LIBUNWIND=0)
+endif()
+
+##############################################################################
 # Generate vppinfra/config.h
 ##############################################################################
 set(LOG2_CACHE_LINE_BYTES ${VPP_LOG2_CACHE_LINE_SIZE})
@@ -42,12 +70,10 @@ add_definitions(-fvisibility=hidden)
 set_source_files_properties( cJSON.c jsonformat.c PROPERTIES
   COMPILE_DEFINITIONS " CJSON_API_VISIBILITY " )
 
-
 ##############################################################################
 # vppinfra sources
 ##############################################################################
 set(VPPINFRA_SRCS
-  backtrace.c
   bitmap.c
   bihash_all_vector.c
   cpu.c
@@ -71,9 +97,6 @@ set(VPPINFRA_SRCS
   mhash.c
   mpcap.c
   pcap.c
-  perfmon/bundle_default.c
-  perfmon/bundle_core_power.c
-  perfmon/perfmon.c
   pmalloc.c
   pool.c
   ptclosure.c
@@ -83,6 +106,7 @@ set(VPPINFRA_SRCS
   rbtree.c
   serialize.c
   socket.c
+  stack.c
   std-formats.c
   string.c
   time.c
@@ -132,6 +156,7 @@ set(VPPINFRA_HEADERS
   crypto/ghash.h
   crypto/aes.h
   crypto/aes_cbc.h
+  crypto/aes_ctr.h
   crypto/aes_gcm.h
   crypto/poly1305.h
   dlist.h
@@ -144,6 +169,7 @@ set(VPPINFRA_HEADERS
   fifo.h
   file.h
   format.h
+  format_ansi.h
   format_table.h
   hash.h
   heap.h
@@ -177,6 +203,7 @@ set(VPPINFRA_HEADERS
   smp.h
   socket.h
   sparse_vec.h
+  stack.h
   string.h
   time.h
   time_range.h
@@ -219,16 +246,21 @@ if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
     linux/mem.c
     linux/sysfs.c
     linux/netns.c
+# TODO: Temporarily don't build perfmon on non-Linux
+    perfmon/bundle_default.c
+    perfmon/bundle_core_power.c
+    perfmon/perfmon.c
+   )
+elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "FreeBSD")
+  list(APPEND VPPINFRA_SRCS
+    elf_clib.c
+    freebsd/mem.c
    )
 endif()
 
-option(VPP_USE_EXTERNAL_LIBEXECINFO "Use external libexecinfo (useful for non-glibc targets)." OFF)
-if(VPP_USE_EXTERNAL_LIBEXECINFO)
-  set(EXECINFO_LIB execinfo)
-endif()
 add_vpp_library(vppinfra
   SOURCES ${VPPINFRA_SRCS}
-  LINK_LIBRARIES m ${EXECINFO_LIB}
+  LINK_LIBRARIES m ${VPPINFRA_LIBS}
   INSTALL_HEADERS ${VPPINFRA_HEADERS}
   COMPONENT libvppinfra
   LTO
@@ -253,6 +285,7 @@ if(VPP_BUILD_VPPINFRA_TESTS)
     longjmp
     macros
     maplog
+    mhash
     pmalloc
     pool_alloc
     pool_iterate
@@ -285,6 +318,7 @@ endif(VPP_BUILD_VPPINFRA_TESTS)
 
 set(test_files
   test/aes_cbc.c
+  test/aes_ctr.c
   test/aes_gcm.c
   test/poly1305.c
   test/array_mask.c

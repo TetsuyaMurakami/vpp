@@ -1,32 +1,36 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"strings"
 	"testing"
+	"time"
 
-	"github.com/stretchr/testify/suite"
+	. "fd.io/hs-test/infra"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
-func TestTapSuite(t *testing.T) {
-	var m TapSuite
-	suite.Run(t, &m)
-}
+func TestHst(t *testing.T) {
+	if *IsVppDebug {
+		// 30 minute timeout so that the framework won't timeout while debugging
+		SuiteTimeout = time.Minute * 30
+	} else {
+		SuiteTimeout = time.Minute * 5
+	}
 
-func TestNs(t *testing.T) {
-	var m NsSuite
-	suite.Run(t, &m)
-}
+	output, err := os.ReadFile("/sys/devices/system/node/online")
+	if err == nil && strings.Contains(string(output), "-") {
+		NumaAwareCpuAlloc = true
+	}
+	// creates a file with PPID, used for 'make cleanup-hst'
+	ppid := fmt.Sprint(os.Getppid())
+	ppid = ppid[:len(ppid)-1]
+	f, _ := os.Create(".last_hst_ppid")
+	f.Write([]byte(ppid))
+	f.Close()
 
-func TestVeths(t *testing.T) {
-	var m VethsSuite
-	suite.Run(t, &m)
-}
-
-func TestNoTopo(t *testing.T) {
-	var m NoTopoSuite
-	suite.Run(t, &m)
-}
-
-func TestNginx(t *testing.T) {
-	var m NginxSuite
-	suite.Run(t, &m)
+	RegisterFailHandler(Fail)
+	RunSpecs(t, "HST")
 }

@@ -32,13 +32,11 @@
 #include <vppinfra/elog.h>
 #include <vppinfra/callback.h>
 
-/* *INDENT-OFF* */
 static api_main_t api_global_main = {
   .region_name = "/unset",
   .api_uid = -1,
   .api_gid = -1,
 };
-/* *INDENT-ON* */
 
 /* Please use vlibapi_get_main() to access my_api_main */
 __thread api_main_t *my_api_main = &api_global_main;
@@ -209,13 +207,11 @@ vl_api_serialize_message_table (api_main_t * am, u8 * vector)
   /* serialize the count */
   serialize_integer (sm, nmsg, sizeof (u32));
 
-  /* *INDENT-OFF* */
   hash_foreach_pair (hp, am->msg_index_by_name_and_crc,
   ({
     serialize_likely_small_unsigned_integer (sm, hp->value[0]);
     serialize_cstring (sm, (char *) hp->key);
   }));
-  /* *INDENT-ON* */
 
   return serialize_close_vector (sm);
 }
@@ -234,7 +230,7 @@ vl_msg_api_trace_write_one (api_main_t *am, u8 *msg, FILE *fp)
 
   if (m && m->endian_handler)
     {
-      m->endian_handler (tmpmem);
+      m->endian_handler (tmpmem, 1);
     }
 
   if (m && m->tojson_handler)
@@ -505,13 +501,11 @@ msg_handler_internal (api_main_t *am, void *the_msg, uword msg_len,
 
   if (PREDICT_FALSE (am->elog_trace_api_messages))
     {
-      /* *INDENT-OFF* */
       ELOG_TYPE_DECLARE (e) =
         {
           .format = "api-msg: %s",
           .format_args = "T4",
         };
-      /* *INDENT-ON* */
       struct
       {
 	u32 c;
@@ -567,7 +561,7 @@ msg_handler_internal (api_main_t *am, void *the_msg, uword msg_len,
 	    }
 
 	  if (m->is_autoendian)
-	    m->endian_handler (the_msg);
+	    m->endian_handler (the_msg, 0);
 
 	  if (PREDICT_FALSE (vec_len (am->perf_counter_cbs) != 0))
 	    clib_call_callbacks (am->perf_counter_cbs, am, id,
@@ -593,7 +587,6 @@ msg_handler_internal (api_main_t *am, void *the_msg, uword msg_len,
 
   if (PREDICT_FALSE (am->elog_trace_api_messages))
     {
-      /* *INDENT-OFF* */
       ELOG_TYPE_DECLARE (e) =
         {
           .format = "api-msg-done(%s): %s",
@@ -605,7 +598,6 @@ msg_handler_internal (api_main_t *am, void *the_msg, uword msg_len,
             "mp-safe",
           }
         };
-      /* *INDENT-ON* */
 
       struct
       {

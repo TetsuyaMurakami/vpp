@@ -387,7 +387,6 @@ vl_api_sw_interface_dump_t_handler (vl_api_sw_interface_dump_t * mp)
       vec_add1 (filter, 0);	/* Ensure it's a C string for strcasecmp() */
     }
 
-  /* *INDENT-OFF* */
   pool_foreach (swif, im->sw_interfaces)
    {
     if (!vnet_swif_is_api_visible (swif))
@@ -401,7 +400,6 @@ vl_api_sw_interface_dump_t_handler (vl_api_sw_interface_dump_t * mp)
 
     send_sw_interface_details (am, rp, swif, name, mp->context);
   }
-  /* *INDENT-ON* */
 
   vec_free (name);
   vec_free (filter);
@@ -581,7 +579,7 @@ ip_table_bind (fib_protocol_t fproto, u32 sw_if_index, u32 table_id)
   fib_index = fib_table_find (fproto, table_id);
   mfib_index = mfib_table_find (fproto, table_id);
 
-  if (~0 == fib_index || ~0 == mfib_index)
+  if (~0 == fib_index)
     {
       return (VNET_API_ERROR_NO_SUCH_FIB);
     }
@@ -603,7 +601,8 @@ ip_table_bind (fib_protocol_t fproto, u32 sw_if_index, u32 table_id)
   /* clang-format on */
 
   fib_table_bind (fproto, sw_if_index, fib_index);
-  mfib_table_bind (fproto, sw_if_index, mfib_index);
+  if (mfib_index != ~0)
+    mfib_table_bind (fproto, sw_if_index, mfib_index);
 
   return (0);
 }
@@ -810,14 +809,12 @@ link_state_process (vlib_main_t * vm,
 	  if (event_by_sw_if_index[i] == 0)
 	    continue;
 
-          /* *INDENT-OFF* */
           pool_foreach (reg, vam->interface_events_registrations)
            {
             vl_reg = vl_api_client_index_to_registration (reg->client_index);
             if (vl_reg)
 	      send_sw_interface_event (vam, reg, vl_reg, i, event_by_sw_if_index[i]);
           }
-          /* *INDENT-ON* */
 	}
       vec_reset_length (event_by_sw_if_index);
     }
@@ -833,13 +830,11 @@ static clib_error_t *sw_interface_add_del_function (vnet_main_t * vm,
 						    u32 sw_if_index,
 						    u32 flags);
 
-/* *INDENT-OFF* */
 VLIB_REGISTER_NODE (link_state_process_node,static) = {
   .function = link_state_process,
   .type = VLIB_NODE_TYPE_PROCESS,
   .name = "vpe-link-state-process",
 };
-/* *INDENT-ON* */
 
 VNET_SW_INTERFACE_ADMIN_UP_DOWN_FUNCTION (admin_up_down_function);
 VNET_HW_INTERFACE_LINK_UP_DOWN_FUNCTION (link_up_down_function);
@@ -1026,19 +1021,17 @@ vl_api_sw_interface_set_interface_name_t_handler (
 {
   vl_api_sw_interface_set_interface_name_reply_t *rmp;
   vnet_main_t *vnm = vnet_get_main ();
-  u32 sw_if_index = ntohl (mp->sw_if_index);
-  vnet_sw_interface_t *si = vnet_get_sw_interface (vnm, sw_if_index);
   clib_error_t *error;
   int rv = 0;
+
+  VALIDATE_SW_IF_INDEX (mp);
+
+  u32 sw_if_index = ntohl (mp->sw_if_index);
+  vnet_sw_interface_t *si = vnet_get_sw_interface (vnm, sw_if_index);
 
   if (mp->name[0] == 0)
     {
       rv = VNET_API_ERROR_INVALID_VALUE;
-      goto out;
-    }
-  if (si == 0)
-    {
-      rv = VNET_API_ERROR_INVALID_SW_IF_INDEX;
       goto out;
     }
 
@@ -1050,6 +1043,7 @@ vl_api_sw_interface_set_interface_name_t_handler (
     }
 
 out:
+  BAD_SW_IF_INDEX_LABEL;
   REPLY_MACRO (VL_API_SW_INTERFACE_SET_INTERFACE_NAME_REPLY);
 }
 
@@ -1477,12 +1471,10 @@ vl_api_create_subif_t_handler (vl_api_create_subif_t * mp)
 
   BAD_SW_IF_INDEX_LABEL;
 
-  /* *INDENT-OFF* */
   REPLY_MACRO2(VL_API_CREATE_SUBIF_REPLY,
   ({
     rmp->sw_if_index = ntohl(sub_sw_if_index);
   }));
-  /* *INDENT-ON* */
 }
 
 static void
@@ -1524,12 +1516,10 @@ vl_api_create_loopback_t_handler (vl_api_create_loopback_t * mp)
   mac_address_decode (mp->mac_address, &mac);
   rv = vnet_create_loopback_interface (&sw_if_index, (u8 *) & mac, 0, 0);
 
-  /* *INDENT-OFF* */
   REPLY_MACRO2(VL_API_CREATE_LOOPBACK_REPLY,
   ({
     rmp->sw_if_index = ntohl (sw_if_index);
   }));
-  /* *INDENT-ON* */
 }
 
 static void vl_api_create_loopback_instance_t_handler
@@ -1546,12 +1536,10 @@ static void vl_api_create_loopback_instance_t_handler
   rv = vnet_create_loopback_interface (&sw_if_index, (u8 *) & mac,
 				       is_specified, user_instance);
 
-  /* *INDENT-OFF* */
   REPLY_MACRO2(VL_API_CREATE_LOOPBACK_INSTANCE_REPLY,
   ({
     rmp->sw_if_index = ntohl (sw_if_index);
   }));
-  /* *INDENT-ON* */
 }
 
 static void

@@ -328,7 +328,6 @@ acl_fa_check_idle_sessions (acl_main_t * am, u16 thread_index, u64 now)
  */
 
 
-/* *INDENT-OFF* */
 #define foreach_acl_fa_cleaner_error \
 _(UNKNOWN_EVENT, "unknown event received")  \
 /* end  of errors */
@@ -347,7 +346,6 @@ static char *acl_fa_cleaner_error_strings[] = {
 #undef _
 };
 
-/* *INDENT-ON* */
 
 static vlib_node_registration_t acl_fa_session_cleaner_process_node;
 static vlib_node_registration_t acl_fa_worker_session_cleaner_process_node;
@@ -373,8 +371,9 @@ send_one_worker_interrupt (vlib_main_t * vm, acl_main_t * am,
 }
 
 void
-aclp_post_session_change_request (acl_main_t * am, u32 target_thread,
-				  u32 target_session, u32 request_type)
+aclp_post_session_change_request (acl_main_t *am, u32 target_thread,
+				  u32 target_session,
+				  acl_fa_sess_req_t request_type)
 {
   acl_fa_per_worker_data_t *pw_me =
     &am->per_worker_data[os_get_thread_index ()];
@@ -927,7 +926,6 @@ show_fa_sessions_hash (vlib_main_t * vm, u32 verbose)
 }
 
 
-/* *INDENT-OFF* */
 
 VLIB_REGISTER_NODE (acl_fa_worker_session_cleaner_process_node, static) = {
   .function = acl_fa_worker_conn_cleaner_process,
@@ -947,7 +945,6 @@ VLIB_REGISTER_NODE (acl_fa_session_cleaner_process_node, static) = {
 };
 
 
-/* *INDENT-ON* */
 
 /*
  * fd.io coding-style-patch-verification: ON

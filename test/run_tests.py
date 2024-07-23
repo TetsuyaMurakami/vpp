@@ -14,6 +14,7 @@ from multiprocessing import Process, Pipe, get_context
 from multiprocessing.queues import Queue
 from multiprocessing.managers import BaseManager
 from config import config, num_cpus, available_cpus, max_vpp_cpus
+from vpp_papi import VPPApiJSONFiles
 from asfframework import (
     VppTestRunner,
     get_testcase_doc_name,
@@ -787,28 +788,42 @@ class AllResults(dict):
                 f"Scheduled tests: {self.all_testcases}",
                 f"Executed tests: {self[TestResultCode.TEST_RUN]}",
                 f"Passed tests: {colorize(self[TestResultCode.PASS], GREEN)}",
-                f"Expected failures: {colorize(self[TestResultCode.EXPECTED_FAIL], GREEN)}"
-                if self[TestResultCode.EXPECTED_FAIL]
-                else None,
-                f"Skipped tests: {colorize(self[TestResultCode.SKIP], YELLOW)}"
-                if self[TestResultCode.SKIP]
-                else None,
-                f"Not Executed tests: {colorize(self.not_executed, RED)}"
-                if self.not_executed
-                else None,
-                f"Failures: {colorize(self[TestResultCode.FAIL], RED)}"
-                if self[TestResultCode.FAIL]
-                else None,
-                f"Unexpected passes: {colorize(self[TestResultCode.UNEXPECTED_PASS], RED)}"
-                if self[TestResultCode.UNEXPECTED_PASS]
-                else None,
-                f"Errors: {colorize(self[TestResultCode.ERROR], RED)}"
-                if self[TestResultCode.ERROR]
-                else None,
-                "Tests skipped due to lack of CPUS: "
-                f"{colorize(self[TestResultCode.SKIP_CPU_SHORTAGE], YELLOW)}"
-                if self[TestResultCode.SKIP_CPU_SHORTAGE]
-                else None,
+                (
+                    f"Expected failures: {colorize(self[TestResultCode.EXPECTED_FAIL], GREEN)}"
+                    if self[TestResultCode.EXPECTED_FAIL]
+                    else None
+                ),
+                (
+                    f"Skipped tests: {colorize(self[TestResultCode.SKIP], YELLOW)}"
+                    if self[TestResultCode.SKIP]
+                    else None
+                ),
+                (
+                    f"Not Executed tests: {colorize(self.not_executed, RED)}"
+                    if self.not_executed
+                    else None
+                ),
+                (
+                    f"Failures: {colorize(self[TestResultCode.FAIL], RED)}"
+                    if self[TestResultCode.FAIL]
+                    else None
+                ),
+                (
+                    f"Unexpected passes: {colorize(self[TestResultCode.UNEXPECTED_PASS], RED)}"
+                    if self[TestResultCode.UNEXPECTED_PASS]
+                    else None
+                ),
+                (
+                    f"Errors: {colorize(self[TestResultCode.ERROR], RED)}"
+                    if self[TestResultCode.ERROR]
+                    else None
+                ),
+                (
+                    "Tests skipped due to lack of CPUS: "
+                    f"{colorize(self[TestResultCode.SKIP_CPU_SHORTAGE], YELLOW)}"
+                    if self[TestResultCode.SKIP_CPU_SHORTAGE]
+                    else None
+                ),
             ]
         )
 
@@ -905,6 +920,9 @@ def parse_results(results):
 
 if __name__ == "__main__":
     print(f"Config is: {config}")
+
+    if config.api_preload:
+        VPPApiJSONFiles.load_api(apidir=config.extern_apidir + [config.vpp_install_dir])
 
     if config.sanity:
         print("Running sanity test case.")

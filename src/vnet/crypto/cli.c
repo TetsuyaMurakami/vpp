@@ -36,16 +36,13 @@ show_crypto_engines_command_fn (vlib_main_t * vm,
     }
 
   vlib_cli_output (vm, "%-20s%-8s%s", "Name", "Prio", "Description");
-  /* *INDENT-OFF* */
   vec_foreach (p, cm->engines)
     {
       vlib_cli_output (vm, "%-20s%-8u%s", p->name, p->priority, p->desc);
     }
-  /* *INDENT-ON* */
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (show_crypto_engines_command, static) =
 {
   .path = "show crypto engines",
@@ -151,14 +148,12 @@ show_crypto_handlers_command_fn (vlib_main_t * vm,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (show_crypto_handlers_command, static) =
 {
   .path = "show crypto handlers",
   .short_help = "show crypto handlers",
   .function = show_crypto_handlers_command_fn,
 };
-/* *INDENT-ON* */
 
 static clib_error_t *
 set_crypto_handler_command_fn (vlib_main_t * vm,
@@ -209,13 +204,11 @@ set_crypto_handler_command_fn (vlib_main_t * vm,
       char *key;
       u8 *value;
 
-      /* *INDENT-OFF* */
       hash_foreach_mem (key, value, cm->alg_index_by_name,
       ({
         (void) value;
         rc += vnet_crypto_set_handler2 (key, engine, oct);
       }));
-      /* *INDENT-ON* */
 
       if (rc)
 	vlib_cli_output (vm, "failed to set crypto engine!");
@@ -241,7 +234,6 @@ done:
   return error;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (set_crypto_handler_command, static) =
 {
   .path = "set crypto handler",
@@ -249,7 +241,6 @@ VLIB_CLI_COMMAND (set_crypto_handler_command, static) =
     " [simple|chained]",
   .function = set_crypto_handler_command_fn,
 };
-/* *INDENT-ON* */
 
 static u8 *
 format_vnet_crypto_async_handlers (u8 * s, va_list * args)
@@ -300,14 +291,12 @@ show_crypto_async_handlers_command_fn (vlib_main_t * vm,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (show_crypto_async_handlers_command, static) =
 {
   .path = "show crypto async handlers",
   .short_help = "show crypto async handlers",
   .function = show_crypto_async_handlers_command_fn,
 };
-/* *INDENT-ON* */
 
 
 static clib_error_t *
@@ -337,14 +326,12 @@ show_crypto_async_status_command_fn (vlib_main_t * vm,
   return 0;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (show_crypto_async_status_command, static) =
 {
   .path = "show crypto async status",
   .short_help = "show crypto async status",
   .function = show_crypto_async_status_command_fn,
 };
-/* *INDENT-ON* */
 
 static clib_error_t *
 set_crypto_async_handler_command_fn (vlib_main_t * vm,
@@ -388,13 +375,11 @@ set_crypto_async_handler_command_fn (vlib_main_t * vm,
       char *key;
       u8 *value;
 
-      /* *INDENT-OFF* */
       hash_foreach_mem (key, value, cm->async_alg_index_by_name,
       ({
         (void) value;
         rc += vnet_crypto_set_async_handler2 (key, engine);
       }));
-      /* *INDENT-ON* */
 
       if (rc)
 	vlib_cli_output (vm, "failed to set crypto engine!");
@@ -420,14 +405,51 @@ done:
   return error;
 }
 
-/* *INDENT-OFF* */
 VLIB_CLI_COMMAND (set_crypto_async_handler_command, static) =
 {
   .path = "set crypto async handler",
   .short_help = "set crypto async handler type [type2 type3 ...] engine",
   .function = set_crypto_async_handler_command_fn,
 };
-/* *INDENT-ON* */
+
+static clib_error_t *
+set_crypto_async_dispatch_command_fn (vlib_main_t *vm, unformat_input_t *input,
+				      vlib_cli_command_t *cmd)
+{
+  unformat_input_t _line_input, *line_input = &_line_input;
+  clib_error_t *error = 0;
+  u8 adaptive = 0;
+  u8 mode = VLIB_NODE_STATE_INTERRUPT;
+
+  if (!unformat_user (input, unformat_line_input, line_input))
+    return 0;
+
+  while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (line_input, "polling"))
+	mode = VLIB_NODE_STATE_POLLING;
+      else if (unformat (line_input, "interrupt"))
+	mode = VLIB_NODE_STATE_INTERRUPT;
+      else if (unformat (line_input, "adaptive"))
+	adaptive = 1;
+      else
+	{
+	  error = clib_error_return (0, "invalid params");
+	  goto done;
+	}
+    }
+
+  vnet_crypto_set_async_dispatch (mode, adaptive);
+done:
+  unformat_free (line_input);
+  return error;
+}
+
+VLIB_CLI_COMMAND (set_crypto_async_dispatch_mode_command, static) = {
+  .path = "set crypto async dispatch mode",
+  .short_help = "set crypto async dispatch mode <polling|interrupt|adaptive>",
+  .function = set_crypto_async_dispatch_command_fn,
+};
 
 /*
  * fd.io coding-style-patch-verification: ON

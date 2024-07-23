@@ -17,6 +17,7 @@
 
 #include <vnet/vnet.h>
 #include <vnet/plugin/plugin.h>
+#include <vppinfra/unix.h>
 #include <fateshare/fateshare.h>
 
 #include <vlibapi/api.h>
@@ -26,7 +27,11 @@
 
 #include <sys/types.h>
 #include <sys/wait.h>
+#ifdef __linux__
 #include <sys/prctl.h> // prctl(), PR_SET_PDEATHSIG
+#else
+#include <sys/procctl.h>
+#endif /* __linux__ */
 #include <limits.h>
 
 fateshare_main_t fateshare_main;
@@ -86,12 +91,23 @@ launch_monitor (fateshare_main_t *kmp)
     {
       dup2 (logfd, 1);
       dup2 (logfd, 2);
+#ifdef __linux__
       int r = prctl (PR_SET_PDEATHSIG, SIGTERM);
       if (r == -1)
 	{
 	  perror (0);
 	  exit (1);
 	}
+#else
+      int r, s = SIGTERM;
+
+      r = procctl (P_PID, 0, PROC_PDEATHSIG_CTL, &s);
+      if (r == -1)
+	{
+	  perror (0);
+	  exit (1);
+	}
+#endif /* __linux__ */
       pid_t current_ppid = getppid ();
       if (current_ppid != ppid_before_fork)
 	{
@@ -197,24 +213,30 @@ fateshare_config (vlib_main_t *vm, unformat_input_t *input)
 
   if (fmp->monitor_cmd == 0)
     {
-      char *p, path[PATH_MAX];
-      int rv;
+      char *p;
+      u8 *path;
 
       /* find executable path */
-      if ((rv = readlink ("/proc/self/exe", path, PATH_MAX - 1)) == -1)
-	return clib_error_return (
-	  0, "could not stat /proc/self/exe - set monitor manually");
+      path = os_get_exec_path ();
 
-      /* readlink doesn't provide null termination */
-      path[rv] = 0;
+      if (path == 0)
+	return clib_error_return (
+	  0, "could not get exec path - set monitor manually");
+
+      /* add null termination */
+      vec_add1 (path, 0);
 
       /* strip filename */
-      if ((p = strrchr (path, '/')) == 0)
-	return clib_error_return (
-	  0, "could not determine vpp directory - set monitor manually");
+      if ((p = strrchr ((char *) path, '/')) == 0)
+	{
+	  vec_free (path);
+	  return clib_error_return (
+	    0, "could not determine vpp directory - set monitor manually");
+	}
       *p = 0;
 
       fmp->monitor_cmd = format (0, "%s/vpp_fateshare_monitor\0", path);
+      vec_free (path);
     }
   if (fmp->monitor_logfile == 0)
     {

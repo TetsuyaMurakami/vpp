@@ -190,6 +190,7 @@ fib_api_path_decode (vl_api_fib_path_t *in,
         break;
     case FIB_API_PATH_TYPE_DROP:
         out->frp_flags |= FIB_ROUTE_PATH_DROP;
+        out->frp_sw_if_index = ntohl(in->sw_if_index);
         break;
     case FIB_API_PATH_TYPE_LOCAL:
         out->frp_flags |= FIB_ROUTE_PATH_LOCAL;
@@ -491,6 +492,21 @@ fib_api_route_add_del (u8 is_add,
     }
 
     return (0);
+}
+
+u8 *
+format_vl_api_address_union (u8 * s, va_list * args)
+{
+  const vl_api_address_union_t *addr =
+    va_arg (*args, vl_api_address_union_t *);
+  vl_api_address_family_t af = va_arg (*args, int);
+
+  if (ADDRESS_IP6 == af)
+    s = format (s, "%U", format_ip6_address, addr->ip6);
+  else
+    s = format (s, "%U", format_ip4_address, addr->ip4);
+
+  return s;
 }
 
 u8*

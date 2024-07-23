@@ -565,7 +565,6 @@ format_dpdk_device (u8 * s, va_list * args)
 
   if (ret >= 0 && ret <= len)
     {
-      /* *INDENT-OFF* */
       vec_foreach_index(i, xd->xstats)
         {
           xstat = vec_elt_at_index(xd->xstats, i);
@@ -577,7 +576,6 @@ format_dpdk_device (u8 * s, va_list * args)
                           xstat->value);
             }
         }
-      /* *INDENT-ON* */
 
       vec_free (xstat_names);
     }
@@ -608,10 +606,9 @@ format_dpdk_tx_trace (u8 * s, va_list * va)
   dpdk_main_t *dm = &dpdk_main;
   dpdk_device_t *xd = vec_elt_at_index (dm->devices, t->device_index);
   u32 indent = format_get_indent (s);
-  vnet_sw_interface_t *sw = vnet_get_sw_interface (vnm, xd->sw_if_index);
 
-  s = format (s, "%U tx queue %d",
-	      format_vnet_sw_interface_name, vnm, sw, t->queue_index);
+  s = format (s, "%U tx queue %d", format_vnet_sw_if_index_name, vnm,
+	      xd->sw_if_index, t->queue_index);
 
   s = format (s, "\n%Ubuffer 0x%x: %U", format_white_space, indent,
 	      t->buffer_index, format_vnet_buffer_no_chain, &t->buffer);
@@ -638,10 +635,9 @@ format_dpdk_rx_trace (u8 * s, va_list * va)
   dpdk_device_t *xd = vec_elt_at_index (dm->devices, t->device_index);
   format_function_t *f;
   u32 indent = format_get_indent (s);
-  vnet_sw_interface_t *sw = vnet_get_sw_interface (vnm, xd->sw_if_index);
 
-  s = format (s, "%U rx queue %d",
-	      format_vnet_sw_interface_name, vnm, sw, t->queue_index);
+  s = format (s, "%U rx queue %d", format_vnet_sw_if_index_name, vnm,
+	      xd->sw_if_index, t->queue_index);
 
   s = format (s, "\n%Ubuffer 0x%x: %U", format_white_space, indent,
 	      t->buffer_index, format_vnet_buffer_no_chain, &t->buffer);

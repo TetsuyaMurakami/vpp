@@ -288,9 +288,9 @@ vl_api_trace_dump_t_handler (vl_api_trace_dump_t * mp)
 	    {
 	      /* More threads, but not more in this thread? */
 	      if (j == (vec_len (client_trace_cache[i]) - 1))
-		dmp->more_threads = 1;
+		last_more_threads = dmp->more_threads = 1;
 	      else
-		dmp->more_this_thread = 1;
+		last_more_this_thread = dmp->more_this_thread = 1;
 	    }
 	  /* Done, may or may not be at the end of a batch. */
 	  dmp->done = 0;
@@ -552,13 +552,11 @@ tracedump_init (vlib_main_t * vm)
 }
 
 VLIB_INIT_FUNCTION (tracedump_init);
-/* *INDENT-OFF* */
 VLIB_PLUGIN_REGISTER () =
 {
   .version = VPP_BUILD_VER,
   .description = "Streaming packet trace dump plugin",
 };
-/* *INDENT-ON* */
 
 /*
  * fd.io coding-style-patch-verification: ON

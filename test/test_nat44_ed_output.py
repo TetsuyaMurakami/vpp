@@ -9,6 +9,7 @@ from scapy.data import IP_PROTOS
 from framework import VppTestCase
 from asfframework import VppTestRunner
 from vpp_papi import VppEnum
+from config import config
 
 
 def get_nat44_ed_in2out_worker_index(ip, vpp_worker_count):
@@ -21,6 +22,7 @@ def get_nat44_ed_in2out_worker_index(ip, vpp_worker_count):
     return 1 + h % vpp_worker_count
 
 
+@unittest.skipIf("nat" in config.excluded_plugins, "Exclude NAT plugin tests")
 class TestNAT44EDOutput(VppTestCase):
     """NAT44 ED output feature Test Case"""
 
@@ -216,7 +218,7 @@ class TestNAT44EDOutput(VppTestCase):
         # send FIN+ACK packet in->out - will cause session to be wiped
         # but won't create a new session
         p = (
-            Ether(src=pg0.remote_mac, dst=pg0.local_mac)
+            Ether(src=pg1.remote_mac, dst=pg1.local_mac)
             / IP(src=local_host, dst=remote_host)
             / TCP(sport=local_sport, dport=remote_dport, flags="FA", seq=300, ack=101)
         )
